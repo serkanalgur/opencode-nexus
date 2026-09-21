@@ -151,11 +151,14 @@ import { describe, it, expect } from 'bun:test'
 import { NexusOrchestrator } from '../src/orchestrator'
 
 describe('NexusOrchestrator', () => {
-  it('should spawn agents', async () => {
+  it('should spawn agents with real sessions', async () => {
     const orchestrator = new NexusOrchestrator()
+    // Initialize with mock context for testing
+    orchestrator.initialize(mockCtx)
     const agent = await orchestrator.spawnAgent({ role: 'coder' })
     expect(agent).toBeDefined()
     expect(agent.role).toBe('coder')
+    expect(agent.sessionID).toBeDefined()
   })
 })
 ```

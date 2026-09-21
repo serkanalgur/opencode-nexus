@@ -9,7 +9,7 @@
 
 **Adaptive Multi-Agent Orchestration with Cost Intelligence**
 
-[Installation](#installation) • [Quick Start](#quick-start) • [Features](#features) • [Architecture](#architecture) • [Configuration](#configuration) • [API Reference](#api-reference) • [Development](#development) • [Contributing](#contributing)
+[Installation](#installation) • [Quick Start](#quick-start) • [Features](#features) • [TUI Commands](#tui-commands) • [Tools](#tools) • [Configuration](#configuration) • [Development](#development) • [Contributing](#contributing)
 
 </div>
 
@@ -17,18 +17,19 @@
 
 ## What is OpenCode Nexus?
 
-OpenCode Nexus is a next-generation agent orchestration plugin for [OpenCode V2](https://opencode.ai) that introduces **adaptive multi-agent execution** with **cost-aware routing**, **real pub/sub communication**, **self-healing capabilities**, and **shared memory** between agents.
+OpenCode Nexus is an agent orchestration plugin for [OpenCode V2](https://opencode.ai) that spawns **real sub-agent sessions** with **cost-aware routing**, **DAG-based task execution**, **self-healing**, and a **TUI dashboard**.
 
-### Why Nexus?
+### Key Capabilities
 
-| Problem | Existing Solutions | Nexus Solution |
-|---------|-------------------|----------------|
-| Sequential bottleneck | Agents run one-by-one | **Dynamic DAG with true parallelism** |
-| No agent communication | Agents operate in isolation | **Real pub/sub with topic routing** |
-| Cost blindness | Same model for all tasks | **Intelligent cost-aware model selection** |
-| No self-healing | Manual restart on crash | **Auto-respawn with context transfer** |
-| Memory isolation | Each agent starts fresh | **Cross-agent shared memory store** |
-| Fixed architecture | 19+ predetermined agents | **Dynamic spawning based on complexity** |
+| Capability | Description |
+|------------|-------------|
+| **Real Sessions** | Each agent runs in its own OpenCode session via `ctx.session.create()` |
+| **Role-Based Agents** | Architect, Coder, Reviewer, Tester, Explorer, Documenter — each with specialized prompts |
+| **DAG Execution** | Tasks are parallelized based on dependency graphs |
+| **Cost-Aware Routing** | Automatically selects cheaper models when budget is tight |
+| **Self-Healing** | Retries failed tasks with exponential backoff |
+| **TUI Dashboard** | Monitor agents, budget, and config from the terminal |
+| **Slash Commands** | `/nexus`, `/nexus-dashboard`, `/nexus-model`, and more |
 
 ---
 
@@ -57,7 +58,33 @@ Or manually add to `~/.config/opencode/opencode.json`:
 
 ## Quick Start
 
-### 1. Basic Usage
+### 1. Configure Agent Models
+
+Press **Ctrl+N** or type `/nexus` to open the configuration dialog and select models for each agent role.
+
+### 2. Use Slash Commands
+
+```
+/nexus              # Open full configuration
+/nexus config       # Configure models & budget
+/nexus status       # Show config summary
+/nexus dashboard    # Show dashboard
+/nexus model        # Select model for a role
+/nexus reset        # Reset to defaults
+```
+
+### 3. Spawn Agents via Tools
+
+From any agent prompt, use the nexus tools:
+
+```
+Use the nexus.spawn tool to create a coder agent for implementing JWT auth
+Use the nexus.status tool to check orchestrator state
+Use the nexus.agents tool to list all spawned agents
+Use the nexus.costs tool to see cost breakdown
+```
+
+### 4. Programmatic Usage
 
 ```typescript
 import { NexusOrchestrator } from '@serkanalgur/opencode-nexus'
@@ -66,7 +93,13 @@ const orchestrator = new NexusOrchestrator({
   budget: { maxTotalCost: 10.00 }
 })
 
-// Execute multiple tasks in parallel
+// Initialize with OpenCode context (done automatically by plugin)
+orchestrator.initialize(ctx)
+
+// Spawn a real agent session
+const agent = await orchestrator.spawnAgent({ role: 'coder' })
+
+// Execute tasks in DAG
 const result = await orchestrator.execute({
   tasks: [
     {
@@ -79,17 +112,6 @@ const result = await orchestrator.execute({
       files: { include: ['src/auth/**'] },
       priority: 'high',
       status: 'pending'
-    },
-    {
-      id: 'task-2',
-      name: 'Write tests',
-      description: 'Add unit tests for auth',
-      requiredRole: 'tester',
-      complexity: { overall: 30, factors: { fileCount: 2, codeLines: 150, dependencyDepth: 1, domainKnowledge: 20, riskLevel: 'low' } },
-      dependencies: ['task-1'],
-      files: { include: ['tests/auth/**'] },
-      priority: 'normal',
-      status: 'pending'
     }
   ]
 })
@@ -97,59 +119,42 @@ const result = await orchestrator.execute({
 console.log(`Completed in ${result.totalDuration}ms, cost: $${result.totalCost}`)
 ```
 
-### 2. Using Slash Commands
-
-```
-/nexus status      # Show orchestrator status
-/nexus agents      # List active agents
-/nexus costs       # Show cost breakdown
-/nexus pause       # Pause execution
-/nexus resume      # Resume execution
-/nexus dashboard   # Open web dashboard
-```
-
-### 3. Agent Communication
-
-```typescript
-// Subscribe to topics
-orchestrator.publish('architecture', {
-  from: 'architect',
-  type: 'decision-made',
-  payload: { decision: 'Use event sourcing', rationale: '...' },
-  topic: 'architecture',
-  metadata: { priority: 'high', requiresResponse: false }
-})
-
-// Send direct message
-orchestrator.send('coder-1', {
-  from: 'reviewer',
-  type: 'review-completed',
-  payload: { approved: true, comments: [...] },
-  metadata: { priority: 'normal', requiresResponse: true }
-})
-```
-
 ---
 
 ## Features
 
-### Dynamic DAG Execution
+### Real OpenCode Sessions
 
-Unlike static dependency graphs, Nexus builds and modifies the DAG at runtime based on task outcomes.
+Each agent runs in its own OpenCode session with the correct model and role-specific system prompt:
 
 ```typescript
-// Tasks are automatically parallelized based on dependencies
-const tasks = [
-  { id: 'schema', dependencies: [] },      // Runs immediately
-  { id: 'api', dependencies: ['schema'] },  // Waits for schema
-  { id: 'ui', dependencies: ['api'] },      // Waits for api
-  { id: 'docs', dependencies: ['api'] }     // Parallel with ui!
-]
+// Creates a real OpenCode session
+const session = await ctx.session.create({ title: '[Nexus] coder-agent-a1b2c3d4' })
+
+// Switches to the appropriate agent and model
+await ctx.session.switchAgent({ sessionID: session.id, agent: 'build' })
+await ctx.session.switchModel({ sessionID: session.id, model: { providerID: 'anthropic', id: 'claude-sonnet-4-6' } })
+
+// Sends the task prompt
+await ctx.session.prompt({ sessionID: session.id, text: 'You are a senior software engineer...' })
 ```
 
-### Cost-Aware Routing
+### Role-Specific System Prompts
 
-Every model selection considers cost vs quality tradeoffs.
+Each agent role gets a specialized prompt:
+
+| Role | Focus |
+|------|-------|
+| **Architect** | System design, architecture patterns, high-level decisions |
+| **Coder** | Clean, efficient code following best practices |
+| **Reviewer** | Code review for correctness, security, performance |
+| **Tester** | Comprehensive tests, edge cases, quality assurance |
+| **Explorer** | Codebase navigation, architecture analysis |
+| **Documenter** | Clear technical documentation |
+
+### Cost-Aware Model Selection
+
+Nexus automatically selects cheaper models when budget is running low:
 
 ```typescript
 const orchestrator = new NexusOrchestrator({
@@ -160,41 +165,13 @@ const orchestrator = new NexusOrchestrator({
   }
 })
 
-// Automatically selects optimal model based on:
-// - Task complexity
-// - Remaining budget
-// - Required quality level
-```
-
-### Real Pub/Sub Communication
-
-Agents communicate through a message broker, not direct calls.
-
-```typescript
-// Topic-based pub/sub
-orchestrator.publish('auth-decisions', {
-  from: 'architect',
-  type: 'decision-made',
-  payload: { approach: 'JWT with refresh tokens' }
-})
-
-// Direct messaging
-orchestrator.send('coder', {
-  from: 'reviewer',
-  type: 'review-requested',
-  payload: { file: 'src/auth.ts', focus: 'security' }
-})
-
-// Fan-out to multiple agents
-orchestrator.fanOut(
-  { from: 'architect', type: 'context-update', payload: { ... } },
-  ['coder', 'reviewer', 'tester']
-)
+// When budget < $1 remaining, falls back to free tier
+// Otherwise uses configured model for the role
 ```
 
 ### Self-Healing
 
-Agents automatically recover from failures.
+Failed tasks are automatically retried with exponential backoff:
 
 ```typescript
 const orchestrator = new NexusOrchestrator({
@@ -202,44 +179,87 @@ const orchestrator = new NexusOrchestrator({
     enabled: true,
     maxRetries: 3,
     retryDelay: 1000,
-    backoffMultiplier: 2,
-    contextTransfer: true  // Transfer partial results to new agent
+    backoffMultiplier: 2  // 1s, 2s, 4s delays
   }
 })
 ```
 
-### Shared Memory
+---
 
-Agents share context through a structured memory store.
+## TUI Commands
 
-```typescript
-// Set memory
-orchestrator.setMemory('project', 'architecture', {
-  pattern: 'event-sourcing',
-  decision: 'Use for order service'
-}, 'architect')
+| Command | Alias | Description |
+|---------|-------|-------------|
+| `/nexus` | — | Open full configuration dialog |
+| `/nexus config` | `/nc` | Configure models & budget |
+| `/nexus dashboard` | `/nd` | Show dashboard with models, budget, commands |
+| `/nexus model` | `/nm` | Select model for a role |
+| `/nexus status` | `/ns` | Show config summary |
+| `/nexus reset` | — | Reset all settings to defaults |
 
-// Get memory
-const arch = orchestrator.getMemory('project', 'architecture')
+**Keyboard shortcut:** `Ctrl+N` opens the main configuration dialog.
 
-// Search memory
-const results = orchestrator.searchMemory('event sourcing', 'project')
+---
+
+## Tools
+
+Register these tools in your agent prompts:
+
+| Tool | Description | Input |
+|------|-------------|-------|
+| `nexus.status` | Orchestrator status | `{ detailed?: boolean }` |
+| `nexus.agents` | List spawned agents | `{ filter?: string }` |
+| `nexus.costs` | Cost report & budget | `{}` |
+| `nexus.dashboard` | Full state for dashboard | `{}` |
+| `nexus.spawn` | Spawn a sub-agent | `{ role: string, task: string, model?: string }` |
+
+### Tool Examples
+
+```
+# Spawn a coder agent
+Use nexus.spawn with role="coder" and task="Implement JWT auth middleware"
+
+# Check status
+Use nexus.status with detailed=true
+
+# List agents
+Use nexus.agents with filter="idle"
+
+# Get cost report
+Use nexus.costs
 ```
 
-### Real-Time Dashboard
+---
 
-Monitor your orchestrator state via web UI.
+## Configuration
 
-```typescript
-const orchestrator = new NexusOrchestrator({
-  dashboard: {
-    enabled: true,
-    port: 4747,
-    host: '127.0.0.1'
-  }
-})
+### Agent Models (TUI)
 
-// Open http://localhost:4747 in browser
+Configure via `/nexus` or `Ctrl+N`:
+
+```
+🏗️ Architect: anthropic/claude-sonnet-4-6
+💻 Coder:     anthropic/claude-sonnet-4-6
+🔍 Reviewer:  openai/gpt-5-mini
+🧪 Tester:    anthropic/claude-haiku-4-5
+🔬 Explorer:  google/gemini-2.5-flash
+📝 Documenter: anthropic/claude-haiku-4-5
+```
+
+### Budget
+
+```
+💰 Max Total: $10.00
+   Max Per Task: $1.00
+   Alert Threshold: 20%
+```
+
+### Self-Healing
+
+```
+🛡️ Enabled: ✅
+   Max Retries: 3
+   Context Transfer: ✅
 ```
 
 ---
@@ -248,129 +268,42 @@ const orchestrator = new NexusOrchestrator({
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        NEXUS ORCHESTRATOR                       │
+│                        NEXUS PLUGIN                              │
 │                                                                 │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
-│  │    DAG       │  │   Cost       │  │   Adaptive   │          │
-│  │  Executor    │  │  Router      │  │  Spawner     │          │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘          │
-│         │                 │                 │                    │
-│  ┌──────┴─────────────────┴─────────────────┴───────┐          │
-│  │              AGENT LIFECYCLE MANAGER              │          │
+│  ┌──────────────────────────────────────────────────┐          │
+│  │              SERVER PLUGIN (index.ts)              │          │
+│  │  • Tool registration (status, agents, costs,      │          │
+│  │    dashboard, spawn)                              │          │
+│  │  • Session hook for /nexus commands               │          │
+│  │  • State persistence to storage                   │          │
 │  └──────────────────────────────────────────────────┘          │
 │                                                                 │
 │  ┌──────────────────────────────────────────────────┐          │
-│  │           COMMUNICATION LAYER (Pub/Sub)           │          │
+│  │            ORCHESTRATOR (orchestrator.ts)          │          │
+│  │  • Real OpenCode session creation                  │          │
+│  │  • DAG-based task execution                        │          │
+│  │  • Role-specific system prompts                    │          │
+│  │  • Cost tracking & budget enforcement              │          │
+│  │  • Self-healing with retry & backoff               │          │
 │  └──────────────────────────────────────────────────┘          │
 │                                                                 │
 │  ┌──────────────────────────────────────────────────┐          │
-│  │              SHARED MEMORY STORE                  │          │
+│  │              TUI PLUGIN (tui.tsx)                  │          │
+│  │  • /nexus slash commands                           │          │
+│  │  • /nexus-dashboard                                │          │
+│  │  • Configuration dialogs (model selection)         │          │
+│  │  • Keyboard shortcut (Ctrl+N)                      │          │
 │  └──────────────────────────────────────────────────┘          │
 │                                                                 │
 │  ┌──────────────────────────────────────────────────┐          │
-│  │            DASHBOARD & MONITORING                  │          │
+│  │              OpenCode SESSION API                   │          │
+│  │  ctx.session.create() → session per agent          │          │
+│  │  ctx.session.prompt()  → send task                 │          │
+│  │  ctx.session.wait()    → wait for completion       │          │
+│  │  ctx.session.context() → read results              │          │
 │  └──────────────────────────────────────────────────┘          │
 └─────────────────────────────────────────────────────────────────┘
 ```
-
----
-
-## Configuration
-
-### Global Config
-
-```jsonc
-// ~/.config/opencode/nexus.jsonc
-{
-  "$schema": "https://serkanalgur.com/opencode-nexus/schema.json",
-  
-  "maxConcurrency": 5,
-  "budget": {
-    "maxTotalCost": 10.00,
-    "maxCostPerTask": 1.00,
-    "alertThreshold": 0.2
-  },
-  "selfHealing": {
-    "enabled": true,
-    "maxRetries": 3,
-    "contextTransfer": true
-  },
-  "communication": {
-    "mode": "pubsub",
-    "persistence": true
-  },
-  "dashboard": {
-    "enabled": true,
-    "port": 4747
-  }
-}
-```
-
-### Project Config
-
-```jsonc
-// .opencode/nexus.jsonc
-{
-  "budget": {
-    "maxTotalCost": 5.00
-  },
-  "agentRoles": {
-    "security-reviewer": {
-      "model": "anthropic/claude-sonnet-4-6",
-      "tools": ["read", "grep", "git"]
-    }
-  }
-}
-```
-
----
-
-## API Reference
-
-### NexusOrchestrator
-
-```typescript
-class NexusOrchestrator {
-  // Core
-  execute(request: ExecutionRequest): Promise<ExecutionResult>
-  spawnAgent(config: SpawnConfig): Promise<Agent>
-  terminateAgent(agentId: string): Promise<void>
-  
-  // Communication
-  publish(topic: string, message: AgentMessage): void
-  subscribe(topic: string, handler: Function): Unsubscribe
-  send(agentId: string, message: AgentMessage): void
-  
-  // Memory
-  setMemory(scope: MemoryScope, key: string, value: unknown, author: string): void
-  getMemory(scope: MemoryScope, key: string): MemoryEntry | undefined
-  searchMemory(query: string, scope?: MemoryScope): MemoryEntry[]
-  
-  // Query
-  getStatus(detailed?: boolean): string
-  listAgents(filter?: string): string
-  getCostReport(): string
-  
-  // Control
-  pause(): void
-  resume(): void
-  shutdown(): void
-  
-  // Events
-  on(event: string, handler: Function): Unsubscribe
-}
-```
-
-### Tools
-
-| Tool | Description | Parameters |
-|------|-------------|------------|
-| `nexus_status` | Get orchestrator status | `{ detailed?: boolean }` |
-| `nexus_agents` | List all agents | `{ filter?: string }` |
-| `nexus_costs` | Get cost report | `{}` |
-| `nexus_memory_get` | Get shared memory | `{ scope: string, key: string }` |
-| `nexus_memory_set` | Set shared memory | `{ scope: string, key: string, value: unknown }` |
-| `nexus_send` | Send message to agent | `{ to: string, message: AgentMessage }` |
 
 ---
 
@@ -390,25 +323,9 @@ bun run build
 # Run tests
 bun test
 
-# Development mode
-bun run dev
+# Type check
+npx tsc --noEmit
 ```
-
----
-
-## Benchmarks
-
-| Scenario | Sequential | Swarm | Ensemble | **Nexus** |
-|----------|-----------|-------|----------|-----------|
-| 3 independent tasks | 300s | 120s | 100s | **60s** |
-| Dependent chain (3) | 300s | 150s | 150s | **120s** |
-| Mixed parallel+serial | 300s | 130s | 110s | **70s** |
-
-| Metric | Swarm | **Nexus** |
-|--------|-------|-----------|
-| Tokens per task | 15,000 | **8,000** |
-| Agent overhead | 19 fixed | **Dynamic 2-5** |
-| Cost per session | $10 | **$4** |
 
 ---
 
