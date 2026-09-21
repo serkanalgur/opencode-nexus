@@ -16,7 +16,7 @@ export default Plugin.define({
           group: "Nexus",
           bind: "ctrl+n",
           palette: true,
-          slash: { name: "nexus", aliases: ["status"], arguments: false },
+          slash: { name: "nexus", aliases: ["status"], arguments: true },
           enabled: () => true,
           suggested: true,
           run: async () => {

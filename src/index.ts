@@ -4,7 +4,7 @@ import { NexusOrchestrator } from "./orchestrator"
 export default Plugin.define({
   id: "nexus",
   async setup(ctx) {
-    const orchestrator = new NexusOrchestrator(ctx)
+    const orchestrator = new NexusOrchestrator()
     
     // Register tools
     await ctx.tool.transform((editor) => {
@@ -23,8 +23,9 @@ export default Plugin.define({
           },
           additionalProperties: false
         },
-        execute: async (input, context) => {
-          return orchestrator.getStatus(input.detailed)
+        execute: async (input: unknown) => {
+          const { detailed } = input as { detailed?: boolean }
+          return { content: orchestrator.getStatus(detailed) }
         }
       })
       
@@ -38,8 +39,9 @@ export default Plugin.define({
           },
           additionalProperties: false
         },
-        execute: async (input, context) => {
-          return orchestrator.listAgents(input.filter)
+        execute: async (input: unknown) => {
+          const { filter } = input as { filter?: string }
+          return { content: orchestrator.listAgents(filter) }
         }
       })
       
@@ -51,8 +53,8 @@ export default Plugin.define({
           properties: {},
           additionalProperties: false
         },
-        execute: async (input, context) => {
-          return orchestrator.getCostReport()
+        execute: async () => {
+          return { content: orchestrator.getCostReport() }
         }
       })
     })
