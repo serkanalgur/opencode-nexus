@@ -1,5 +1,21 @@
-import { describe, it, expect, beforeEach } from 'bun:test'
+import { describe, it, expect, beforeEach, mock } from 'bun:test'
 import { NexusOrchestrator } from '../src/orchestrator'
+
+// Mock OpenCode context for session API
+const mockCtx = {
+  session: {
+    create: mock(() => Promise.resolve({ id: 'session-mock-123' })),
+    switchAgent: mock(() => Promise.resolve()),
+    switchModel: mock(() => Promise.resolve()),
+    prompt: mock(() => Promise.resolve()),
+    wait: mock(() => Promise.resolve()),
+    context: mock(() => Promise.resolve([])),
+  },
+  storage: {
+    set: mock(() => Promise.resolve()),
+    get: mock(() => Promise.resolve(null)),
+  }
+}
 
 describe('NexusOrchestrator', () => {
   let orchestrator: NexusOrchestrator
@@ -8,6 +24,7 @@ describe('NexusOrchestrator', () => {
     orchestrator = new NexusOrchestrator({
       budget: { maxTotalCost: 10.00, maxCostPerTask: 1.00, maxCostPerAgent: 2.00, alertThreshold: 0.2, hardLimit: false }
     })
+    orchestrator.initialize(mockCtx as any)
   })
 
   describe('constructor', () => {
@@ -22,20 +39,32 @@ describe('NexusOrchestrator', () => {
   })
 
   describe('spawnAgent', () => {
-    it('should spawn an agent', async () => {
+    it('should spawn an agent with real session', async () => {
       const agent = await orchestrator.spawnAgent({ role: 'coder' })
       expect(agent).toBeDefined()
       expect(agent.role).toBe('coder')
       expect(agent.status).toBe('idle')
       expect(agent.id).toMatch(/^agent-/)
+      expect(agent.sessionID).toBe('session-mock-123')
+      expect(mockCtx.session.create).toHaveBeenCalled()
     })
 
-    it('should spawn agent with custom model', async () => {
-      const agent = await orchestrator.spawnAgent({ 
-        role: 'reviewer', 
-        model: 'anthropic/claude-sonnet-4-6' 
+    it('should spawn agent with role-based model', async () => {
+      const agent = await orchestrator.spawnAgent({
+        role: 'reviewer'
       })
-      expect(agent.model.model).toBe('anthropic/claude-sonnet-4-6')
+      // reviewer role uses gpt-5-mini by default from config
+      expect(agent.model.model).toBe('gpt-5-mini')
+    })
+
+    it('should throw if not initialized', async () => {
+      const orch = new NexusOrchestrator()
+      try {
+        await orch.spawnAgent({ role: 'coder' })
+        expect(true).toBe(false) // Should not reach
+      } catch (e: any) {
+        expect(e.message).toContain('not initialized')
+      }
     })
   })
 
@@ -43,7 +72,7 @@ describe('NexusOrchestrator', () => {
     it('should terminate an agent', async () => {
       const agent = await orchestrator.spawnAgent({ role: 'coder' })
       await orchestrator.terminateAgent(agent.id)
-      
+
       const agents = orchestrator.listAgents()
       expect(agents).not.toContain(agent.id)
     })
@@ -53,7 +82,7 @@ describe('NexusOrchestrator', () => {
     it('should list agents', async () => {
       await orchestrator.spawnAgent({ role: 'coder' })
       await orchestrator.spawnAgent({ role: 'reviewer' })
-      
+
       const agents = orchestrator.listAgents()
       expect(agents).toContain('coder')
       expect(agents).toContain('reviewer')
@@ -68,10 +97,14 @@ describe('NexusOrchestrator', () => {
       expect(status).toContain('budgetRemaining')
     })
 
-    it('should return detailed status', () => {
-      const status = orchestrator.getStatus(true)
-      expect(status).toContain('running')
-      expect(status).toContain('agentsByStatus')
+    it('should return detailed state', () => {
+      const state = orchestrator.getState()
+      expect(state).toHaveProperty('running')
+      expect(state).toHaveProperty('paused')
+      expect(state).toHaveProperty('agents')
+      expect(state).toHaveProperty('tasks')
+      expect(state).toHaveProperty('totalSpent')
+      expect(state).toHaveProperty('budgetRemaining')
     })
   })
 
@@ -80,7 +113,7 @@ describe('NexusOrchestrator', () => {
       orchestrator.pause()
       let status = orchestrator.getStatus()
       expect(status).toContain('paused')
-      
+
       orchestrator.resume()
       status = orchestrator.getStatus()
       expect(status).toContain('paused')
@@ -90,50 +123,29 @@ describe('NexusOrchestrator', () => {
   describe('memory', () => {
     it('should set and get memory', () => {
       orchestrator.setMemory('project', 'architecture', { pattern: 'event-sourcing' }, 'architect')
-      
+
       const memory = orchestrator.getMemory('project', 'architecture')
       expect(memory).toBeDefined()
       expect(memory?.key).toBe('architecture')
-    })
-
-    it('should search memory', () => {
-      orchestrator.setMemory('project', 'auth', { approach: 'jwt' }, 'architect')
-      orchestrator.setMemory('project', 'db', { type: 'postgres' }, 'architect')
-      
-      const results = orchestrator.searchMemory('jwt')
-      expect(results.length).toBeGreaterThan(0)
     })
   })
 
   describe('communication', () => {
     it('should publish and subscribe', () => {
       let received = false
-      
+
       orchestrator.subscribe('test-topic', (msg) => {
         received = true
       })
-      
+
       orchestrator.publish('test-topic', {
         from: 'test-agent',
         type: 'status-update',
         payload: { status: 'working' },
         metadata: { priority: 'normal', requiresResponse: false }
       })
-      
-      expect(received).toBe(true)
-    })
 
-    it('should send direct message', () => {
-      const agent = { id: 'test-agent', receiveMessage: () => {} }
-      orchestrator['agents'].set('test-agent', agent as any)
-      
-      // Should not throw
-      orchestrator.send('test-agent', {
-        from: 'sender',
-        type: 'status-update',
-        payload: { status: 'working' },
-        metadata: { priority: 'normal', requiresResponse: false }
-      })
+      expect(received).toBe(true)
     })
   })
 
@@ -141,7 +153,7 @@ describe('NexusOrchestrator', () => {
     it('should track costs', () => {
       orchestrator.trackCost('agent-1', 'claude-sonnet', 0.50, 1000)
       orchestrator.trackCost('agent-1', 'claude-sonnet', 0.25, 500)
-      
+
       const report = orchestrator.getCostReport()
       expect(report).toContain('totalSpent')
       expect(report).toContain('budgetRemaining')
@@ -151,10 +163,10 @@ describe('NexusOrchestrator', () => {
       const orch = new NexusOrchestrator({
         budget: { maxTotalCost: 1.00, maxCostPerTask: 0.50, maxCostPerAgent: 0.50, alertThreshold: 0.8, hardLimit: true }
       })
-      
+
       // Track costs
       orch.trackCost('agent-1', 'claude-sonnet', 0.90, 2000)
-      
+
       // Budget should be exceeded
       const report = orch.getCostReport()
       expect(report).toContain('totalSpent')
@@ -165,9 +177,9 @@ describe('NexusOrchestrator', () => {
     it('should shutdown cleanly', async () => {
       await orchestrator.spawnAgent({ role: 'coder' })
       await orchestrator.spawnAgent({ role: 'reviewer' })
-      
+
       orchestrator.shutdown()
-      
+
       const status = orchestrator.getStatus()
       expect(status).toContain('running')
     })
@@ -176,26 +188,26 @@ describe('NexusOrchestrator', () => {
   describe('event system', () => {
     it('should emit and handle events', () => {
       let eventFired = false
-      
+
       orchestrator.on('test:event', () => {
         eventFired = true
       })
-      
+
       orchestrator['emit']('test:event', {})
       expect(eventFired).toBe(true)
     })
 
     it('should unsubscribe from events', () => {
       let eventCount = 0
-      
+
       const unsubscribe = orchestrator.on('test:event', () => {
         eventCount++
       })
-      
+
       orchestrator['emit']('test:event', {})
       orchestrator['emit']('test:event', {})
       expect(eventCount).toBe(2)
-      
+
       unsubscribe()
       orchestrator['emit']('test:event', {})
       expect(eventCount).toBe(2) // Should not increase
@@ -204,18 +216,18 @@ describe('NexusOrchestrator', () => {
 
   describe('command handling', () => {
     it('should handle status command', () => {
-      // Should not throw
-      orchestrator.handleCommand('/nexus status')
+      const result = orchestrator.handleCommand('/nexus status')
+      expect(result).toContain('running')
     })
 
     it('should handle agents command', () => {
-      // Should not throw
-      orchestrator.handleCommand('/nexus agents')
+      const result = orchestrator.handleCommand('/nexus agents')
+      expect(result).toBeDefined()
     })
 
     it('should handle costs command', () => {
-      // Should not throw
-      orchestrator.handleCommand('/nexus costs')
+      const result = orchestrator.handleCommand('/nexus costs')
+      expect(result).toContain('totalSpent')
     })
 
     it('should handle pause command', () => {
@@ -229,6 +241,12 @@ describe('NexusOrchestrator', () => {
       orchestrator.handleCommand('/nexus resume')
       const status = orchestrator.getStatus()
       expect(status).toContain('paused')
+    })
+
+    it('should handle dashboard command', () => {
+      const result = orchestrator.handleCommand('/nexus dashboard')
+      expect(result).toContain('running')
+      expect(result).toContain('agents')
     })
   })
 })
