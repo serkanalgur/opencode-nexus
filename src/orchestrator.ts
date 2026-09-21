@@ -4,6 +4,7 @@ import type {
   CostReport, AgentMessage, MemoryEntry, MemoryScope,
   SpawnConfig, RecoveryAction, HealthStatus, NexusConfig
 } from "./types"
+import { NexusConfigManager } from "./config"
 
 export class NexusOrchestrator {
   private agents: Map<string, Agent> = new Map()
@@ -29,9 +30,13 @@ export class NexusOrchestrator {
   // Event handlers
   private eventHandlers: Map<string, Function[]> = new Map()
 
+  // Config manager
+  private configManager: NexusConfigManager
+
   constructor(config?: Partial<NexusConfig>) {
     this.config = this.mergeConfig(config)
     this.budget = this.config.budget
+    this.configManager = new NexusConfigManager()
   }
 
   private mergeConfig(partial?: Partial<NexusConfig>): NexusConfig {
@@ -468,35 +473,60 @@ export class NexusOrchestrator {
   // === Model Selection ===
 
   private selectModel(role: AgentRole, complexity: ComplexityScore): ModelSelection {
-    // Cost-aware model selection
+    // Get model from config manager (project > global > storage > defaults)
+    const configModel = this.configManager.getModelForRole(role)
+    const [provider, ...modelParts] = configModel.split('/')
+    const model = modelParts.join('/')
+    
+    // Cost-aware: adjust based on budget
     const budgetRemaining = this.budget.maxTotalCost - this.totalSpent
     
-    // Simple model selection logic
-    if (complexity.overall > 70 && budgetRemaining > 5) {
-      return {
-        provider: 'anthropic',
-        model: 'claude-sonnet-4-6',
-        estimatedCost: 0.50,
-        estimatedQuality: 0.9,
-        reasoning: 'High complexity task with sufficient budget'
-      }
-    } else if (complexity.overall > 40 && budgetRemaining > 2) {
-      return {
-        provider: 'anthropic',
-        model: 'claude-haiku-4-5',
-        estimatedCost: 0.10,
-        estimatedQuality: 0.7,
-        reasoning: 'Medium complexity, cost-optimized'
-      }
-    } else {
+    // If budget is tight, fall back to cheaper model
+    if (budgetRemaining < 1 && configModel !== 'opencode/minimax-m2.5-free') {
       return {
         provider: 'opencode',
         model: 'minimax-m2.5-free',
         estimatedCost: 0,
         estimatedQuality: 0.5,
-        reasoning: 'Simple task, using free tier'
+        reasoning: 'Budget constrained, using free tier'
       }
     }
+    
+    return {
+      provider,
+      model,
+      estimatedCost: this.estimateModelCost(model),
+      estimatedQuality: this.estimateModelQuality(model),
+      reasoning: `Configured model for ${role}`
+    }
+  }
+
+  private estimateModelCost(model: string): number {
+    // Rough cost estimates per 1M tokens
+    const costs: Record<string, number> = {
+      'claude-sonnet-4-6': 0.15,
+      'claude-opus-4-7': 15.00,
+      'claude-haiku-4-5': 0.80,
+      'gpt-5-mini': 0.05,
+      'gpt-5': 2.50,
+      'gemini-2.5-flash': 0.075,
+      'minimax-m2.5-free': 0
+    }
+    return costs[model] || 0.10
+  }
+
+  private estimateModelQuality(model: string): number {
+    // Rough quality scores (0-1)
+    const quality: Record<string, number> = {
+      'claude-opus-4-7': 0.95,
+      'claude-sonnet-4-6': 0.85,
+      'gpt-5': 0.88,
+      'claude-haiku-4-5': 0.75,
+      'gemini-2.5-flash': 0.78,
+      'gpt-5-mini': 0.70,
+      'minimax-m2.5-free': 0.50
+    }
+    return quality[model] || 0.60
   }
 
   // === Cost Tracking ===
