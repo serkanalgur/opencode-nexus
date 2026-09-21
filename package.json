@@ -1,14 +1,42 @@
 {
   "name": "@serkanalgur/opencode-nexus",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Adaptive Multi-Agent Orchestration with Cost Intelligence for OpenCode V2",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "multi-agent",
+    "orchestration",
+    "ai",
+    "coding-agent",
+    "parallel-execution",
+    "cost-optimization"
+  ],
+  "homepage": "https://github.com/serkanalgur/opencode-nexus#readme",
+  "bugs": {
+    "url": "https://github.com/serkanalgur/opencode-nexus/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/serkanalgur/opencode-nexus.git"
+  },
+  "license": "MIT",
+  "author": "Serkan Algur",
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
   "exports": {
     ".": "./dist/index.js",
     "./tui": "./dist/tui.js"
   },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "directories": {
+    "test": "test"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "bun run build:server && bun run build:tui",
     "build:server": "bun build ./src/index.ts --outdir ./dist --target node",
@@ -20,38 +48,8 @@
     "format": "biome format --write src/",
     "prepublishOnly": "bun run build"
   },
-  "keywords": [
-    "opencode",
-    "opencode-plugin",
-    "multi-agent",
-    "orchestration",
-    "ai",
-    "coding-agent",
-    "parallel-execution",
-    "cost-optimization"
-  ],
-  "author": "Serkan Algur",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/serkanalgur/opencode-nexus.git"
-  },
-  "homepage": "https://github.com/serkanalgur/opencode-nexus#readme",
-  "bugs": {
-    "url": "https://github.com/serkanalgur/opencode-nexus/issues"
-  },
-  "files": [
-    "dist",
-    "README.md",
-    "LICENSE"
-  ],
   "dependencies": {
     "@opencode/plugin": "latest"
-  },
-  "peerDependencies": {
-    "@opentui/core": ">=0.5.8",
-    "@opentui/solid": ">=0.5.8",
-    "solid-js": ">=1.9.0"
   },
   "devDependencies": {
     "@opentui/core": "^0.5.8",
@@ -61,6 +59,11 @@
     "bun-types": "^1.4.2",
     "solid-js": "^1.9.0",
     "typescript": "^5.5.0"
+  },
+  "peerDependencies": {
+    "@opentui/core": ">=0.5.8",
+    "@opentui/solid": ">=0.5.8",
+    "solid-js": ">=1.9.0"
   },
   "engines": {
     "node": ">=22.0.0"
