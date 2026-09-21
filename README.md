@@ -9,13 +9,13 @@
 
 **Adaptive Multi-Agent Orchestration with Cost Intelligence**
 
-[Installation](#installation) • [Quick Start](#quick-start) • [Features](#features) • [Architecture](#architecture) • [Configuration](#configuration) • [API](#api-reference) • [Contributing](#contributing)
+[Installation](#installation) • [Quick Start](#quick-start) • [Features](#features) • [Architecture](#architecture) • [Configuration](#configuration) • [API Reference](#api-reference) • [Development](#development) • [Contributing](#contributing)
 
 </div>
 
 ---
 
-## 🎯 What is OpenCode Nexus?
+## What is OpenCode Nexus?
 
 OpenCode Nexus is a next-generation agent orchestration plugin for [OpenCode V2](https://opencode.ai) that introduces **adaptive multi-agent execution** with **cost-aware routing**, **real pub/sub communication**, **self-healing capabilities**, and **shared memory** between agents.
 
@@ -32,7 +32,7 @@ OpenCode Nexus is a next-generation agent orchestration plugin for [OpenCode V2]
 
 ---
 
-## 📦 Installation
+## Installation
 
 ```bash
 # Using npm
@@ -55,7 +55,7 @@ Or manually add to `~/.config/opencode/opencode.json`:
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### 1. Basic Usage
 
@@ -131,9 +131,9 @@ orchestrator.send('coder-1', {
 
 ---
 
-## ✨ Features
+## Features
 
-### 🔄 Dynamic DAG Execution
+### Dynamic DAG Execution
 
 Unlike static dependency graphs, Nexus builds and modifies the DAG at runtime based on task outcomes.
 
@@ -147,7 +147,7 @@ const tasks = [
 ]
 ```
 
-### 💰 Cost-Aware Routing
+### Cost-Aware Routing
 
 Every model selection considers cost vs quality tradeoffs.
 
@@ -166,7 +166,7 @@ const orchestrator = new NexusOrchestrator({
 // - Required quality level
 ```
 
-### 📡 Real Pub/Sub Communication
+### Real Pub/Sub Communication
 
 Agents communicate through a message broker, not direct calls.
 
@@ -192,7 +192,7 @@ orchestrator.fanOut(
 )
 ```
 
-### 🛡️ Self-Healing
+### Self-Healing
 
 Agents automatically recover from failures.
 
@@ -208,7 +208,7 @@ const orchestrator = new NexusOrchestrator({
 })
 ```
 
-### 🧠 Shared Memory
+### Shared Memory
 
 Agents share context through a structured memory store.
 
@@ -226,7 +226,7 @@ const arch = orchestrator.getMemory('project', 'architecture')
 const results = orchestrator.searchMemory('event sourcing', 'project')
 ```
 
-### 📊 Real-Time Dashboard
+### Real-Time Dashboard
 
 Monitor your orchestrator state via web UI.
 
@@ -244,7 +244,7 @@ const orchestrator = new NexusOrchestrator({
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -275,7 +275,7 @@ const orchestrator = new NexusOrchestrator({
 
 ---
 
-## ⚙️ Configuration
+## Configuration
 
 ### Global Config
 
@@ -325,7 +325,7 @@ const orchestrator = new NexusOrchestrator({
 
 ---
 
-## 📚 API Reference
+## API Reference
 
 ### NexusOrchestrator
 
@@ -374,7 +374,7 @@ class NexusOrchestrator {
 
 ---
 
-## 🔧 Development
+## Development
 
 ```bash
 # Clone the repo
@@ -396,7 +396,7 @@ bun run dev
 
 ---
 
-## 📊 Benchmarks
+## Benchmarks
 
 | Scenario | Sequential | Swarm | Ensemble | **Nexus** |
 |----------|-----------|-------|----------|-----------|
@@ -412,13 +412,13 @@ bun run dev
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 ---
 
-## 📄 License
+## License
 
 MIT License - see [LICENSE](LICENSE) for details.
 
