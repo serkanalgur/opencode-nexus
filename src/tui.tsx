@@ -86,8 +86,53 @@ export default Plugin.define({
       })
     }
 
-    // Keymap layer - slot render fonksiyonunda register edilir
-    // setup() icindeki context closure ile tasınır (usePlugin GEREKMEZ)
+    // Dashboard handler - shows config and orchestrator info
+    const handleDashboard = async () => {
+      const config = configManager.getConfig()
+      const lines = [
+        "⚡ Nexus Dashboard",
+        "═══════════════════════════════════",
+        "",
+        "🤖 Agent Models:",
+      ]
+
+      for (const role of configManager.getRoles()) {
+        const model = config.models[role] || '(not set)'
+        const displayName = configManager.getRoleDisplayName(role)
+        lines.push(`  ${displayName}: ${model}`)
+      }
+
+      lines.push("")
+      lines.push("💰 Budget:")
+      lines.push(`  Max Total: $${config.budget.maxTotalCost}`)
+      lines.push(`  Max Per Task: $${config.budget.maxCostPerTask}`)
+      lines.push(`  Alert Threshold: ${config.budget.alertThreshold * 100}%`)
+      lines.push("")
+      lines.push("🛡️ Self-Healing:")
+      lines.push(`  Enabled: ${config.selfHealing.enabled ? '✅' : '❌'}`)
+      lines.push(`  Max Retries: ${config.selfHealing.maxRetries}`)
+      lines.push("")
+      lines.push("💡 Commands:")
+      lines.push("  /nexus status   - Show config summary")
+      lines.push("  /nexus config   - Configure models & budget")
+      lines.push("  /nexus model    - Select model for role")
+      lines.push("  /nexus reset    - Reset to defaults")
+      lines.push("")
+      lines.push("🔧 Tools (use in agent prompt):")
+      lines.push("  nexus.status    - Orchestrator status")
+      lines.push("  nexus.agents    - List spawned agents")
+      lines.push("  nexus.costs     - Cost report")
+      lines.push("  nexus.spawn     - Spawn a sub-agent")
+
+      context.ui.toast.show({
+        title: "Nexus Dashboard",
+        message: lines.join('\n'),
+        variant: "info",
+        duration: 15000
+      })
+    }
+
+    // Keymap layer - registered in slot render via closure
     context.ui.slot({
       append: "app",
       render: () => {
@@ -121,6 +166,10 @@ export default Plugin.define({
                         variant: "info",
                         duration: 8000
                       })
+                      break
+                    case 'dashboard':
+                    case 'd':
+                      await handleDashboard()
                       break
                     case 'model':
                     case 'm':
@@ -158,7 +207,7 @@ export default Plugin.define({
                     default:
                       context.ui.toast.show({
                         title: "Nexus",
-                        message: "Commands: config, status, model <role>, reset",
+                        message: "Commands: config, status, dashboard, model <role>, reset",
                         variant: "info"
                       })
                   }
@@ -177,6 +226,18 @@ export default Plugin.define({
               suggested: true,
               run: async () => {
                 await handleFullConfig()
+              }
+            },
+            {
+              id: "nexus.dashboard",
+              title: "Nexus Dashboard",
+              group: "Nexus",
+              palette: true,
+              slash: { name: "nexus-dashboard", aliases: ["nd"], arguments: true },
+              enabled: () => true,
+              suggested: true,
+              run: async () => {
+                await handleDashboard()
               }
             },
             {
@@ -248,7 +309,6 @@ export default Plugin.define({
           ],
           bindings: ["nexus"]
         }))
-        // Slot bos render - keymap layer'i register etmek icin yeterli
         return <></>
       }
     })

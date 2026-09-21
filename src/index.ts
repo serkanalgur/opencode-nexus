@@ -5,14 +5,25 @@ export default Plugin.define({
   id: "nexus",
   async setup(ctx) {
     const orchestrator = new NexusOrchestrator()
-    
+
+    // Initialize orchestrator with OpenCode context for real session API access
+    orchestrator.initialize(ctx, () => {
+      // State change callback - persist to storage for TUI consumption
+      const state = orchestrator.getState()
+      ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(state))).catch(() => {}
+      )
+    })
+
+    // Persist initial state
+    await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(orchestrator.getState())))
+
     // Register tools
     await ctx.tool.transform((editor) => {
       editor.namespace({
         name: "nexus",
         description: "Adaptive multi-agent orchestration tools"
       })
-      
+
       editor.add({
         name: "status",
         description: "Get orchestrator status and metrics",
@@ -25,10 +36,13 @@ export default Plugin.define({
         },
         execute: async (input: unknown) => {
           const { detailed } = input as { detailed?: boolean }
-          return { content: orchestrator.getStatus(detailed) }
+          const status = orchestrator.getStatus(detailed)
+          // Persist after reading
+          await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(orchestrator.getState())))
+          return { content: status }
         }
       })
-      
+
       editor.add({
         name: "agents",
         description: "List all active agents",
@@ -44,7 +58,7 @@ export default Plugin.define({
           return { content: orchestrator.listAgents(filter) }
         }
       })
-      
+
       editor.add({
         name: "costs",
         description: "Get cost report and budget status",
@@ -57,16 +71,61 @@ export default Plugin.define({
           return { content: orchestrator.getCostReport() }
         }
       })
+
+      editor.add({
+        name: "dashboard",
+        description: "Get full orchestrator state for dashboard display",
+        input: {
+          type: "object",
+          properties: {},
+          additionalProperties: false
+        },
+        execute: async () => {
+          const state = orchestrator.getState()
+          await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(state)))
+          return { content: JSON.stringify(state, null, 2) }
+        }
+      })
+
+      editor.add({
+        name: "spawn",
+        description: "Spawn a sub-agent for a task",
+        input: {
+          type: "object",
+          properties: {
+            role: { type: "string", description: "Agent role (architect, coder, reviewer, tester, explorer, documenter)" },
+            task: { type: "string", description: "Task description" },
+            model: { type: "string", description: "Model override (optional)" }
+          },
+          required: ["role", "task"],
+          additionalProperties: false
+        },
+        execute: async (input: unknown) => {
+          const { role, task, model } = input as { role: string; task: string; model?: string }
+          try {
+            const agent = await orchestrator.spawnAgent({ role, model })
+            await orchestrator.ctx.session.prompt({
+              sessionID: agent.sessionID!,
+              text: task
+            })
+            await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(orchestrator.getState())))
+            return { content: `Spawned ${role} agent (${agent.id}) on session ${agent.sessionID}. Task sent.` }
+          } catch (error: any) {
+            return { content: `Failed to spawn agent: ${error.message}` }
+          }
+        }
+      })
     })
-    
-    // Register session hooks for task orchestration
+
+    // Register session hook for /nexus commands
     await ctx.session.hook("prompt", (event) => {
-      // Intercept prompts that look like orchestration requests
-      if (event.prompt.text.includes("/nexus")) {
-        orchestrator.handleCommand(event.prompt.text)
+      if (event.prompt.text.startsWith("/nexus")) {
+        const result = orchestrator.handleCommand(event.prompt.text)
+        // The result goes to the session as tool output context
+        event.metadata = { ...event.metadata, nexusResult: result }
       }
     })
-    
+
     return () => {
       orchestrator.shutdown()
     }
