@@ -1,0 +1,67 @@
+{
+  "name": "@serkanalgur/opencode-nexus",
+  "version": "0.1.0",
+  "description": "Adaptive Multi-Agent Orchestration with Cost Intelligence for OpenCode V2",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./tui": "./dist/tui.js"
+  },
+  "scripts": {
+    "build": "bun run build:server && bun run build:tui",
+    "build:server": "bun build ./src/index.ts --outdir ./dist --target node",
+    "build:tui": "bun build ./src/tui.tsx --outdir ./dist --target node",
+    "dev": "bun run --watch src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "lint": "biome check src/",
+    "format": "biome format --write src/",
+    "prepublishOnly": "bun run build"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "multi-agent",
+    "orchestration",
+    "ai",
+    "coding-agent",
+    "parallel-execution",
+    "cost-optimization"
+  ],
+  "author": "Serkan Algur",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/serkanalgur/opencode-nexus.git"
+  },
+  "homepage": "https://github.com/serkanalgur/opencode-nexus#readme",
+  "bugs": {
+    "url": "https://github.com/serkanalgur/opencode-nexus/issues"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@opencode/plugin": "latest"
+  },
+  "peerDependencies": {
+    "@opentui/core": ">=0.5.8",
+    "@opentui/solid": ">=0.5.8",
+    "solid-js": ">=1.9.0"
+  },
+  "devDependencies": {
+    "@opentui/core": "^0.5.8",
+    "@opentui/solid": "^0.5.8",
+    "@types/bun": "latest",
+    "biome": "latest",
+    "solid-js": "^1.9.0",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
