@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
     branches: [main]
 
@@ -88,30 +89,30 @@ jobs:
           path: dist/
           retention-days: 7
 
-  # Publish job - uncomment after first manual publish
-  # To publish: npm login && npm publish --access public
-  # Then add NPM_TOKEN secret to GitHub repo settings
-  #
-  # publish:
-  #   name: Publish to npm
-  #   runs-on: ubuntu-latest
-  #   needs: [build]
-  #   if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-  #   permissions:
-  #     id-token: write
-  #     contents: read
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: oven-sh/setup-bun@v2
-  #       with:
-  #         bun-version: latest
-  #     - uses: actions/setup-node@v4
-  #       with:
-  #         node-version: 22
-  #         registry-url: 'https://registry.npmjs.org'
-  #     - run: npm install -g npm@latest
-  #     - run: bun install --frozen-lockfile
-  #     - run: bun run build
-  #     - run: npm publish --access public
-  #       env:
-  #         NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    needs: [typecheck, test, build]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: bun install --frozen-lockfile
+
+      - run: bun run build
+
+      - run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
