@@ -689,8 +689,8 @@ export class NexusOrchestrator {
 
   // === Helpers ===
 
-  private collectResults(): TaskResult[] {
-    const results: TaskResult[] = []
+  private collectResults(): import("./types").TaskResult[] {
+    const results: import("./types").TaskResult[] = []
     
     if (this.dag) {
       this.dag.nodes.forEach((node) => {
