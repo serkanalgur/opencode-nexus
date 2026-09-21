@@ -249,7 +249,7 @@ export default Plugin.define({
           bindings: ["nexus"]
         }))
         // Slot bos render - keymap layer'i register etmek icin yeterli
-        return <text hidden={true}></text>
+        return <></>
       }
     })
 
