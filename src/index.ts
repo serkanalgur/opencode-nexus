@@ -74,4 +74,6 @@ export default Plugin.define({
 })
 
 export { NexusOrchestrator } from "./orchestrator"
+export { NexusConfigManager, DEFAULT_CONFIG } from "./config"
+export type { NexusModelConfig, NexusFullConfig } from "./config"
 export type { Agent, Task, DAG, ExecutionRequest, ExecutionResult } from "./types"
