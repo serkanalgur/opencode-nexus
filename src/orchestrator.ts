@@ -1,10 +1,38 @@
-import type { 
+import type {
   Agent, Task, DAG, DAGNode, ExecutionRequest, ExecutionResult,
   AgentRole, ComplexityScore, ModelSelection, BudgetConstraint,
   CostReport, AgentMessage, MemoryEntry, MemoryScope,
-  SpawnConfig, RecoveryAction, HealthStatus, NexusConfig
+  SpawnConfig, RecoveryAction, HealthStatus, NexusConfig, TaskResult
 } from "./types"
 import { NexusConfigManager } from "./config"
+
+export interface OrchestratorState {
+  running: boolean
+  paused: boolean
+  agents: Array<{
+    id: string
+    name: string
+    role: string
+    status: string
+    model: string
+    sessionID?: string
+    spawnedAt: string
+    tasksCompleted: number
+    tasksFailed: number
+    totalCost: number
+  }>
+  tasks: Array<{
+    id: string
+    name: string
+    role: string
+    status: string
+    assignedAgent?: string
+    result?: { success: boolean; output?: string; error?: string; duration: number }
+  }>
+  totalSpent: number
+  budgetRemaining: number
+  lastUpdated: string
+}
 
 export class NexusOrchestrator {
   private agents: Map<string, Agent> = new Map()
@@ -14,29 +42,85 @@ export class NexusOrchestrator {
   private budget: BudgetConstraint
   private running: boolean = false
   private paused: boolean = false
-  
+
   // Cost tracking
   private totalSpent: number = 0
   private costByAgent: Map<string, number> = new Map()
   private costByModel: Map<string, number> = new Map()
-  
+
   // Communication
   private messageQueue: AgentMessage[] = []
   private subscribers: Map<string, ((msg: AgentMessage) => void)[]> = new Map()
-  
+
   // Memory
   private memory: Map<string, MemoryEntry> = new Map()
-  
+
   // Event handlers
   private eventHandlers: Map<string, Function[]> = new Map()
 
   // Config manager
   private configManager: NexusConfigManager
 
+  // OpenCode context (set during initialization)
+  public ctx: any = null
+
+  // State update callback
+  private onStateChange: (() => void) | null = null
+
   constructor(config?: Partial<NexusConfig>) {
     this.config = this.mergeConfig(config)
     this.budget = this.config.budget
     this.configManager = new NexusConfigManager()
+  }
+
+  /**
+   * Initialize with OpenCode plugin context for session API access
+   */
+  initialize(ctx: any, onStateChange?: () => void) {
+    this.ctx = ctx
+    this.onStateChange = onStateChange ?? null
+  }
+
+  /**
+   * Export current state for TUI/dashboard consumption
+   */
+  getState(): OrchestratorState {
+    const agents = Array.from(this.agents.values()).map(a => ({
+      id: a.id,
+      name: a.name,
+      role: a.role,
+      status: a.status,
+      model: `${a.model.provider}/${a.model.model}`,
+      sessionID: a.sessionID,
+      spawnedAt: a.spawnedAt.toISOString(),
+      tasksCompleted: a.metrics.tasksCompleted,
+      tasksFailed: a.metrics.tasksFailed,
+      totalCost: a.metrics.totalCost
+    }))
+
+    const tasks = Array.from(this.tasks.values()).map(t => ({
+      id: t.id,
+      name: t.name,
+      role: t.requiredRole,
+      status: t.status,
+      assignedAgent: t.assignedAgent,
+      result: t.result ? {
+        success: t.result.success,
+        output: t.result.output?.slice(0, 500),
+        error: t.result.error,
+        duration: t.result.duration
+      } : undefined
+    }))
+
+    return {
+      running: this.running,
+      paused: this.paused,
+      agents,
+      tasks,
+      totalSpent: this.totalSpent,
+      budgetRemaining: this.budget.maxTotalCost - this.totalSpent,
+      lastUpdated: new Date().toISOString()
+    }
   }
 
   private mergeConfig(partial?: Partial<NexusConfig>): NexusConfig {
@@ -76,7 +160,7 @@ export class NexusOrchestrator {
         syncInterval: 5000
       },
       dashboard: {
-        enabled: false,
+        enabled: true,
         port: 4747,
         host: '127.0.0.1'
       },
@@ -106,18 +190,30 @@ export class NexusOrchestrator {
     }
   }
 
+  private notifyStateChange() {
+    this.onStateChange?.()
+  }
+
   // === Core Operations ===
 
+  /**
+   * Execute a set of tasks using real OpenCode sessions
+   */
   async execute(request: ExecutionRequest): Promise<ExecutionResult> {
     if (this.running) {
       throw new Error("Orchestrator is already running")
     }
 
+    if (!this.ctx) {
+      throw new Error("Orchestrator not initialized - call initialize(ctx) first")
+    }
+
     this.running = true
     const startTime = Date.now()
+    this.notifyStateChange()
 
     try {
-      // 1. Analyze and build DAG
+      // 1. Build DAG
       this.dag = this.buildDAG(request.tasks)
 
       // 2. Apply budget constraints
@@ -125,7 +221,7 @@ export class NexusOrchestrator {
         this.budget = request.budget
       }
 
-      // 3. Execute DAG
+      // 3. Execute DAG with real sessions
       await this.executeDAG()
 
       // 4. Collect results
@@ -149,6 +245,7 @@ export class NexusOrchestrator {
       }
     } finally {
       this.running = false
+      this.notifyStateChange()
     }
   }
 
@@ -214,7 +311,6 @@ export class NexusOrchestrator {
       }
     }
 
-    // Add tasks to DAG
     for (const task of tasks) {
       const node: DAGNode = {
         id: task.id,
@@ -231,13 +327,16 @@ export class NexusOrchestrator {
   private async executeDAG(): Promise<void> {
     while (!this.dag!.isComplete() && !this.paused) {
       const readyNodes = this.dag!.getReadyNodes()
-      
+
       // Spawn agents for ready nodes (respecting concurrency limit)
+      const spawnPromises: Promise<void>[] = []
       for (const node of readyNodes) {
         if (this.agents.size < this.config.maxConcurrency) {
-          await this.spawnAndExecute(node)
+          spawnPromises.push(this.spawnAndExecute(node))
         }
       }
+
+      await Promise.all(spawnPromises)
 
       // Wait for scheduler interval
       await this.sleep(this.config.schedulerInterval)
@@ -249,7 +348,7 @@ export class NexusOrchestrator {
     const complexity = this.analyzeComplexity(node.task)
     const model = this.selectModel(node.task.requiredRole, complexity)
 
-    // Spawn agent
+    // Spawn agent with real session
     const agent = await this.spawnAgent({
       role: node.task.requiredRole,
       task: node.task,
@@ -258,120 +357,196 @@ export class NexusOrchestrator {
 
     node.spawnedAgent = agent
     node.status = 'running'
+    node.task.assignedAgent = agent.id
+    this.notifyStateChange()
 
-    // Monitor completion
-    this.monitorAgent(agent, node)
+    // Execute task via OpenCode session
+    await this.executeTask(agent, node)
   }
 
-  private async monitorAgent(agent: Agent, node: DAGNode): Promise<void> {
-    // In real implementation, this would listen to agent events
-    // For now, we simulate with a timeout
-    const timeout = node.task.timeout || this.config.defaultTimeout
-    
-    setTimeout(() => {
-      if (node.status === 'running') {
-        // Agent timed out
-        this.handleAgentTimeout(agent, node)
-      }
-    }, timeout)
-  }
-
-  private handleAgentTimeout(agent: Agent, node: DAGNode): void {
-    if (this.config.selfHealing.enabled) {
-      this.handleFailure(agent, node, new Error("Agent timed out"))
-    } else {
+  /**
+   * Execute a task by sending it to a real OpenCode session
+   */
+  private async executeTask(agent: Agent, node: DAGNode): Promise<void> {
+    if (!this.ctx || !agent.sessionID) {
       node.status = 'failed'
       node.result = {
         success: false,
-        error: "Agent timed out",
-        duration: node.task.timeout || this.config.defaultTimeout,
-        tokensUsed: 0,
-        cost: 0
-      }
-    }
-  }
-
-  private async handleFailure(agent: Agent, node: DAGNode, error: Error): Promise<void> {
-    const failureCount = agent.metrics.tasksFailed + 1
-    agent.metrics.tasksFailed++
-
-    if (failureCount < this.config.selfHealing.maxRetries) {
-      // Retry with delay
-      const delay = this.config.selfHealing.retryDelay * 
-        Math.pow(this.config.selfHealing.backoffMultiplier, failureCount - 1)
-      
-      setTimeout(async () => {
-        await this.retryAgent(agent, node)
-      }, delay)
-    } else if (this.config.selfHealing.contextTransfer) {
-      // Respawn with new agent
-      await this.respawnAgent(agent, node)
-    } else {
-      node.status = 'failed'
-      node.result = {
-        success: false,
-        error: error.message,
+        error: "No session available for agent",
         duration: 0,
         tokensUsed: 0,
         cost: 0
       }
+      this.notifyStateChange()
+      return
+    }
+
+    const startTime = Date.now()
+    const timeout = node.task.timeout || this.config.defaultTimeout
+
+    try {
+      // Build the prompt for the agent
+      const rolePrompt = this.buildRolePrompt(node.task.requiredRole)
+      const taskPrompt = `${rolePrompt}\n\n## Task\n${node.task.name}\n\n${node.task.description}\n\n## Scope\nFiles: ${node.task.files.include.join(', ')}`
+
+      // Send the task to the session
+      await this.ctx.session.prompt({
+        sessionID: agent.sessionID,
+        text: taskPrompt
+      })
+
+      // Wait for completion (with timeout)
+      const waitPromise = this.ctx.session.wait({ sessionID: agent.sessionID })
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Task timed out")), timeout)
+      )
+
+      await Promise.race([waitPromise, timeoutPromise])
+
+      // Get the result context
+      const messages = await this.ctx.session.context({ sessionID: agent.sessionID })
+      const lastAssistantMsg = messages.filter((m: any) => m.role === 'assistant').pop()
+      const output = lastAssistantMsg?.content || "Task completed"
+
+      const duration = Date.now() - startTime
+      const result: TaskResult = {
+        success: true,
+        output: typeof output === 'string' ? output : JSON.stringify(output),
+        duration,
+        tokensUsed: 0, // Would need to parse from session context
+        cost: this.estimateModelCost(agent.model.model)
+      }
+
+      this.dag!.markComplete(node.id, result)
+      agent.metrics.tasksCompleted++
+      agent.metrics.totalCost += result.cost
+      this.totalSpent += result.cost
+      this.costByAgent.set(agent.id, (this.costByAgent.get(agent.id) || 0) + result.cost)
+      this.checkBudget()
+
+    } catch (error: any) {
+      const duration = Date.now() - startTime
+      const result: TaskResult = {
+        success: false,
+        error: error.message || "Task failed",
+        duration,
+        tokensUsed: 0,
+        cost: 0
+      }
+
+      this.dag!.markFailed(node.id, new Error(result.error!))
+      agent.metrics.tasksFailed++
+
+      // Self-healing: retry or respawn
+      if (this.config.selfHealing.enabled) {
+        await this.handleFailure(agent, node, new Error(result.error!))
+      }
+    } finally {
+      agent.status = 'idle'
+      node.task.status = node.status === 'completed' ? 'completed' : 'failed'
+      this.notifyStateChange()
     }
   }
 
-  private async retryAgent(agent: Agent, node: DAGNode): Promise<void> {
-    // Reset agent status
-    agent.status = 'working'
-    node.status = 'running'
-    
-    // In real implementation, this would restart the agent's task
-    this.emit('agent:retry', { agent, node })
-  }
-
-  private async respawnAgent(oldAgent: Agent, node: DAGNode): Promise<void> {
-    // Create new agent with same config
-    const newAgent = await this.spawnAgent({
-      role: oldAgent.role,
-      task: node.task,
-      model: oldAgent.model.model
-    })
-
-    // Transfer context if enabled
-    if (this.config.selfHealing.contextTransfer) {
-      await this.transferContext(oldAgent, newAgent)
+  /**
+   * Build a system prompt for the agent's role
+   */
+  private buildRolePrompt(role: AgentRole): string {
+    const rolePrompts: Record<string, string> = {
+      architect: "You are a software architect. Focus on system design, architecture patterns, and high-level technical decisions. Analyze requirements and propose structured solutions.",
+      coder: "You are a senior software engineer. Write clean, efficient, well-documented code. Follow best practices and coding standards.",
+      reviewer: "You are a code reviewer. Review code for correctness, security, performance, and maintainability. Provide constructive feedback.",
+      tester: "You are a QA engineer. Write comprehensive tests, identify edge cases, and ensure code quality.",
+      explorer: "You are a code explorer. Navigate and analyze codebases, understand architecture, and provide detailed reports.",
+      documenter: "You are a technical writer. Create clear, comprehensive documentation for code and APIs."
     }
-
-    // Terminate old agent
-    await this.terminateAgent(oldAgent.id)
-
-    // Update node
-    node.spawnedAgent = newAgent
-    node.status = 'running'
-
-    // Monitor new agent
-    this.monitorAgent(newAgent, node)
+    return rolePrompts[role] || `You are a ${role}. Complete the assigned task professionally.`
   }
 
-  private async transferContext(oldAgent: Agent, newAgent: Agent): Promise<void> {
-    // Transfer partial results and decisions
-    this.emit('context:transfer', { from: oldAgent, to: newAgent })
+  private async handleFailure(agent: Agent, node: DAGNode, error: Error): Promise<void> {
+    const failureCount = agent.metrics.tasksFailed + 1
+
+    if (failureCount < this.config.selfHealing.maxRetries) {
+      // Retry with delay
+      const delay = this.config.selfHealing.retryDelay *
+        Math.pow(this.config.selfHealing.backoffMultiplier, failureCount - 1)
+
+      await this.sleep(delay)
+
+      // Retry by re-executing the task
+      if (agent.sessionID) {
+        node.status = 'running'
+        this.notifyStateChange()
+        await this.executeTask(agent, node)
+      }
+    } else {
+      node.status = 'failed'
+      node.result = {
+        success: false,
+        error: `Max retries (${this.config.selfHealing.maxRetries}) exceeded: ${error.message}`,
+        duration: 0,
+        tokensUsed: 0,
+        cost: 0
+      }
+      this.notifyStateChange()
+    }
   }
 
   // === Agent Management ===
 
+  /**
+   * Spawn a real OpenCode session for an agent
+   */
   async spawnAgent(config: SpawnConfig): Promise<Agent> {
+    if (!this.ctx) {
+      throw new Error("Orchestrator not initialized")
+    }
+
     const agentId = `agent-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
-    
+    const displayName = `${config.role}-${agentId.slice(0, 8)}`
+
+    // Create a real OpenCode session
+    const session = await this.ctx.session.create({
+      title: `[Nexus] ${displayName}`
+    })
+
+    const modelConfig = this.configManager.getModelForRole(config.role)
+    const [provider, ...modelParts] = modelConfig.split('/')
+    const modelName = modelParts.join('/')
+
+    // Switch to the appropriate agent for this session
+    try {
+      await this.ctx.session.switchAgent({
+        sessionID: session.id,
+        agent: config.role === 'architect' ? 'build' : config.role === 'reviewer' ? 'build' : 'build'
+      })
+    } catch {
+      // Fallback to default agent if role-specific agent doesn't exist
+    }
+
+    // Switch model if configured
+    if (modelName) {
+      try {
+        await this.ctx.session.switchModel({
+          sessionID: session.id,
+          model: { providerID: provider, id: modelName }
+        })
+      } catch {
+        // Fallback to default model
+      }
+    }
+
     const agent: Agent = {
       id: agentId,
-      name: `${config.role}-${agentId.slice(0, 8)}`,
+      name: displayName,
       role: config.role,
-      status: 'spawning',
+      status: 'idle',
       model: {
-        provider: 'opencode',
-        model: config.model || 'default',
+        provider,
+        model: modelName || 'default',
         estimatedCost: 0,
         estimatedQuality: 0.5,
-        reasoning: 'Default selection'
+        reasoning: `Configured for ${config.role}`
       },
       spawnedAt: new Date(),
       lastActivity: new Date(),
@@ -382,16 +557,14 @@ export class NexusOrchestrator {
         totalCost: 0,
         averageResponseTime: 0,
         errorRate: 0
-      }
+      },
+      sessionID: session.id
     }
 
     this.agents.set(agentId, agent)
     this.emit('agent:spawned', agent)
+    this.notifyStateChange()
 
-    // Simulate spawn delay
-    await this.sleep(this.config.agents.spawnDelay)
-    
-    agent.status = 'idle'
     return agent
   }
 
@@ -401,87 +574,57 @@ export class NexusOrchestrator {
       agent.status = 'terminated'
       this.agents.delete(agentId)
       this.emit('agent:terminated', agent)
+      this.notifyStateChange()
     }
   }
 
   // === Complexity Analysis ===
 
   private analyzeComplexity(task: Task): ComplexityScore {
-    // Simple heuristic-based analysis
     const fileCount = task.files.include.length
-    const codeLines = this.estimateCodeLines(task)
+    const codeLines = task.files.include.length * 50
     const dependencyDepth = task.dependencies.length
-    const domainKnowledge = this.estimateDomainKnowledge(task)
-    const riskLevel = this.estimateRiskLevel(task)
+    let domainKnowledge = 0
+    const keywords = ['security', 'auth', 'payment', 'crypto', 'database']
+    for (const keyword of keywords) {
+      if (task.description.toLowerCase().includes(keyword)) {
+        domainKnowledge += 20
+      }
+    }
+    domainKnowledge = Math.min(100, domainKnowledge)
 
-    const overall = Math.min(100, 
-      (fileCount * 10) + 
-      (codeLines / 10) + 
-      (dependencyDepth * 15) + 
+    let riskLevel: string = 'low'
+    const highRiskKeywords = ['migration', 'production', 'security', 'payment']
+    for (const keyword of highRiskKeywords) {
+      if (task.description.toLowerCase().includes(keyword)) {
+        riskLevel = 'high'
+        break
+      }
+    }
+
+    const overall = Math.min(100,
+      (fileCount * 10) +
+      (codeLines / 10) +
+      (dependencyDepth * 15) +
       (domainKnowledge * 20) +
       (riskLevel === 'high' ? 30 : riskLevel === 'medium' ? 15 : 0)
     )
 
     return {
       overall,
-      factors: {
-        fileCount,
-        codeLines,
-        dependencyDepth,
-        domainKnowledge,
-        riskLevel
-      }
+      factors: { fileCount, codeLines, dependencyDepth, domainKnowledge, riskLevel: riskLevel as 'low' | 'medium' | 'high' }
     }
-  }
-
-  private estimateCodeLines(task: Task): number {
-    // Rough estimate based on file count and task type
-    return task.files.include.length * 50
-  }
-
-  private estimateDomainKnowledge(task: Task): number {
-    // Simple keyword-based analysis
-    const keywords = ['security', 'auth', 'payment', 'crypto', 'database']
-    let score = 0
-    for (const keyword of keywords) {
-      if (task.description.toLowerCase().includes(keyword)) {
-        score += 20
-      }
-    }
-    return Math.min(100, score)
-  }
-
-  private estimateRiskLevel(task: Task): 'low' | 'medium' | 'high' {
-    const highRiskKeywords = ['migration', 'production', 'security', 'payment']
-    const mediumRiskKeywords = ['refactor', 'update', 'modify']
-    
-    for (const keyword of highRiskKeywords) {
-      if (task.description.toLowerCase().includes(keyword)) {
-        return 'high'
-      }
-    }
-    
-    for (const keyword of mediumRiskKeywords) {
-      if (task.description.toLowerCase().includes(keyword)) {
-        return 'medium'
-      }
-    }
-    
-    return 'low'
   }
 
   // === Model Selection ===
 
   private selectModel(role: AgentRole, complexity: ComplexityScore): ModelSelection {
-    // Get model from config manager (project > global > storage > defaults)
     const configModel = this.configManager.getModelForRole(role)
     const [provider, ...modelParts] = configModel.split('/')
     const model = modelParts.join('/')
-    
-    // Cost-aware: adjust based on budget
+
     const budgetRemaining = this.budget.maxTotalCost - this.totalSpent
-    
-    // If budget is tight, fall back to cheaper model
+
     if (budgetRemaining < 1 && configModel !== 'opencode/minimax-m2.5-free') {
       return {
         provider: 'opencode',
@@ -491,7 +634,7 @@ export class NexusOrchestrator {
         reasoning: 'Budget constrained, using free tier'
       }
     }
-    
+
     return {
       provider,
       model,
@@ -502,7 +645,6 @@ export class NexusOrchestrator {
   }
 
   private estimateModelCost(model: string): number {
-    // Rough cost estimates per 1M tokens
     const costs: Record<string, number> = {
       'claude-sonnet-4-6': 0.15,
       'claude-opus-4-7': 15.00,
@@ -516,7 +658,6 @@ export class NexusOrchestrator {
   }
 
   private estimateModelQuality(model: string): number {
-    // Rough quality scores (0-1)
     const quality: Record<string, number> = {
       'claude-opus-4-7': 0.95,
       'claude-sonnet-4-6': 0.85,
@@ -533,15 +674,12 @@ export class NexusOrchestrator {
 
   trackCost(agentId: string, model: string, cost: number, tokens: number): void {
     this.totalSpent += cost
-    
     const agentCost = this.costByAgent.get(agentId) || 0
     this.costByAgent.set(agentId, agentCost + cost)
-    
     const modelCost = this.costByModel.get(model) || 0
     this.costByModel.set(model, modelCost + cost)
-
-    // Check budget
     this.checkBudget()
+    this.notifyStateChange()
   }
 
   private checkBudget(): void {
@@ -566,9 +704,7 @@ export class NexusOrchestrator {
       id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
       timestamp: new Date()
     }
-
     this.messageQueue.push(fullMessage)
-    
     const handlers = this.subscribers.get(topic) || []
     handlers.forEach(handler => handler(fullMessage))
   }
@@ -577,25 +713,10 @@ export class NexusOrchestrator {
     const handlers = this.subscribers.get(topic) || []
     handlers.push(handler)
     this.subscribers.set(topic, handlers)
-
     return () => {
       const idx = handlers.indexOf(handler)
-      if (idx > -1) {
-        handlers.splice(idx, 1)
-      }
+      if (idx > -1) handlers.splice(idx, 1)
     }
-  }
-
-  send(agentId: string, message: Omit<AgentMessage, 'id' | 'timestamp' | 'to'>): void {
-    const fullMessage: AgentMessage = {
-      ...message,
-      id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      to: agentId,
-      timestamp: new Date()
-    }
-
-    this.messageQueue.push(fullMessage)
-    this.emit('message:sent', fullMessage)
   }
 
   // === Memory ===
@@ -603,15 +724,11 @@ export class NexusOrchestrator {
   setMemory(scope: MemoryScope, key: string, value: unknown, author: string): void {
     const entry: MemoryEntry = {
       id: `mem-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      key,
-      value,
-      scope,
-      author,
+      key, value, scope, author,
       timestamp: new Date(),
       confidence: 1.0,
       tags: []
     }
-
     this.memory.set(`${scope}:${key}`, entry)
     this.emit('memory:set', entry)
   }
@@ -620,79 +737,36 @@ export class NexusOrchestrator {
     return this.memory.get(`${scope}:${key}`)
   }
 
-  searchMemory(query: string, scope?: MemoryScope): MemoryEntry[] {
-    const results: MemoryEntry[] = []
-    
-    this.memory.forEach((entry) => {
-      if (scope && entry.scope !== scope) return
-      
-      // Simple text matching
-      if (entry.key.includes(query) || 
-          JSON.stringify(entry.value).includes(query)) {
-        results.push(entry)
-      }
-    })
-
-    return results
-  }
-
   // === Query ===
 
   getStatus(detailed?: boolean): string {
-    const status = {
-      running: this.running,
-      paused: this.paused,
-      agents: this.agents.size,
-      tasks: this.tasks.size,
-      totalCost: this.totalSpent,
-      budgetRemaining: this.budget.maxTotalCost - this.totalSpent
-    }
-
-    if (detailed) {
-      return JSON.stringify({
-        ...status,
-        agentsByStatus: this.getAgentsByStatus(),
-        costByAgent: Object.fromEntries(this.costByAgent),
-        costByModel: Object.fromEntries(this.costByModel)
-      }, null, 2)
-    }
-
-    return JSON.stringify(status, null, 2)
+    const state = this.getState()
+    if (detailed) return JSON.stringify(state, null, 2)
+    return JSON.stringify({
+      running: state.running,
+      paused: state.paused,
+      agents: state.agents.length,
+      tasks: state.tasks.length,
+      totalCost: state.totalSpent,
+      budgetRemaining: state.budgetRemaining
+    }, null, 2)
   }
 
   listAgents(filter?: string): string {
-    const agents = Array.from(this.agents.values())
-    
-    const filtered = filter 
-      ? agents.filter(a => a.status === filter)
-      : agents
-
+    const state = this.getState()
+    const filtered = filter
+      ? state.agents.filter(a => a.status === filter)
+      : state.agents
     return JSON.stringify(filtered, null, 2)
   }
 
   getCostReport(): string {
-    const report: CostReport = {
-      totalSpent: this.totalSpent,
-      budgetRemaining: this.budget.maxTotalCost - this.totalSpent,
-      byAgent: new Map(),
-      byModel: new Map(),
-      timeline: []
-    }
-
-    this.agents.forEach((agent) => {
-      report.byAgent.set(agent.id, {
-        agentId: agent.id,
-        agentName: agent.name,
-        totalCost: agent.metrics.totalCost,
-        tokenCount: agent.metrics.totalTokens,
-        taskCount: agent.metrics.tasksCompleted
-      })
-    })
-
+    const state = this.getState()
     return JSON.stringify({
-      ...report,
-      byAgent: Object.fromEntries(report.byAgent),
-      byModel: Object.fromEntries(report.byModel)
+      totalSpent: state.totalSpent,
+      budgetRemaining: state.budgetRemaining,
+      byAgent: Object.fromEntries(this.costByAgent),
+      byModel: Object.fromEntries(this.costByModel)
     }, null, 2)
   }
 
@@ -701,11 +775,13 @@ export class NexusOrchestrator {
   pause(): void {
     this.paused = true
     this.emit('orchestrator:paused', {})
+    this.notifyStateChange()
   }
 
   resume(): void {
     this.paused = false
     this.emit('orchestrator:resumed', {})
+    this.notifyStateChange()
   }
 
   shutdown(): void {
@@ -715,32 +791,19 @@ export class NexusOrchestrator {
     this.agents.clear()
     this.running = false
     this.emit('orchestrator:shutdown', {})
+    this.notifyStateChange()
   }
 
   // === Helpers ===
 
-  private collectResults(): import("./types").TaskResult[] {
-    const results: import("./types").TaskResult[] = []
-    
+  private collectResults(): TaskResult[] {
+    const results: TaskResult[] = []
     if (this.dag) {
       this.dag.nodes.forEach((node) => {
-        if (node.result) {
-          results.push(node.result)
-        }
+        if (node.result) results.push(node.result)
       })
     }
-
     return results
-  }
-
-  private getAgentsByStatus(): Record<string, number> {
-    const counts: Record<string, number> = {}
-    
-    this.agents.forEach((agent) => {
-      counts[agent.status] = (counts[agent.status] || 0) + 1
-    })
-
-    return counts
   }
 
   private sleep(ms: number): Promise<void> {
@@ -753,12 +816,9 @@ export class NexusOrchestrator {
     const handlers = this.eventHandlers.get(event) || []
     handlers.push(handler)
     this.eventHandlers.set(event, handlers)
-
     return () => {
       const idx = handlers.indexOf(handler)
-      if (idx > -1) {
-        handlers.splice(idx, 1)
-      }
+      if (idx > -1) handlers.splice(idx, 1)
     }
   }
 
@@ -769,28 +829,27 @@ export class NexusOrchestrator {
 
   // === Command Handling ===
 
-  handleCommand(text: string): void {
+  handleCommand(text: string): string {
     const parts = text.split(' ')
     const command = parts[1]
 
     switch (command) {
       case 'status':
-        console.log(this.getStatus(true))
-        break
+        return this.getStatus(true)
       case 'agents':
-        console.log(this.listAgents(parts[2]))
-        break
+        return this.listAgents(parts[2])
       case 'costs':
-        console.log(this.getCostReport())
-        break
+        return this.getCostReport()
       case 'pause':
         this.pause()
-        break
+        return "Orchestrator paused"
       case 'resume':
         this.resume()
-        break
+        return "Orchestrator resumed"
+      case 'dashboard':
+        return JSON.stringify(this.getState(), null, 2)
       default:
-        console.log('Unknown command. Use /nexus help')
+        return 'Unknown command. Available: status, agents, costs, pause, resume, dashboard'
     }
   }
 }
