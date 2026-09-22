@@ -79,6 +79,9 @@ export class NexusOrchestrator {
   initialize(ctx: any, onStateChange?: () => void) {
     this.ctx = ctx
     this.onStateChange = onStateChange ?? null
+
+    // Load project/global config files from disk
+    this.configManager.loadFromPath(process.cwd())
   }
 
   /**

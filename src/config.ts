@@ -2,6 +2,9 @@
 // Supports project-level and global configuration with precedence
 
 import type { NexusConfig } from "./types"
+import { readFileSync } from "node:fs"
+import { homedir } from "node:os"
+import { join } from "node:path"
 
 export interface NexusModelConfig {
   architect?: string
@@ -25,6 +28,78 @@ export interface NexusFullConfig {
     enabled: boolean
     maxRetries: number
     contextTransfer: boolean
+  }
+}
+
+/**
+ * Strip single-line and multi-line comments from a JSONC string.
+ * Handles strings properly — comments inside quoted strings are preserved.
+ */
+function stripJsonComments(jsonc: string): string {
+  const result: string[] = []
+  let i = 0
+  const len = jsonc.length
+
+  while (i < len) {
+    const ch = jsonc[i]
+
+    // Inside a double-quoted string — copy verbatim (handle escapes)
+    if (ch === '"') {
+      result.push(ch)
+      i++
+      while (i < len && jsonc[i] !== '"') {
+        if (jsonc[i] === '\\') {
+          result.push(jsonc[i], jsonc[i + 1] ?? '')
+          i += 2
+        } else {
+          result.push(jsonc[i])
+          i++
+        }
+      }
+      if (i < len) {
+        result.push(jsonc[i]) // closing quote
+        i++
+      }
+      continue
+    }
+
+    // Single-line comment
+    if (ch === '/' && jsonc[i + 1] === '/') {
+      // Skip until end of line
+      while (i < len && jsonc[i] !== '\n') i++
+      continue
+    }
+
+    // Multi-line comment
+    if (ch === '/' && jsonc[i + 1] === '*') {
+      i += 2
+      while (i < len && !(jsonc[i] === '*' && jsonc[i + 1] === '/')) i++
+      i += 2 // skip */
+      continue
+    }
+
+    result.push(ch)
+    i++
+  }
+
+  return result.join('')
+}
+
+/**
+ * Try to read and parse a JSONC file from disk. Returns null on any error.
+ */
+function readJsoncFile(filePath: string): Partial<NexusFullConfig> | null {
+  try {
+    const raw = readFileSync(filePath, 'utf-8')
+    const stripped = stripJsonComments(raw)
+    const parsed = JSON.parse(stripped)
+    return parsed as Partial<NexusFullConfig>
+  } catch (err: any) {
+    // ENOENT → file not found (expected); anything else → warn
+    if (err.code !== 'ENOENT') {
+      console.warn(`[nexus] Failed to load config from ${filePath}: ${err.message}`)
+    }
+    return null
   }
 }
 
@@ -56,14 +131,31 @@ export class NexusConfigManager {
   private storageConfig: NexusFullConfig | null = null
 
   constructor() {
-    this.loadConfigs()
-  }
-
-  private loadConfigs(): void {
-    // In real implementation, this would read from filesystem
-    // For now, we use defaults
+    // Config files are loaded later via loadFromPath(basePath)
     this.projectConfig = null
     this.globalConfig = null
+  }
+
+  /**
+   * Load config files from disk and store as project/global config.
+   * Called by loadFromPath() — not during construction anymore.
+   */
+  private loadConfigs(basePath: string): void {
+    // Project-level: .opencode/nexus.jsonc
+    const projectPath = join(basePath, '.opencode', 'nexus.jsonc')
+    this.projectConfig = readJsoncFile(projectPath)
+
+    // Global-level: ~/.config/opencode/nexus.jsonc
+    const globalPath = join(homedir(), '.config', 'opencode', 'nexus.jsonc')
+    this.globalConfig = readJsoncFile(globalPath)
+  }
+
+  /**
+   * Public entry point for config file loading.
+   * Call during orchestrator initialization with the workspace root.
+   */
+  loadFromPath(basePath: string): void {
+    this.loadConfigs(basePath)
   }
 
   // Get merged config with precedence: project > global > storage > defaults
