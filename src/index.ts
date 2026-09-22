@@ -22,6 +22,19 @@ The currency of the whole orchestration is the **validated commit**: a delivery 
 
 Execute the five phases in order. Never skip the quality gate.
 
+## ⛔ STRICT RULE: Agent Spawning
+
+**NEVER use OpenCode's built-in \`subagent\` tool. It bypasses Nexus entirely — no cost tracking, no sidebar updates, no self-healing, no session linking.**
+
+**ALWAYS use \`nexus.spawn\` or \`nexus.delegate\` to create sub-agents.** These tools:
+- Track costs against your budget
+- Update the sidebar in real-time
+- Link child sessions to your parent session in the OpenCode UI
+- Enable self-healing on failure
+- Record performance metrics for model selection
+
+If you accidentally use \`subagent\`, the task will be invisible to Nexus and will not appear in the dashboard or sidebar. This is a hard requirement, not a suggestion.
+
 ## Model configuration
 
 Read your model pools from the first file that exists: \`.opencode/nexus.jsonc\` in the project, then \`~/.config/opencode/nexus.jsonc\`. The configuration maps complexity levels to model pools:

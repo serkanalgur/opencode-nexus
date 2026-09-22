@@ -451,6 +451,39 @@ export default Plugin.define({
       })
     })
 
+    // Track child sessions created in the current session (via nexus.spawn)
+    // This catches sessions spawned through the orchestrator and adds them to sidebar
+    const unsubSessionCreated = context.data.on("session.created", (event) => {
+      const newSession = event.data
+      const newSessionID = newSession.sessionID as string
+      const currentRoute = context.ui.router.current()
+      const currentSessionID = currentRoute.type === "session" ? currentRoute.sessionID : null
+      if (!currentSessionID || !newSessionID) return
+
+      // Check if the new session is a child of the current session
+      const family = context.data.session.family(newSessionID)
+      if (family.includes(currentSessionID) && newSessionID !== currentSessionID) {
+        // This is a child session — add to sidebar if not already tracked
+        const meta = (newSession.metadata || {}) as Record<string, string>
+        setSidebarState((draft) => {
+          const exists = draft.agents.some(a => a.sessionID === newSessionID)
+          if (!exists) {
+            draft.agents.push({
+              id: newSessionID,
+              name: (newSession.title as string) || newSessionID.slice(0, 12),
+              role: meta.nexusRole || 'agent',
+              status: 'working',
+              model: meta.nexusModel || '',
+              sessionID: newSessionID,
+              spawnedAt: new Date().toISOString(),
+              tasksCompleted: 0,
+              tasksFailed: 0
+            })
+          }
+        })
+      }
+    })
+
     // Register sidebar content slot
     const unsubSidebar = context.ui.slot({
       append: "sidebar.content",
@@ -544,6 +577,7 @@ export default Plugin.define({
     return () => {
       unsubSessionSucceeded()
       unsubSessionFailed()
+      unsubSessionCreated()
       unsubSidebar()
     }
   }
