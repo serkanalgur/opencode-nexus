@@ -5,6 +5,7 @@ import type {
   SpawnConfig, RecoveryAction, HealthStatus, NexusConfig, TaskResult
 } from "./types"
 import { NexusConfigManager } from "./config"
+import { DashboardModule } from "./dashboard"
 
 export interface OrchestratorState {
   running: boolean
@@ -65,6 +66,9 @@ export class NexusOrchestrator {
   // OpenCode context (set during initialization)
   public ctx: any = null
 
+  // Dashboard server
+  public dashboard: DashboardModule | null = null
+
   // State update callback
   private onStateChange: (() => void) | null = null
 
@@ -83,6 +87,32 @@ export class NexusOrchestrator {
 
     // Load project/global config files from disk
     this.configManager.loadFromPath(process.cwd())
+  }
+
+  /**
+   * Start the web dashboard server
+   */
+  startDashboard(port?: number, host?: string): void {
+    const dashPort = port || this.config.dashboard.port
+    const dashHost = host || this.config.dashboard.host
+    this.dashboard = new DashboardModule(this)
+    this.dashboard.start(dashPort, dashHost)
+
+    // Wire up events for broadcasting
+    this.on('agent:spawned', (agent) => this.dashboard!.broadcast('agent:spawned', agent))
+    this.on('agent:terminated', (agent) => this.dashboard!.broadcast('agent:terminated', agent))
+    this.on('budget:alert', (data) => this.dashboard!.broadcast('budget:alert', data))
+    this.on('budget:exceeded', (data) => this.dashboard!.broadcast('budget:exceeded', data))
+  }
+
+  /**
+   * Stop the web dashboard server
+   */
+  stopDashboard(): void {
+    if (this.dashboard) {
+      this.dashboard.stop()
+      this.dashboard = null
+    }
   }
 
   /**
@@ -789,6 +819,7 @@ export class NexusOrchestrator {
   }
 
   shutdown(): void {
+    this.stopDashboard()
     this.agents.forEach((agent) => {
       agent.status = 'terminated'
     })
