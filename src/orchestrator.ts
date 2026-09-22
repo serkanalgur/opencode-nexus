@@ -904,10 +904,10 @@ export class NexusOrchestrator {
 
     // Map Nexus roles to OpenCode agent types
     const agentTypeMap: Record<string, string> = {
-      architect: 'build',
-      coder: 'build',
+      architect: 'architect',
+      coder: 'build-orchestrator',
       reviewer: 'code-reviewer',
-      tester: 'build',
+      tester: 'build-orchestrator',
       explorer: 'explore',
       documenter: 'doc-writer',
     }
