@@ -249,4 +249,63 @@ describe('NexusOrchestrator', () => {
       expect(result).toContain('agents')
     })
   })
+
+  describe('context transfer', () => {
+    it('should collect context from an agent', async () => {
+      const agent = await orchestrator.spawnAgent({ role: 'coder' })
+      agent.metrics.tasksCompleted = 2
+      agent.metrics.tasksFailed = 1
+
+      const context = orchestrator.collectContext(agent)
+
+      expect(context.previousAgentId).toBe(agent.id)
+      expect(context.partialResults).toBeDefined()
+      expect(context.decisions).toBeDefined()
+      expect(context.memoryEntries).toBeDefined()
+      expect(context.errorLog).toBeDefined()
+      expect(context.taskProgress).toBe(50) // 2 completed => 2*25=50, capped at 50
+    })
+
+    it('should return zero progress when no tasks completed', async () => {
+      const agent = await orchestrator.spawnAgent({ role: 'coder' })
+
+      const context = orchestrator.collectContext(agent)
+
+      expect(context.taskProgress).toBe(0)
+      expect(context.partialResults).toHaveLength(0)
+    })
+
+    it('should store context in memory during failure handling', async () => {
+      const agent = await orchestrator.spawnAgent({ role: 'coder' })
+      agent.metrics.tasksCompleted = 1
+
+      // Store context manually to verify memory integration
+      const context = orchestrator.collectContext(agent)
+      orchestrator.setMemory('agent', `context:${agent.id}`, context, agent.id)
+
+      const stored = orchestrator.getMemory('agent', `context:${agent.id}`)
+      expect(stored).toBeDefined()
+      expect(stored?.value).toHaveProperty('previousAgentId')
+      expect((stored?.value as any).previousAgentId).toBe(agent.id)
+    })
+
+    it('should include context transfer data in ContextTransferData', async () => {
+      const agent = await orchestrator.spawnAgent({ role: 'coder' })
+
+      const context = orchestrator.collectContext(agent)
+
+      expect(context).toHaveProperty('previousAgentId')
+      expect(context).toHaveProperty('partialResults')
+      expect(context).toHaveProperty('decisions')
+      expect(context).toHaveProperty('memoryEntries')
+      expect(context).toHaveProperty('taskProgress')
+      expect(context).toHaveProperty('errorLog')
+      expect(typeof context.previousAgentId).toBe('string')
+      expect(Array.isArray(context.partialResults)).toBe(true)
+      expect(Array.isArray(context.decisions)).toBe(true)
+      expect(Array.isArray(context.memoryEntries)).toBe(true)
+      expect(typeof context.taskProgress).toBe('number')
+      expect(Array.isArray(context.errorLog)).toBe(true)
+    })
+  })
 })
