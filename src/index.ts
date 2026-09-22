@@ -88,6 +88,21 @@ export default Plugin.define({
       })
 
       editor.add({
+        name: "queue",
+        description: "Show current task queue with priorities",
+        input: {
+          type: "object",
+          properties: {},
+          additionalProperties: false
+        },
+        execute: async () => {
+          const state = orchestrator.getState()
+          const tasks = state.tasks || []
+          return { content: JSON.stringify(tasks, null, 2) }
+        }
+      })
+
+      editor.add({
         name: "config.save",
         description: "Save Nexus config to disk (project or global)",
         input: {
