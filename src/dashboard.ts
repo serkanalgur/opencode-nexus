@@ -48,7 +48,7 @@ export class DashboardModule {
 
         // WebSocket upgrade
         if (url.pathname === "/ws/events") {
-          if (server.upgrade(req)) return new Response(null)
+          if (server.upgrade(req, { data: {} })) return new Response(null)
           return new Response("WebSocket upgrade failed", { status: 500 })
         }
 

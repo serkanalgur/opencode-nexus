@@ -127,10 +127,10 @@ export class NexusOrchestrator {
     this.dashboard.start(dashPort, dashHost)
 
     // Wire up events for broadcasting
-    this.on('agent:spawned', (agent) => this.dashboard!.broadcast('agent:spawned', agent))
-    this.on('agent:terminated', (agent) => this.dashboard!.broadcast('agent:terminated', agent))
-    this.on('budget:alert', (data) => this.dashboard!.broadcast('budget:alert', data))
-    this.on('budget:exceeded', (data) => this.dashboard!.broadcast('budget:exceeded', data))
+    this.on('agent:spawned', (agent: any) => this.dashboard!.broadcast('agent:spawned', agent))
+    this.on('agent:terminated', (agent: any) => this.dashboard!.broadcast('agent:terminated', agent))
+    this.on('budget:alert', (data: any) => this.dashboard!.broadcast('budget:alert', data))
+    this.on('budget:exceeded', (data: any) => this.dashboard!.broadcast('budget:exceeded', data))
   }
 
   /**
