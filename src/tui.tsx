@@ -428,58 +428,53 @@ export default Plugin.define({
       }
     })
 
-    // Subscribe to state changes from the server plugin
-    const unsubStorage = context.data.on("model.updated" as any, (event: any) => {
-      // When sessions update, we can sync state
+    // Subscribe to session execution events to track agent lifecycle
+    const unsubSessionSucceeded = context.data.on("session.execution.succeeded", (event) => {
+      const sessionId = event.data.sessionID
+      setSidebarState((draft) => {
+        const agent = draft.agents.find(a => a.sessionID === sessionId)
+        if (agent) {
+          agent.status = 'completed'
+          agent.tasksCompleted++
+        }
+      })
+    })
+
+    const unsubSessionFailed = context.data.on("session.execution.failed", (event) => {
+      const sessionId = event.data.sessionID
+      setSidebarState((draft) => {
+        const agent = draft.agents.find(a => a.sessionID === sessionId)
+        if (agent) {
+          agent.status = 'failed'
+          agent.tasksFailed++
+        }
+      })
     })
 
     // Register sidebar content slot
     const unsubSidebar = context.ui.slot({
       append: "sidebar.content",
       render: (props) => {
-        // Get child sessions (sub-agents) for the current session
-        const family = context.data.session.family(props.sessionID)
-        const sessions = context.data.session.list()
-        
-        // Filter to show only child sessions (sub-agents)
-        const childSessions = family
-          .filter(id => id !== props.sessionID)
-          .map(id => context.data.session.get(id))
-          .filter(Boolean)
-
-        if (childSessions.length === 0 && sidebarState.agents.length === 0) {
+        // Safe access: guard against undefined sessionID and empty agents
+        const agents = sidebarState.agents
+        if (!agents || agents.length === 0) {
           return null
         }
-
-        // Merge data from both sources
-        const agents = sidebarState.agents.length > 0 
-          ? sidebarState.agents 
-          : childSessions.map(s => ({
-              id: s!.id,
-              name: s!.title || s!.id.slice(0, 12),
-              role: 'agent',
-              status: 'idle' as const,
-              model: '',
-              sessionID: s!.id,
-              spawnedAt: new Date().toISOString(),
-              tasksCompleted: 0,
-              tasksFailed: 0
-            }))
 
         const activeAgents = agents.filter(a => a.status === 'working' || a.status === 'idle')
         const completedAgents = agents.filter(a => a.status === 'completed')
         const failedAgents = agents.filter(a => a.status === 'failed')
 
         return (
-          <div style={{ 
-            padding: '8px', 
+          <div style={{
+            padding: '8px',
             borderTop: '1px solid #333',
             marginTop: '8px'
           }}>
             {/* Header */}
-            <div style={{ 
-              fontSize: '11px', 
-              color: '#888', 
+            <div style={{
+              fontSize: '11px',
+              color: '#888',
               marginBottom: '4px',
               display: 'flex',
               justifyContent: 'space-between',
@@ -493,10 +488,10 @@ export default Plugin.define({
 
             {/* Active Agents */}
             {activeAgents.map(agent => (
-              <div 
+              <div
                 key={agent.id}
-                style={{ 
-                  fontSize: '10px', 
+                style={{
+                  fontSize: '10px',
                   padding: '2px 0',
                   color: agent.status === 'working' ? '#4ade80' : '#94a3b8'
                 }}
@@ -511,10 +506,10 @@ export default Plugin.define({
 
             {/* Completed Agents */}
             {completedAgents.length > 0 && (
-              <div style={{ 
-                marginTop: '4px', 
-                paddingTop: '4px', 
-                borderTop: '1px solid #222' 
+              <div style={{
+                marginTop: '4px',
+                paddingTop: '4px',
+                borderTop: '1px solid #222'
               }}>
                 <div style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>
                   ✅ {completedAgents.length} completed
@@ -533,10 +528,10 @@ export default Plugin.define({
 
             {/* Cost Summary */}
             {sidebarState.totalCost > 0 && (
-              <div style={{ 
-                marginTop: '4px', 
-                fontSize: '10px', 
-                color: '#666' 
+              <div style={{
+                marginTop: '4px',
+                fontSize: '10px',
+                color: '#666'
               }}>
                 💰 ${sidebarState.totalCost.toFixed(4)} / ${sidebarState.budgetRemaining.toFixed(2)} remaining
               </div>
@@ -547,7 +542,8 @@ export default Plugin.define({
     })
 
     return () => {
-      unsubStorage()
+      unsubSessionSucceeded()
+      unsubSessionFailed()
       unsubSidebar()
     }
   }
