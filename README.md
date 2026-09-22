@@ -25,10 +25,14 @@ OpenCode Nexus is an agent orchestration plugin for [OpenCode V2](https://openco
 |------------|-------------|
 | **Real Sessions** | Each agent runs in its own OpenCode session via `ctx.session.create()` |
 | **Role-Based Agents** | Architect, Coder, Reviewer, Tester, Explorer, Documenter — each with specialized prompts |
-| **DAG Execution** | Tasks are parallelized based on dependency graphs |
-| **Cost-Aware Routing** | Automatically selects cheaper models when budget is tight |
-| **Self-Healing** | Retries failed tasks with exponential backoff |
+| **DAG Execution** | Tasks are parallelized based on dependency graphs with priority queuing |
+| **Cost-Aware Routing** | Scores models by quality/cost/speed, selects optimal per task complexity |
+| **Self-Healing** | Retries with exponential backoff, context transfer, escalation policies |
+| **Web Dashboard** | Real-time monitoring via HTTP + WebSocket server on port 4747 |
 | **TUI Dashboard** | Monitor agents, budget, and config from the terminal |
+| **Persistent Memory** | SQLite-backed memory store with TTL and search |
+| **Learning Module** | Pattern recognition from failures, confidence scoring |
+| **JSONC Config** | Read/write project and global config files with comments |
 | **Slash Commands** | `/nexus`, `/nexus-dashboard`, `/nexus-model`, and more |
 
 ---
@@ -128,12 +132,12 @@ console.log(`Completed in ${result.totalDuration}ms, cost: $${result.totalCost}`
 Each agent runs in its own OpenCode session with the correct model and role-specific system prompt:
 
 ```typescript
-// Creates a real OpenCode session
-const session = await ctx.session.create({ title: '[Nexus] coder-agent-a1b2c3d4' })
-
-// Switches to the appropriate agent and model
-await ctx.session.switchAgent({ sessionID: session.id, agent: 'build' })
-await ctx.session.switchModel({ sessionID: session.id, model: { providerID: 'anthropic', id: 'claude-sonnet-4-6' } })
+// Creates a real OpenCode session with descriptive title
+const session = await ctx.session.create({
+  title: '💻 Coder — anthropic/claude-sonnet-4-6',
+  agent: 'build',
+  model: { providerID: 'anthropic', id: 'claude-sonnet-4-6' }
+})
 
 // Sends the task prompt
 await ctx.session.prompt({ sessionID: session.id, text: 'You are a senior software engineer...' })
@@ -154,33 +158,123 @@ Each agent role gets a specialized prompt:
 
 ### Cost-Aware Model Selection
 
-Nexus automatically selects cheaper models when budget is running low:
+Nexus scores models by quality, cost, and speed — then picks the optimal one per task complexity:
 
 ```typescript
-const orchestrator = new NexusOrchestrator({
-  budget: {
-    maxTotalCost: 10.00,
-    maxCostPerTask: 1.00,
-    alertThreshold: 0.2  // Alert at 20% remaining
-  }
-})
+// High-complexity tasks favor quality models
+// Low-complexity tasks favor cheap/fast models
+// Budget remaining filters out unaffordable models
 
-// When budget < $1 remaining, falls back to free tier
-// Otherwise uses configured model for the role
+const result = orchestrator.selectBestModel('coder', complexityScore)
+// → { provider: 'anthropic', model: 'claude-sonnet-4-6', overallScore: 0.82 }
 ```
 
-### Self-Healing
+### Self-Healing with Escalation
 
-Failed tasks are automatically retried with exponential backoff:
+Failed tasks follow a 4-step escalation chain:
+
+1. **Retry** — Exponential backoff (1s, 2s, 4s...)
+2. **Respawn** — Collect context, spawn new agent with transferred state
+3. **Fallback Model** — Try cheaper alternative model
+4. **Alert** — Emit escalation event, mark as failed
 
 ```typescript
 const orchestrator = new NexusOrchestrator({
   selfHealing: {
     enabled: true,
     maxRetries: 3,
-    retryDelay: 1000,
-    backoffMultiplier: 2  // 1s, 2s, 4s delays
+    contextTransfer: true
   }
+})
+```
+
+### Web Dashboard
+
+Real-time monitoring via embedded HTTP + WebSocket server:
+
+```bash
+# Start dashboard
+Use nexus.dashboard.start with port=4747
+
+# Open in browser
+open http://localhost:4747
+```
+
+Features: Agent grid, cost tracker, DAG visualization, activity log, config panel.
+
+### Persistent Memory
+
+SQLite-backed memory store that survives restarts:
+
+```typescript
+orchestrator.memoryStore.set({
+  key: 'api-pattern',
+  value: { endpoint: '/users', method: 'GET' },
+  scope: 'project',
+  author: 'architect',
+  confidence: 0.9,
+  tags: ['api', 'design']
+})
+
+// Search across all memory
+const results = orchestrator.memoryStore.search('api pattern')
+```
+
+### Learning Module
+
+Records failure patterns and solutions, building confidence over time:
+
+```typescript
+// Automatically records failures during execution
+// Finds similar past failures and suggests solutions
+// Confidence increases with successful reuse
+
+const solutions = orchestrator.learning.findSolutions('TypeScript TS2345 error')
+// → [{ entry: { solution: 'Add type cast', confidence: 0.85 }, similarity: 0.7 }]
+```
+
+### JSONC Configuration
+
+Read and write config files with comments:
+
+```jsonc
+// .opencode/nexus.jsonc (project-level)
+{
+  // Agent models for each role
+  "models": {
+    "architect": "anthropic/claude-sonnet-4-6",
+    "coder": "opencode-go/mimo-v2.5"
+  },
+  "budget": { "maxTotalCost": 10.00 }
+}
+```
+
+Precedence: project > global > TUI > defaults.
+
+### Preset Configurations
+
+Quickly apply predefined configs:
+
+| Preset | Models | Budget | Self-Healing |
+|--------|--------|--------|--------------|
+| **minimal** | Gemini Flash | $1 | Off |
+| **balanced** | Claude/GPT mix | $10 | On (3 retries) |
+| **enterprise** | Top-tier | $50 | On (5 retries) |
+| **cost-optimized** | Cheapest | $3 | On (2 retries) |
+
+### Composable Modules
+
+Extend Nexus with custom modules:
+
+```typescript
+import { NexusPlugin } from '@serkanalgur/opencode-nexus'
+
+NexusPlugin.register({
+  name: 'my-custom-module',
+  description: 'Custom feature',
+  version: '1.0.0',
+  setup: async (ctx) => { /* ... */ },
+  teardown: async () => { /* ... */ }
 })
 ```
 
@@ -212,21 +306,33 @@ Register these tools in your agent prompts:
 | `nexus.costs` | Cost report & budget | `{}` |
 | `nexus.dashboard` | Full state for dashboard | `{}` |
 | `nexus.spawn` | Spawn a sub-agent | `{ role: string, task: string, model?: string }` |
+| `nexus.queue` | Show task queue with priorities | `{}` |
+| `nexus.config.save` | Save config to disk | `{ level: 'project' \| 'global' }` |
+| `nexus.config.init` | Initialize config files | `{ level: 'project' \| 'global' \| 'both' }` |
+| `nexus.dashboard.start` | Start web dashboard | `{ port?: number, host?: string }` |
+| `nexus.dashboard.stop` | Stop web dashboard | `{}` |
+| `nexus.preset` | Apply preset config | `{ name: string }` |
+| `nexus.template` | List/instantiate templates | `{ name?: string, baseDir?: string }` |
 
 ### Tool Examples
 
 ```
-# Spawn a coder agent
+# Spawn a coder agent with complexity analysis
 Use nexus.spawn with role="coder" and task="Implement JWT auth middleware"
+# → 💻 Coder — anthropic/claude-sonnet-4-6
+# → 📊 Complexity: 45/100 (low risk)
 
 # Check status
 Use nexus.status with detailed=true
 
-# List agents
-Use nexus.agents with filter="idle"
+# Apply a preset
+Use nexus.preset with name="balanced"
 
-# Get cost report
-Use nexus.costs
+# Initialize config
+Use nexus.config.init with level="project"
+
+# Start web dashboard
+Use nexus.dashboard.start with port=4747
 ```
 
 ---
@@ -272,8 +378,8 @@ Configure via `/nexus` or `Ctrl+N`:
 │                                                                 │
 │  ┌──────────────────────────────────────────────────┐          │
 │  │              SERVER PLUGIN (index.ts)              │          │
-│  │  • Tool registration (status, agents, costs,      │          │
-│  │    dashboard, spawn)                              │          │
+│  │  • 12 tool registrations (spawn, status, costs,   │          │
+│  │    dashboard, config, preset, template, queue)    │          │
 │  │  • Session hook for /nexus commands               │          │
 │  │  • State persistence to storage                   │          │
 │  └──────────────────────────────────────────────────┘          │
@@ -281,26 +387,51 @@ Configure via `/nexus` or `Ctrl+N`:
 │  ┌──────────────────────────────────────────────────┐          │
 │  │            ORCHESTRATOR (orchestrator.ts)          │          │
 │  │  • Real OpenCode session creation                  │          │
-│  │  • DAG-based task execution                        │          │
-│  │  • Role-specific system prompts                    │          │
-│  │  • Cost tracking & budget enforcement              │          │
-│  │  • Self-healing with retry & backoff               │          │
+│  │  • DAG-based task execution with priority          │          │
+│  │  • Cost-aware model routing (scored selection)     │          │
+│  │  • Self-healing with escalation policies           │          │
+│  │  • Context transfer to respawned agents            │          │
+│  │  • Cycle detection for deadlock prevention         │          │
+│  │  • Performance: lazy init, debounce, cleanup       │          │
+│  └──────────────────────────────────────────────────┘          │
+│                                                                 │
+│  ┌──────────────────────────────────────────────────┐          │
+│  │              MODULES                               │          │
+│  │  ┌────────────┐ ┌──────────┐ ┌────────────────┐  │          │
+│  │  │ Health     │ │ Learning │ │ Message Store  │  │          │
+│  │  │ Monitor    │ │ Module   │ │ (JSONL+SQLite) │  │          │
+│  │  └────────────┘ └──────────┘ └────────────────┘  │          │
+│  │  ┌────────────┐ ┌──────────┐ ┌────────────────┐  │          │
+│  │  │ Persistent │ │ Fan-Out  │ │ Notifications  │  │          │
+│  │  │ Memory     │ │ Router   │ │ (OS native)    │  │          │
+│  │  └────────────┘ └──────────┘ └────────────────┘  │          │
+│  │  ┌────────────┐ ┌──────────┐                      │          │
+│  │  │ State      │ │ Module   │                      │          │
+│  │  │ Broadcaster│ │ Registry │                      │          │
+│  │  └────────────┘ └──────────┘                      │          │
+│  └──────────────────────────────────────────────────┘          │
+│                                                                 │
+│  ┌──────────────────────────────────────────────────┐          │
+│  │              WEB DASHBOARD                         │          │
+│  │  • Bun.serve() HTTP + WebSocket (port 4747)       │          │
+│  │  • REST: /api/state, /api/config, /api/agents     │          │
+│  │  • WebSocket: /ws/events (real-time updates)      │          │
+│  │  • SPA: Agent grid, DAG viz, cost tracker         │          │
+│  └──────────────────────────────────────────────────┘          │
+│                                                                 │
+│  ┌──────────────────────────────────────────────────┐          │
+│  │              CONFIG                                │          │
+│  │  • JSONC file loading (project + global)           │          │
+│  │  • Config creation and initialization              │          │
+│  │  • Preset configurations (4 presets)               │          │
+│  │  • Task templates (feature, bugfix, refactor)      │          │
 │  └──────────────────────────────────────────────────┘          │
 │                                                                 │
 │  ┌──────────────────────────────────────────────────┐          │
 │  │              TUI PLUGIN (tui.tsx)                  │          │
 │  │  • /nexus slash commands                           │          │
-│  │  • /nexus-dashboard                                │          │
 │  │  • Configuration dialogs (model selection)         │          │
 │  │  • Keyboard shortcut (Ctrl+N)                      │          │
-│  └──────────────────────────────────────────────────┘          │
-│                                                                 │
-│  ┌──────────────────────────────────────────────────┐          │
-│  │              OpenCode SESSION API                   │          │
-│  │  ctx.session.create() → session per agent          │          │
-│  │  ctx.session.prompt()  → send task                 │          │
-│  │  ctx.session.wait()    → wait for completion       │          │
-│  │  ctx.session.context() → read results              │          │
 │  └──────────────────────────────────────────────────┘          │
 └─────────────────────────────────────────────────────────────────┘
 ```
