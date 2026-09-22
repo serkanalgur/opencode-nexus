@@ -120,8 +120,8 @@ export class NexusOrchestrator {
   // Dashboard server
   public dashboard: DashboardModule | null = null
 
-  // Health monitor
-  public healthMonitor: HealthMonitor | null = null
+  // Health monitor (lazy-initialized via getter)
+  private _healthMonitor: HealthMonitor | null = null
 
   // Escalation policy for self-healing
   private escalationPolicy: EscalationPolicy
@@ -131,6 +131,20 @@ export class NexusOrchestrator {
 
   // State update callback
   private onStateChange: (() => void) | null = null
+
+  // State change debounce timer
+  private stateChangeTimer: ReturnType<typeof setTimeout> | null = null
+
+  // Cost history for periodic cleanup
+  private costHistory: Array<{ timestamp: number; cost: number; agentId: string }> = []
+
+  // Cleanup interval handle
+  private cleanupInterval: ReturnType<typeof setInterval> | null = null
+
+  // Lazy-initialized health monitor
+  get healthMonitor(): HealthMonitor | null {
+    return this._healthMonitor
+  }
 
   constructor(config?: Partial<NexusConfig>, messageStoreConfig?: Partial<MessageStoreConfig>, memoryStoreConfig?: Partial<MemoryStoreConfig>) {
     this.config = this.mergeConfig(config)
@@ -159,10 +173,8 @@ export class NexusOrchestrator {
     // Load project/global config files from disk
     this.configManager.loadFromPath(process.cwd())
 
-    // Initialize health monitor
-    this.healthMonitor = new HealthMonitor({
-      checkInterval: this.config.agents.healthCheckInterval
-    })
+    // Start periodic cleanup of stale data (every 5 minutes)
+    this.cleanupInterval = setInterval(() => this.cleanupStaleData(), 300000)
   }
 
   /**
@@ -315,8 +327,12 @@ export class NexusOrchestrator {
     }
   }
 
-  private notifyStateChange() {
-    this.onStateChange?.()
+  protected notifyStateChange(): void {
+    if (this.stateChangeTimer) return
+    this.stateChangeTimer = setTimeout(() => {
+      this.stateChangeTimer = null
+      this.onStateChange?.()
+    }, 100) // 100ms debounce
   }
 
   // === Core Operations ===
@@ -778,9 +794,13 @@ export class NexusOrchestrator {
     this.emit('agent:spawned', agent)
     this.notifyStateChange()
 
-    // Start health monitoring if not already running
-    if (this.healthMonitor && !this.healthMonitor.isActive()) {
-      this.healthMonitor.start(() => Array.from(this.agents.values()))
+    // Enforce agent map size limit
+    this.enforceAgentLimit()
+
+    // Start health monitoring if not already running (lazy init)
+    const monitor = this.getOrCreateHealthMonitor()
+    if (!monitor.isActive()) {
+      monitor.start(() => Array.from(this.agents.values()))
     }
 
     return agent
@@ -795,8 +815,8 @@ export class NexusOrchestrator {
       this.notifyStateChange()
 
       // Stop health monitoring if no more agents
-      if (this.healthMonitor && this.agents.size === 0) {
-        this.healthMonitor.stop()
+      if (this._healthMonitor && this.agents.size === 0) {
+        this._healthMonitor.stop()
       }
     }
   }
@@ -959,6 +979,7 @@ export class NexusOrchestrator {
     this.costByAgent.set(agentId, agentCost + cost)
     const modelCost = this.costByModel.get(model) || 0
     this.costByModel.set(model, modelCost + cost)
+    this.costHistory.push({ timestamp: Date.now(), cost, agentId })
     this.checkBudget()
     this.notifyStateChange()
   }
@@ -1085,19 +1106,78 @@ export class NexusOrchestrator {
   }
 
   shutdown(): void {
-    this.healthMonitor?.stop()
+    this._healthMonitor?.stop()
     this.stopDashboard()
     this.memoryStore.close()
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval)
+      this.cleanupInterval = null
+    }
+    if (this.stateChangeTimer) {
+      clearTimeout(this.stateChangeTimer)
+      this.stateChangeTimer = null
+    }
     this.agents.forEach((agent) => {
       agent.status = 'terminated'
     })
     this.agents.clear()
     this.running = false
     this.emit('orchestrator:shutdown', {})
-    this.notifyStateChange()
+    this.onStateChange?.()
   }
 
   // === Helpers ===
+
+  /**
+   * Periodically clean up stale agents and cost history to prevent unbounded memory growth.
+   */
+  private cleanupStaleData(): void {
+    const now = Date.now()
+
+    // Clean old terminated agents (terminated for > 1 hour)
+    for (const [id, agent] of this.agents) {
+      if (agent.status === 'terminated' &&
+          now - agent.lastActivity.getTime() > 3600000) {
+        this.agents.delete(id)
+      }
+    }
+
+    // Trim cost history if it grows too large (keep last 500 entries)
+    if (this.costHistory.length > 1000) {
+      this.costHistory = this.costHistory.slice(-500)
+    }
+  }
+
+  /**
+   * Enforce agent map size limit to prevent unbounded growth.
+   * Removes oldest terminated agents when over the concurrency limit.
+   */
+  private enforceAgentLimit(): void {
+    const MAX_AGENTS = this.config.maxConcurrency || 10
+    if (this.agents.size > MAX_AGENTS) {
+      // Find oldest terminated agents to clean up first
+      const terminated = [...this.agents.entries()]
+        .filter(([_, a]) => a.status === 'terminated')
+        .sort((a, b) => a[1].lastActivity.getTime() - b[1].lastActivity.getTime())
+
+      const toRemove = terminated.slice(0, this.agents.size - MAX_AGENTS)
+      for (const [id] of toRemove) {
+        this.agents.delete(id)
+      }
+    }
+  }
+
+  /**
+   * Get or lazily initialize the health monitor
+   */
+  private getOrCreateHealthMonitor(): HealthMonitor {
+    if (!this._healthMonitor) {
+      this._healthMonitor = new HealthMonitor({
+        checkInterval: this.config.agents.healthCheckInterval
+      })
+    }
+    return this._healthMonitor
+  }
 
   private collectResults(): TaskResult[] {
     const results: TaskResult[] = []
