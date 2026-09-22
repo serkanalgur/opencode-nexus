@@ -323,10 +323,81 @@ export default Plugin.define({
     // Auto-create nexus-orchestrator agent if it doesn't exist
     try {
       const agentDir = join(homedir(), '.config', 'opencode', 'agents')
-      const agentFile = join(agentDir, 'nexus-orchestrator.md')
-      if (!existsSync(agentFile)) {
-        mkdirSync(agentDir, { recursive: true })
-        writeFileSync(agentFile, NEXUS_AGENT_CONTENT, 'utf-8')
+      mkdirSync(agentDir, { recursive: true })
+      
+      // Create primary orchestrator agent
+      const orchestratorFile = join(agentDir, 'nexus-orchestrator.md')
+      if (!existsSync(orchestratorFile)) {
+        writeFileSync(orchestratorFile, NEXUS_AGENT_CONTENT, 'utf-8')
+      }
+
+      // Create subagent files for Nexus roles
+      const subagents: Record<string, string> = {
+        'nexus-coder.md': `---
+description: Nexus Coder agent — implements code with cost-aware model selection
+mode: subagent
+permissions:
+  - action: edit
+    resource: "*"
+  - action: shell
+    resource: "*"
+---
+
+# Nexus Coder Agent
+
+You are a Nexus Coder sub-agent. Implement code tasks assigned by the Nexus Orchestrator.
+
+- Write clean, efficient TypeScript/JavaScript code
+- Follow existing code patterns
+- Add tests for functionality
+- Use model from nexus config for your role
+- Commit with conventional commit messages`,
+
+        'nexus-explorer.md': `---
+description: Nexus Explorer agent — explores codebases and provides architecture analysis
+mode: subagent
+permissions:
+  - action: edit
+    resource: "*"
+    effect: deny
+---
+
+# Nexus Explorer Agent
+
+You are a Nexus Explorer sub-agent. Explore codebases to understand architecture.
+
+- Read-only exploration
+- Find files by patterns
+- Analyze dependencies
+- Report architecture findings
+- Suggest improvements`,
+
+        'nexus-tester.md': `---
+description: Nexus Tester agent — writes and runs tests for quality assurance
+mode: subagent
+permissions:
+  - action: edit
+    resource: "*"
+  - action: shell
+    resource: "*"
+---
+
+# Nexus Tester Agent
+
+You are a Nexus Tester sub-agent. Write and run tests.
+
+- Unit tests for new functions
+- Integration tests for features
+- Test edge cases and errors
+- Run security scan on test code
+- Follow existing test patterns`
+      }
+
+      for (const [filename, content] of Object.entries(subagents)) {
+        const filepath = join(agentDir, filename)
+        if (!existsSync(filepath)) {
+          writeFileSync(filepath, content, 'utf-8')
+        }
       }
     } catch {
       // Agent creation is best-effort

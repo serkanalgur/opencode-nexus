@@ -420,9 +420,8 @@ export default Plugin.define({
     })
 
     // Subscribe to state changes from the server plugin
-    const unsubStorage = context.data.on("session.updated", (event) => {
+    const unsubStorage = context.data.on("model.updated" as any, (event: any) => {
       // When sessions update, we can sync state
-      // The server plugin persists state to storage, we read it here
     })
 
     // Register sidebar content slot
@@ -450,7 +449,7 @@ export default Plugin.define({
               id: s!.id,
               name: s!.title || s!.id.slice(0, 12),
               role: 'agent',
-              status: s!.status === 'running' ? 'working' as const : 'completed' as const,
+              status: 'idle' as const,
               model: '',
               sessionID: s!.id,
               spawnedAt: new Date().toISOString(),
