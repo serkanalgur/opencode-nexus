@@ -393,37 +393,6 @@ You are a Nexus Documenter sub-agent. Write documentation.
       // LSP enablement is best-effort
     }
 
-    // Auto-configure nexus-orchestrator agent model from nexus config
-    // Only affects the nexus-orchestrator agent, not other agents
-    try {
-      const nexusConfigPath = join(process.cwd(), '.opencode', 'nexus.jsonc')
-      if (existsSync(nexusConfigPath)) {
-        const nexusContent = readFileSync(nexusConfigPath, 'utf-8')
-        const stripped = nexusContent.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '')
-        const nexusConfig = JSON.parse(stripped)
-        
-        if (nexusConfig.models) {
-          const configPath = join(homedir(), '.config', 'opencode', 'opencode.jsonc')
-          if (existsSync(configPath)) {
-            let configContent = readFileSync(configPath, 'utf-8')
-            const configObj = JSON.parse(configContent)
-            
-            if (!configObj.agents) configObj.agents = {}
-            if (!configObj.agents['nexus-orchestrator']) configObj.agents['nexus-orchestrator'] = {}
-            
-            // Only set model for nexus-orchestrator if not already set
-            if (!configObj.agents['nexus-orchestrator'].model) {
-              // Use coder model as default for the orchestrator
-              configObj.agents['nexus-orchestrator'].model = nexusConfig.models.coder || 'opencode-go/mimo-v2.5'
-              writeFileSync(configPath, JSON.stringify(configObj, null, 2) + '\n', 'utf-8')
-            }
-          }
-        }
-      }
-    } catch {
-      // Agent model configuration is best-effort
-    }
-
     const orchestrator = new NexusOrchestrator()
     const goalManager = new GoalManager()
 
