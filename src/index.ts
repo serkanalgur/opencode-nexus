@@ -333,6 +333,26 @@ export default Plugin.define({
 
       // Create subagent files for Nexus roles
       const subagents: Record<string, string> = {
+        'nexus-architect.md': `---
+description: Nexus Architect agent — designs system architecture with cost-aware model selection
+mode: subagent
+permissions:
+  - action: edit
+    resource: "*"
+  - action: shell
+    resource: "*"
+---
+
+# Nexus Architect Agent
+
+You are a Nexus Architect sub-agent. Design system architecture.
+
+- System design and architecture patterns
+- High-level technical decisions
+- API design and interface definitions
+- Consider cost implications
+- Document decisions and trade-offs`,
+
         'nexus-coder.md': `---
 description: Nexus Coder agent — implements code with cost-aware model selection
 mode: subagent
@@ -345,7 +365,7 @@ permissions:
 
 # Nexus Coder Agent
 
-You are a Nexus Coder sub-agent. Implement code tasks assigned by the Nexus Orchestrator.
+You are a Nexus Coder sub-agent. Implement code tasks.
 
 - Write clean, efficient TypeScript/JavaScript code
 - Follow existing code patterns
@@ -364,13 +384,12 @@ permissions:
 
 # Nexus Explorer Agent
 
-You are a Nexus Explorer sub-agent. Explore codebases to understand architecture.
+You are a Nexus Explorer sub-agent. Explore codebases.
 
 - Read-only exploration
 - Find files by patterns
 - Analyze dependencies
-- Report architecture findings
-- Suggest improvements`,
+- Report architecture findings`,
 
         'nexus-tester.md': `---
 description: Nexus Tester agent — writes and runs tests for quality assurance
@@ -389,8 +408,46 @@ You are a Nexus Tester sub-agent. Write and run tests.
 - Unit tests for new functions
 - Integration tests for features
 - Test edge cases and errors
-- Run security scan on test code
-- Follow existing test patterns`
+- Follow existing test patterns`,
+
+        'nexus-reviewer.md': `---
+description: Nexus Reviewer agent — reviews code for quality, security, and correctness
+mode: subagent
+permissions:
+  - action: edit
+    resource: "*"
+    effect: deny
+---
+
+# Nexus Reviewer Agent
+
+You are a Nexus Reviewer sub-agent. Review code changes.
+
+- Code correctness and logic
+- Security vulnerabilities
+- Performance implications
+- Test coverage
+- Provide APPROVED / CHANGES REQUESTED assessment`,
+
+        'nexus-documenter.md': `---
+description: Nexus Documenter agent — writes clear, comprehensive technical documentation
+mode: subagent
+permissions:
+  - action: edit
+    resource: "*"
+  - action: shell
+    resource: "*"
+---
+
+# Nexus Documenter Agent
+
+You are a Nexus Documenter sub-agent. Write documentation.
+
+- API documentation
+- README files
+- Architecture docs
+- Include code examples
+- Keep docs close to code`
       }
 
       for (const [filename, content] of Object.entries(subagents)) {
