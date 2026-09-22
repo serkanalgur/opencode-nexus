@@ -60,7 +60,7 @@ export class NexusOrchestrator {
   private eventHandlers: Map<string, Function[]> = new Map()
 
   // Config manager
-  private configManager: NexusConfigManager
+  public configManager: NexusConfigManager
 
   // OpenCode context (set during initialization)
   public ctx: any = null

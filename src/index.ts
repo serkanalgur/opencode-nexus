@@ -88,6 +88,56 @@ export default Plugin.define({
       })
 
       editor.add({
+        name: "config.save",
+        description: "Save Nexus config to disk (project or global)",
+        input: {
+          type: "object",
+          properties: {
+            level: { type: "string", enum: ["project", "global"], description: "Config level to save" },
+            basePath: { type: "string", description: "Project root (for project-level, defaults to cwd)" }
+          },
+          required: ["level"],
+          additionalProperties: false
+        },
+        execute: async (input: unknown) => {
+          const { level, basePath } = input as { level: 'project' | 'global'; basePath?: string }
+          orchestrator.configManager.saveConfig(level, basePath || process.cwd())
+          const location = level === 'project'
+            ? `${basePath || process.cwd()}/.opencode/nexus.jsonc`
+            : '~/.config/opencode/nexus.jsonc'
+          return { content: `Config saved to ${level} level at ${location}` }
+        }
+      })
+
+      editor.add({
+        name: "config.init",
+        description: "Initialize default config files for project and/or global",
+        input: {
+          type: "object",
+          properties: {
+            level: { type: "string", enum: ["project", "global", "both"], description: "Which config to initialize" },
+            basePath: { type: "string", description: "Project root" }
+          },
+          required: ["level"],
+          additionalProperties: false
+        },
+        execute: async (input: unknown) => {
+          const { level, basePath } = input as { level: 'project' | 'global' | 'both'; basePath?: string }
+          const path = basePath || process.cwd()
+          const locations: string[] = []
+          if (level === 'project' || level === 'both') {
+            orchestrator.configManager.saveProjectConfig(path)
+            locations.push(`${path}/.opencode/nexus.jsonc`)
+          }
+          if (level === 'global' || level === 'both') {
+            orchestrator.configManager.saveGlobalConfig()
+            locations.push('~/.config/opencode/nexus.jsonc')
+          }
+          return { content: `Config initialized at ${level} level(s): ${locations.join(', ')}` }
+        }
+      })
+
+      editor.add({
         name: "spawn",
         description: "Spawn a sub-agent for a task",
         input: {
