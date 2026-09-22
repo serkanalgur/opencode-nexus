@@ -138,6 +138,38 @@ export default Plugin.define({
       })
 
       editor.add({
+        name: "dashboard.start",
+        description: "Start the web dashboard server",
+        input: {
+          type: "object",
+          properties: {
+            port: { type: "number", description: "Port (default: 4747)" },
+            host: { type: "string", description: "Host (default: 127.0.0.1)" }
+          },
+          additionalProperties: false
+        },
+        execute: async (input: unknown) => {
+          const { port, host } = input as { port?: number; host?: string }
+          orchestrator.startDashboard(port, host)
+          return { content: `Dashboard started at http://${host || '127.0.0.1'}:${port || 4747}` }
+        }
+      })
+
+      editor.add({
+        name: "dashboard.stop",
+        description: "Stop the web dashboard server",
+        input: {
+          type: "object",
+          properties: {},
+          additionalProperties: false
+        },
+        execute: async () => {
+          orchestrator.stopDashboard()
+          return { content: "Dashboard stopped" }
+        }
+      })
+
+      editor.add({
         name: "spawn",
         description: "Spawn a sub-agent for a task",
         input: {
