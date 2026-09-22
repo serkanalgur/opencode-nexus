@@ -209,6 +209,50 @@ export default Plugin.define({
       })
 
       editor.add({
+        name: "model.costs",
+        description: "Show real model pricing from OpenCode or set custom costs",
+        input: {
+          type: "object",
+          properties: {
+            model: { type: "string", description: "Model ID to show cost for (optional, shows all if omitted)" },
+            setInput: { type: "number", description: "Set input cost per token for a model" },
+            setOutput: { type: "number", description: "Set output cost per token for a model" }
+          },
+          additionalProperties: false
+        },
+        execute: async (input: unknown) => {
+          const { model, setInput, setOutput } = input as { model?: string; setInput?: number; setOutput?: number }
+
+          if (model && setInput !== undefined && setOutput !== undefined) {
+            // Set custom cost
+            orchestrator.setModelCosts({ [model]: { input: setInput, output: setOutput } })
+            return { content: `Set ${model}: input=$${setInput}/token, output=$${setOutput}/token` }
+          }
+
+          if (model) {
+            // Show specific model cost
+            const cost = orchestrator.modelCosts.get(model)
+            if (cost) {
+              return { content: `${model}: input=$${cost.input}/token, output=$${cost.output}/token, cache_read=$${cost.cacheRead}/token, cache_write=$${cost.cacheWrite}/token` }
+            }
+            // Fallback to hardcoded estimate
+            const estimate = orchestrator['estimateModelCost'](model)
+            return { content: `${model}: no real pricing data (estimated $${estimate}/1K tokens)` }
+          }
+
+          // Show all loaded costs
+          if (orchestrator.modelCosts.size > 0) {
+            const lines = ['📊 Model Pricing (from OpenCode):']
+            for (const [id, cost] of orchestrator.modelCosts) {
+              lines.push(`  ${id}: $${cost.input}/token in, $${cost.output}/token out`)
+            }
+            return { content: lines.join('\n') }
+          }
+          return { content: 'No real pricing data loaded. Using hardcoded estimates.' }
+        }
+      })
+
+      editor.add({
         name: "spawn",
         description: "Spawn a sub-agent for a task",
         input: {

@@ -162,6 +162,9 @@ export class NexusOrchestrator {
   // OS notification manager
   public notifications: NotificationManager | null = null
 
+  // Real model pricing from OpenCode (populated via loadModelCosts)
+  public modelCosts: Map<string, { input: number; output: number; cacheRead: number; cacheWrite: number }> = new Map()
+
   constructor(config?: Partial<NexusConfig>, messageStoreConfig?: Partial<MessageStoreConfig>, memoryStoreConfig?: Partial<MemoryStoreConfig>) {
     this.config = this.mergeConfig(config)
     this.budget = this.config.budget
@@ -196,6 +199,9 @@ export class NexusOrchestrator {
     // Load project/global config files from disk
     this.configManager.loadFromPath(process.cwd())
 
+    // Load real model pricing from OpenCode
+    await this.loadModelCosts()
+
     // Start periodic cleanup of stale data (every 5 minutes)
     this.cleanupInterval = setInterval(() => this.cleanupStaleData(), 300000)
 
@@ -215,6 +221,70 @@ export class NexusOrchestrator {
       on: (event: string, handler: (data: any) => void) => { this.on(event, handler) }
     }
     await this.moduleRegistry.setupAll(moduleCtx)
+  }
+
+  /**
+   * Load real model pricing from OpenCode's model list API.
+   * Falls back to hardcoded values if API is unavailable.
+   */
+  private async loadModelCosts(): Promise<void> {
+    try {
+      if (!this.ctx) return
+
+      // Method 1: Try via plugin client SDK (server plugin context)
+      if (this.ctx.client?.model?.list) {
+        const result = await this.ctx.client.model.list()
+        const models = result?.data?.data ?? result?.data ?? []
+        if (Array.isArray(models)) {
+          for (const model of models) {
+            if (model.cost && Array.isArray(model.cost) && model.cost.length > 0) {
+              const baseCost = model.cost[0]
+              this.modelCosts.set(model.id, {
+                input: baseCost.input || 0,
+                output: baseCost.output || 0,
+                cacheRead: baseCost.cache?.read || 0,
+                cacheWrite: baseCost.cache?.write || 0,
+              })
+            }
+          }
+        }
+        return
+      }
+
+      // Method 2: Try via TUI location context (if available)
+      const location = this.ctx.location ?? this.ctx.data?.location?.default()
+      if (location && this.ctx.data?.location?.model) {
+        await this.ctx.data.location.model.sync(location)
+        const models = this.ctx.data.location.model.list(location) ?? []
+        for (const model of models) {
+          if (model.cost && Array.isArray(model.cost) && model.cost.length > 0) {
+            const baseCost = model.cost[0]
+            this.modelCosts.set(model.id, {
+              input: baseCost.input || 0,
+              output: baseCost.output || 0,
+              cacheRead: baseCost.cache?.read || 0,
+              cacheWrite: baseCost.cache?.write || 0,
+            })
+          }
+        }
+      }
+    } catch {
+      // Cost loading is best-effort — hardcoded fallbacks will be used
+    }
+  }
+
+  /**
+   * Manually set model costs (e.g., from TUI model list)
+   */
+  setModelCosts(costs: Record<string, { input: number; output: number; cacheRead?: number; cacheWrite?: number }>): void {
+    for (const [model, cost] of Object.entries(costs)) {
+      this.modelCosts.set(model, {
+        input: cost.input,
+        output: cost.output,
+        cacheRead: cost.cacheRead || 0,
+        cacheWrite: cost.cacheWrite || 0,
+      })
+    }
   }
 
   /**
@@ -951,6 +1021,15 @@ export class NexusOrchestrator {
   }
 
   private estimateModelCost(model: string): number {
+    // Try real pricing data first
+    const realCost = this.modelCosts.get(model)
+    if (realCost) {
+      // Estimate cost per 1K tokens (input + output averaged)
+      // Real pricing is per-token, we estimate per 1K tokens for budget tracking
+      return (realCost.input * 1000 + realCost.output * 1000) / 2
+    }
+
+    // Fallback to hardcoded estimates
     const costs: Record<string, number> = {
       'claude-sonnet-4-6': 0.15,
       'claude-opus-4-7': 15.00,
