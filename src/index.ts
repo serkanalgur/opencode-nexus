@@ -1178,6 +1178,76 @@ You are a Nexus Documenter sub-agent. Write documentation.
           return { content: response }
         }
       })
+
+      // === Todo Enforcer Tools ===
+
+      editor.add({
+        name: "todo.add",
+        description: "Add a todo item to track work",
+        input: {
+          type: "object",
+          properties: {
+            description: { type: "string", description: "Todo description" },
+            assignedTo: { type: "string", description: "Agent or role to assign (optional)" }
+          },
+          required: ["description"],
+          additionalProperties: false
+        },
+        execute: async (input: unknown) => {
+          const { description, assignedTo } = input as { description: string; assignedTo?: string }
+          const item = orchestrator.todoEnforcer.add(description, assignedTo)
+          return { content: `📝 Todo added: ${item.id}: ${item.description} (${item.status})` }
+        }
+      })
+
+      editor.add({
+        name: "todo.list",
+        description: "List all todo items",
+        input: {
+          type: "object",
+          properties: {},
+          additionalProperties: false
+        },
+        execute: async () => {
+          return { content: orchestrator.todoEnforcer.formatAll() }
+        }
+      })
+
+      editor.add({
+        name: "todo.complete",
+        description: "Mark a todo item as completed",
+        input: {
+          type: "object",
+          properties: {
+            id: { type: "string", description: "Todo item ID" }
+          },
+          required: ["id"],
+          additionalProperties: false
+        },
+        execute: async (input: unknown) => {
+          const { id } = input as { id: string }
+          const item = orchestrator.todoEnforcer.get(id)
+          if (!item) return { content: `❌ Todo ${id} not found.` }
+          orchestrator.todoEnforcer.complete(id)
+          return { content: `✅ Todo completed: ${id}: ${item.description}` }
+        }
+      })
+
+      editor.add({
+        name: "todo.stats",
+        description: "Get todo statistics",
+        input: {
+          type: "object",
+          properties: {},
+          additionalProperties: false
+        },
+        execute: async () => {
+          const stats = orchestrator.todoEnforcer.getStats()
+          return {
+            content: `📊 Todo Statistics:\n  Total: ${stats.total}\n  ⏳ Pending: ${stats.pending}\n  🔄 In Progress: ${stats.inProgress}\n  ✅ Completed: ${stats.completed}\n  🚫 Blocked: ${stats.blocked}`
+          }
+        }
+      })
     })
 
     // Register session hook for /nexus commands
@@ -1225,3 +1295,5 @@ export { CostForecaster } from "./forecast"
 export type { CostEstimate, ForecastResult } from "./forecast"
 export { WorktreeManager } from "./worktree"
 export type { AgentWorktree } from "./worktree"
+export { TodoEnforcer } from "./todo"
+export type { TodoItem } from "./todo"

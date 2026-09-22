@@ -21,6 +21,7 @@ import { ExecutionHistory } from "./history"
 import { CustomRoleManager } from "./custom-roles"
 import { CostForecaster } from "./forecast"
 import { WorktreeManager } from "./worktree"
+import { TodoEnforcer } from "./todo"
 
 export interface ModelScore {
   model: string
@@ -161,6 +162,9 @@ export class NexusOrchestrator {
 
   // Git worktree manager for agent isolation
   public worktreeManager: WorktreeManager | null = null
+
+  // Todo enforcer for task tracking
+  public todoEnforcer: TodoEnforcer = new TodoEnforcer()
 
   // State update callback
   private onStateChange: (() => void) | null = null
@@ -734,6 +738,7 @@ export class NexusOrchestrator {
       }
 
       this.dag!.markComplete(node.id, result)
+      this.todoEnforcer.completeTask(agent.id)
       agent.metrics.tasksCompleted++
       agent.metrics.totalCost += result.cost
       this.totalSpent += result.cost
@@ -800,6 +805,7 @@ export class NexusOrchestrator {
       }
 
       this.dag!.markFailed(node.id, new Error(errorMessage))
+      this.todoEnforcer.completeTask(agent.id)
       agent.metrics.tasksFailed++
       agent.status = 'failed'
 
@@ -1072,6 +1078,11 @@ export class NexusOrchestrator {
     }
 
     this.agents.set(agentId, agent)
+
+    // Auto-add todo for the spawned task
+    const taskDesc = config.task?.name || `Agent ${config.role} task`
+    this.todoEnforcer.trackTask(agentId, taskDesc, config.role)
+
     this.emit('agent:spawned', agent)
     this.notifyStateChange()
 
