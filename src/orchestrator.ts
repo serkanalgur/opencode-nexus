@@ -12,6 +12,8 @@ import { MessageStore, type MessageStoreConfig } from "./message-store"
 import { PersistentMemoryStore, type MemoryStoreConfig } from "./memory-store"
 import { HealthMonitor } from "./health"
 import { MessageRouter } from "./fanout"
+import { LearningModule } from "./learning"
+import { ModuleRegistry, type ModuleContext } from "./modules"
 
 export interface ModelScore {
   model: string
@@ -123,11 +125,17 @@ export class NexusOrchestrator {
   // Health monitor (lazy-initialized via getter)
   private _healthMonitor: HealthMonitor | null = null
 
+  // Learning module for pattern recognition
+  public learning: LearningModule
+
   // Escalation policy for self-healing
   private escalationPolicy: EscalationPolicy
 
   // Per-node retry counts for escalation tracking
   private nodeRetryCounts: Map<string, number> = new Map()
+
+  // Module registry for composable features
+  public moduleRegistry: ModuleRegistry
 
   // State update callback
   private onStateChange: (() => void) | null = null
@@ -150,6 +158,7 @@ export class NexusOrchestrator {
     this.config = this.mergeConfig(config)
     this.budget = this.config.budget
     this.configManager = new NexusConfigManager()
+    this.moduleRegistry = new ModuleRegistry()
     this.messageStore = new MessageStore(messageStoreConfig)
     this.memoryStore = new PersistentMemoryStore(memoryStoreConfig)
     this.messageRouter = new MessageRouter()
@@ -161,12 +170,15 @@ export class NexusOrchestrator {
       retryDelay: this.config.selfHealing.retryDelay,
       enableRespawn: this.config.selfHealing.contextTransfer
     }
+
+    // Initialize learning module with config min confidence
+    this.learning = new LearningModule(this.config.learning.minConfidence)
   }
 
   /**
    * Initialize with OpenCode plugin context for session API access
    */
-  initialize(ctx: any, onStateChange?: () => void) {
+  async initialize(ctx: any, onStateChange?: () => void) {
     this.ctx = ctx
     this.onStateChange = onStateChange ?? null
 
@@ -175,6 +187,20 @@ export class NexusOrchestrator {
 
     // Start periodic cleanup of stale data (every 5 minutes)
     this.cleanupInterval = setInterval(() => this.cleanupStaleData(), 300000)
+
+    // Initialize health monitor
+    this.healthMonitor = new HealthMonitor({
+      checkInterval: this.config.agents.healthCheckInterval
+    })
+
+    // Set up all registered modules
+    const moduleCtx: ModuleContext = {
+      orchestrator: this,
+      config: this.config,
+      emit: (event: string, data: any) => this.emit(event, data),
+      on: (event: string, handler: (data: any) => void) => { this.on(event, handler) }
+    }
+    await this.moduleRegistry.setupAll(moduleCtx)
   }
 
   /**
@@ -588,6 +614,12 @@ export class NexusOrchestrator {
       this.costByAgent.set(agent.id, (this.costByAgent.get(agent.id) || 0) + result.cost)
       this.checkBudget()
 
+      // Record learning success if there was a prior failure pattern for this task
+      const priorPattern = this.learning.findSolutions(`task ${node.id} failed`)
+      if (priorPattern.length > 0) {
+        this.learning.recordSuccess(priorPattern[0].entry.id)
+      }
+
     } catch (error: any) {
       const duration = Date.now() - startTime
       const result: TaskResult = {
@@ -671,6 +703,12 @@ export class NexusOrchestrator {
   private async handleFailure(agent: Agent, node: DAGNode, error: Error): Promise<void> {
     const policy = this.escalationPolicy
     const retryCount = this.nodeRetryCounts.get(node.id) || 0
+
+    // Record the failure pattern for learning
+    const pattern = error.message || 'Unknown error'
+    const solution = `Retry (attempt ${retryCount + 1}/${policy.maxRetries})`
+    const context = `during ${node.task.requiredRole} task "${node.task.name}"`
+    this.learning.recordFailure(pattern, solution, context, [node.task.requiredRole])
 
     // Step 1: Retry with exponential backoff
     if (retryCount < policy.maxRetries) {
@@ -1105,7 +1143,10 @@ export class NexusOrchestrator {
     this.budgetExceeded = false
   }
 
-  shutdown(): void {
+  async shutdown(): Promise<void> {
+    // Tear down all modules before stopping orchestrator components
+    await this.moduleRegistry.teardownAll()
+
     this._healthMonitor?.stop()
     this.stopDashboard()
     this.memoryStore.close()
