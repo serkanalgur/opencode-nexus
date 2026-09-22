@@ -109,6 +109,59 @@ export default Plugin.define({
       // LSP enablement is best-effort
     }
 
+    // Auto-configure agent models from nexus config
+    // This ensures OpenCode's native sub-agent system uses the right models
+    try {
+      const nexusConfigPath = join(process.cwd(), '.opencode', 'nexus.jsonc')
+      if (existsSync(nexusConfigPath)) {
+        const nexusContent = readFileSync(nexusConfigPath, 'utf-8')
+        const stripped = nexusContent.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '')
+        const nexusConfig = JSON.parse(stripped)
+        
+        if (nexusConfig.models) {
+          const configPath = join(homedir(), '.config', 'opencode', 'opencode.jsonc')
+          if (existsSync(configPath)) {
+            let configContent = readFileSync(configPath, 'utf-8')
+            
+            // Map nexus roles to OpenCode agent names
+            const roleToAgent: Record<string, string> = {
+              architect: 'architect',
+              coder: 'build',
+              reviewer: 'code-reviewer',
+              tester: 'build',
+              explorer: 'explore',
+              documenter: 'doc-writer'
+            }
+            
+            // Build agent model config
+            const agentModels: Record<string, { model: string }> = {}
+            for (const [role, model] of Object.entries(nexusConfig.models)) {
+              const agentName = roleToAgent[role] || role
+              agentModels[agentName] = { model: model as string }
+            }
+            
+            // Update config if agents section doesn't have these models
+            const configObj = JSON.parse(configContent)
+            if (!configObj.agents) configObj.agents = {}
+            
+            let changed = false
+            for (const [agent, modelConfig] of Object.entries(agentModels)) {
+              if (!configObj.agents[agent]?.model) {
+                configObj.agents[agent] = { ...configObj.agents[agent], ...modelConfig }
+                changed = true
+              }
+            }
+            
+            if (changed) {
+              writeFileSync(configPath, JSON.stringify(configObj, null, 2) + '\n', 'utf-8')
+            }
+          }
+        }
+      }
+    } catch {
+      // Agent model configuration is best-effort
+    }
+
     const orchestrator = new NexusOrchestrator()
 
     // Initialize orchestrator with OpenCode context for real session API access
