@@ -361,6 +361,18 @@ export class NexusConfigManager {
     this.storageConfig = null
   }
 
+  // Apply a named preset configuration
+  applyPreset(name: string): void {
+    const preset = PRESETS[name]
+    if (!preset) throw new Error(`Unknown preset: ${name}. Available: ${Object.keys(PRESETS).join(', ')}`)
+    this.storageConfig = { ...this.storageConfig, ...preset.config } as NexusFullConfig
+  }
+
+  // List available preset names
+  listPresets(): string[] {
+    return Object.keys(PRESETS)
+  }
+
   // Get config summary for display
   getSummary(): string {
     const config = this.getConfig()
@@ -389,6 +401,116 @@ export class NexusConfigManager {
     lines.push(`  Context Transfer: ${config.selfHealing.contextTransfer ? '✅' : '❌'}`)
 
     return lines.join('\n')
+  }
+}
+
+// Preset configurations
+export interface NexusPreset {
+  name: string
+  description: string
+  config: Partial<NexusFullConfig>
+}
+
+export const PRESETS: Record<string, NexusPreset> = {
+  minimal: {
+    name: 'Minimal',
+    description: 'Low-cost setup with free/cheap models, minimal budget',
+    config: {
+      models: {
+        architect: 'google/gemini-2.5-flash',
+        coder: 'google/gemini-2.5-flash',
+        reviewer: 'google/gemini-2.5-flash',
+        tester: 'google/gemini-2.5-flash',
+        explorer: 'google/gemini-2.5-flash',
+        documenter: 'google/gemini-2.5-flash',
+      },
+      budget: {
+        maxTotalCost: 1.00,
+        maxCostPerTask: 0.10,
+        maxCostPerAgent: 0.50,
+        alertThreshold: 0.5,
+      },
+      selfHealing: {
+        enabled: false,
+        maxRetries: 1,
+        contextTransfer: false,
+      },
+    }
+  },
+  balanced: {
+    name: 'Balanced',
+    description: 'Good quality models with moderate budget',
+    config: {
+      models: {
+        architect: 'anthropic/claude-sonnet-4-6',
+        coder: 'anthropic/claude-sonnet-4-6',
+        reviewer: 'openai/gpt-5-mini',
+        tester: 'anthropic/claude-haiku-4-5',
+        explorer: 'google/gemini-2.5-flash',
+        documenter: 'anthropic/claude-haiku-4-5',
+      },
+      budget: {
+        maxTotalCost: 10.00,
+        maxCostPerTask: 1.00,
+        maxCostPerAgent: 2.00,
+        alertThreshold: 0.2,
+      },
+      selfHealing: {
+        enabled: true,
+        maxRetries: 3,
+        contextTransfer: true,
+      },
+    }
+  },
+  enterprise: {
+    name: 'Enterprise',
+    description: 'High-quality models with generous budget and full self-healing',
+    config: {
+      models: {
+        architect: 'anthropic/claude-sonnet-4-6',
+        coder: 'anthropic/claude-sonnet-4-6',
+        reviewer: 'openai/gpt-5',
+        tester: 'anthropic/claude-sonnet-4-6',
+        explorer: 'anthropic/claude-sonnet-4-6',
+        documenter: 'anthropic/claude-haiku-4-5',
+      },
+      budget: {
+        maxTotalCost: 50.00,
+        maxCostPerTask: 5.00,
+        maxCostPerAgent: 10.00,
+        alertThreshold: 0.1,
+      },
+      selfHealing: {
+        enabled: true,
+        maxRetries: 5,
+        contextTransfer: true,
+      },
+    }
+  },
+  'cost-optimized': {
+    name: 'Cost-Optimized',
+    description: 'Minimize costs while maintaining reasonable quality',
+    config: {
+      models: {
+        architect: 'anthropic/claude-haiku-4-5',
+        coder: 'google/gemini-2.5-flash',
+        reviewer: 'openai/gpt-5-mini',
+        tester: 'google/gemini-2.5-flash',
+        explorer: 'google/gemini-2.5-flash',
+        documenter: 'google/gemini-2.5-flash',
+      },
+      budget: {
+        maxTotalCost: 3.00,
+        maxCostPerTask: 0.30,
+        maxCostPerAgent: 1.00,
+        alertThreshold: 0.3,
+      },
+      selfHealing: {
+        enabled: true,
+        maxRetries: 2,
+        contextTransfer: false,
+      },
+    }
   }
 }
 
