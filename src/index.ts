@@ -354,6 +354,29 @@ export default Plugin.define({
           return { content: JSON.stringify({ issues: issues.length, score: result.score, details: issues }, null, 2) }
         }
       })
+
+      editor.add({
+        name: "forecast",
+        description: "Estimate cost before executing tasks",
+        input: {
+          type: "object",
+          properties: {
+            tasks: { type: "string", description: "JSON array of tasks with role and model" }
+          },
+          required: ["tasks"]
+        },
+        execute: async (input: unknown) => {
+          const { tasks } = input as { tasks: string }
+          const taskList = JSON.parse(tasks)
+          const remaining = orchestrator.budget.maxTotalCost - orchestrator.totalSpent
+          const result = orchestrator.forecaster.forecastAll(taskList, remaining)
+          const lines = result.estimates.map(e => `${e.taskName}: ~$${e.estimatedCost.toFixed(4)} (${e.model})`)
+          lines.push(`\nTotal: ~$${result.totalEstimatedCost.toFixed(4)}`)
+          lines.push(`Budget remaining: $${remaining.toFixed(2)}`)
+          lines.push(`Within budget: ${result.withinBudget ? '✅' : '❌'}`)
+          return { content: lines.join('\n') }
+        }
+      })
     })
 
     // Register session hook for /nexus commands
@@ -393,3 +416,5 @@ export { ModuleRegistry } from "./modules"
 export type { NexusModule, ModuleContext, ModuleTool, ModuleHook } from "./modules"
 export { SecurityScanner } from "./security"
 export type { SecurityIssue, SecurityScanResult, SecurityConfig } from "./security"
+export { CostForecaster } from "./forecast"
+export type { CostEstimate, ForecastResult } from "./forecast"

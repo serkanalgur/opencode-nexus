@@ -16,6 +16,7 @@ import { NotificationManager } from "./notifications"
 import { LearningModule } from "./learning"
 import { ModuleRegistry, type ModuleContext } from "./modules"
 import { SecurityScanner } from "./security"
+import { CostForecaster } from "./forecast"
 
 export interface ModelScore {
   model: string
@@ -142,6 +143,9 @@ export class NexusOrchestrator {
   // Security scanner for task output scanning
   public securityScanner: SecurityScanner
 
+  // Cost forecaster for pre-execution estimates
+  public forecaster: CostForecaster
+
   // State update callback
   private onStateChange: (() => void) | null = null
 
@@ -187,6 +191,9 @@ export class NexusOrchestrator {
 
     // Initialize security scanner
     this.securityScanner = new SecurityScanner()
+
+    // Initialize cost forecaster
+    this.forecaster = new CostForecaster()
   }
 
   /**
@@ -201,6 +208,11 @@ export class NexusOrchestrator {
 
     // Load real model pricing from OpenCode
     await this.loadModelCosts()
+
+    // Update forecaster with real pricing data
+    for (const [modelId, cost] of this.modelCosts) {
+      this.forecaster.updatePricing(modelId, cost.input, cost.output)
+    }
 
     // Start periodic cleanup of stale data (every 5 minutes)
     this.cleanupInterval = setInterval(() => this.cleanupStaleData(), 300000)
