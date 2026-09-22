@@ -7,6 +7,7 @@ import type {
 import { NexusConfigManager } from "./config"
 import { StateBroadcaster } from "./broadcast"
 import { DashboardModule } from "./dashboard"
+import { detectCycles } from "./dag"
 
 export interface ModelScore {
   model: string
@@ -278,15 +279,23 @@ export class NexusOrchestrator {
       // 1. Build DAG
       this.dag = this.buildDAG(request.tasks)
 
-      // 2. Apply budget constraints
+      // 2. Detect circular dependencies before execution
+      const dagNodes = Array.from(this.dag.nodes.values())
+      const cycles = detectCycles(dagNodes)
+      if (cycles.length > 0) {
+        const cycleDescriptions = cycles.map(c => c.join(' → ')).join(', ')
+        throw new Error(`Circular dependency detected: ${cycleDescriptions}`)
+      }
+
+      // 3. Apply budget constraints
       if (request.budget) {
         this.budget = request.budget
       }
 
-      // 3. Execute DAG with real sessions
+      // 4. Execute DAG with real sessions
       await this.executeDAG()
 
-      // 4. Collect results
+      // 5. Collect results
       const results = this.collectResults()
       const totalDuration = Date.now() - startTime
 
