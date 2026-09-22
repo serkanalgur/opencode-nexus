@@ -43,6 +43,8 @@ export default Plugin.define({
 
       if (selected !== null && selected !== undefined) {
         configManager.setModel(role, selected)
+        // Persist to disk immediately so selections survive restart
+        configManager.saveGlobalConfig()
         context.ui.toast.show({
           title: "Nexus",
           message: `${role} → ${selected || 'default'}`,
@@ -64,6 +66,8 @@ export default Plugin.define({
           configManager.updateStorageConfig({
             budget: { ...config.budget, maxTotalCost: budget }
           })
+          // Persist to disk immediately
+          configManager.saveGlobalConfig()
           context.ui.toast.show({
             title: "Nexus",
             message: `Budget updated: $${budget}`,
