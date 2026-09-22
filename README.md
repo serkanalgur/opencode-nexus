@@ -147,14 +147,14 @@ await ctx.session.prompt({ sessionID: session.id, text: 'You are a senior softwa
 
 Each agent role gets a specialized prompt:
 
-| Role | Focus |
-|------|-------|
-| **Architect** | System design, architecture patterns, high-level decisions |
-| **Coder** | Clean, efficient code following best practices |
-| **Reviewer** | Code review for correctness, security, performance |
-| **Tester** | Comprehensive tests, edge cases, quality assurance |
-| **Explorer** | Codebase navigation, architecture analysis |
-| **Documenter** | Clear technical documentation |
+| Role | OpenCode Agent | Focus |
+|------|----------------|-------|
+| **Architect** | `architect` | System design, architecture patterns, high-level decisions |
+| **Coder** | `build-orchestrator` | Clean, efficient code following best practices |
+| **Reviewer** | `code-reviewer` | Code review for correctness, security, performance |
+| **Tester** | `build-orchestrator` | Comprehensive tests, edge cases, quality assurance |
+| **Explorer** | `explore` | Codebase navigation, architecture analysis |
+| **Documenter** | `doc-writer` | Clear technical documentation |
 
 ### Cost-Aware Model Selection
 
@@ -278,6 +278,68 @@ NexusPlugin.register({
 })
 ```
 
+### Custom Agent Roles
+
+Define your own agent roles with custom prompts:
+
+```jsonc
+// .opencode/nexus.jsonc
+{
+  "customRoles": [
+    {
+      "name": "security-auditor",
+      "displayName": "Security Auditor",
+      "emoji": "🔐",
+      "prompt": "You are a security auditor. Focus on OWASP Top 10, vulnerability scanning, and security best practices.",
+      "model": "anthropic/claude-sonnet-4-6"
+    }
+  ]
+}
+```
+
+Or register dynamically via tools: `nexus.roles.add(name="security-auditor", displayName="Security Auditor", prompt="...")`
+
+### Execution History
+
+Track all task executions with costs, durations, and outcomes:
+
+```
+nexus.history.list(count=10)  — Recent executions
+nexus.history.stats()         — Success rate, avg cost, breakdown by role
+```
+
+### Cost Forecasting
+
+Predict costs before executing tasks:
+
+```typescript
+const forecast = orchestrator.forecaster.forecastAll([
+  { task: myTask, role: 'coder', model: 'claude-sonnet-4-6', complexity: score }
+], budgetRemaining)
+// → { totalEstimatedCost: 0.0234, withinBudget: true }
+```
+
+### Agent Performance Scoring
+
+Track which model/role combinations work best:
+
+```
+nexus.performance.scores()           — All model/role scores
+nexus.performance.best(role="coder") — Best model for a role
+```
+
+Score = 40% success rate + 30% speed + 30% cost efficiency.
+
+### Git Worktree Per Agent
+
+Each agent works in its own isolated git worktree:
+
+```
+nexus.worktree.enable()   — Enable isolation
+nexus.worktree.list()     — List active worktrees
+nexus.worktree.disable()  — Clean up all
+```
+
 ---
 
 ## TUI Commands
@@ -313,6 +375,18 @@ Register these tools in your agent prompts:
 | `nexus.dashboard.stop` | Stop web dashboard | `{}` |
 | `nexus.preset` | Apply preset config | `{ name: string }` |
 | `nexus.template` | List/instantiate templates | `{ name?: string, baseDir?: string }` |
+| `nexus.model.costs` | Show/set model pricing | `{ model?: string, setInput?: number, setOutput?: number }` |
+| `nexus.security.scan` | Scan code for security issues | `{ content: string, filename?: string }` |
+| `nexus.roles.list` | List custom agent roles | `{}` |
+| `nexus.roles.add` | Add a custom role | `{ name, displayName, prompt, emoji?, model? }` |
+| `nexus.history.list` | List execution history | `{ count?: number }` |
+| `nexus.history.stats` | Execution statistics | `{}` |
+| `nexus.forecast` | Predict costs before execution | `{ tasks: string }` |
+| `nexus.performance.scores` | Model/role performance scores | `{}` |
+| `nexus.performance.best` | Best model for a role | `{ role: string }` |
+| `nexus.worktree.enable` | Enable git worktree isolation | `{ repoRoot?: string }` |
+| `nexus.worktree.list` | List active worktrees | `{}` |
+| `nexus.worktree.disable` | Disable and clean up | `{}` |
 
 ### Tool Examples
 
