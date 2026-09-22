@@ -143,11 +143,11 @@ export default Plugin.define({
           const path = basePath || process.cwd()
           const locations: string[] = []
           if (level === 'project' || level === 'both') {
-            orchestrator.configManager.saveProjectConfig(path)
+            orchestrator.configManager.initProjectConfig(path)
             locations.push(`${path}/.opencode/nexus.jsonc`)
           }
           if (level === 'global' || level === 'both') {
-            orchestrator.configManager.saveGlobalConfig()
+            orchestrator.configManager.initGlobalConfig()
             locations.push('~/.config/opencode/nexus.jsonc')
           }
           return { content: `Config initialized at ${level} level(s): ${locations.join(', ')}` }

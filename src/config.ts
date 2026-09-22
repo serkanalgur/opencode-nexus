@@ -298,6 +298,24 @@ export class NexusConfigManager {
   }
 
   /**
+   * Initialize project-level config with full defaults.
+   * Writes to `{basePath}/.opencode/nexus.jsonc` with all default values.
+   */
+  initProjectConfig(basePath: string): void {
+    const projectPath = join(basePath, '.opencode', 'nexus.jsonc')
+    this.writeJsoncFile(projectPath, { ...DEFAULT_CONFIG })
+  }
+
+  /**
+   * Initialize global-level config with full defaults.
+   * Writes to `~/.config/opencode/nexus.jsonc` with all default values.
+   */
+  initGlobalConfig(): void {
+    const globalPath = join(homedir(), '.config', 'opencode', 'nexus.jsonc')
+    this.writeJsoncFile(globalPath, { ...DEFAULT_CONFIG })
+  }
+
+  /**
    * Save config at the specified level.
    * @param level - 'project' or 'global'
    * @param basePath - Project root directory (required for project level)
