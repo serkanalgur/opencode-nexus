@@ -346,7 +346,7 @@ export class NexusConfigManager {
     const shKeys = ['enabled', 'maxRetries', 'contextTransfer'] as const
     for (const key of shKeys) {
       if (current.selfHealing[key] !== DEFAULT_CONFIG.selfHealing[key]) {
-        selfHealing[key] = current.selfHealing[key]
+        ;(selfHealing as any)[key] = current.selfHealing[key]
       }
     }
     if (Object.keys(selfHealing).length > 0) {
