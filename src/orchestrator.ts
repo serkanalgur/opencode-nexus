@@ -42,6 +42,7 @@ export class NexusOrchestrator {
   private budget: BudgetConstraint
   private running: boolean = false
   private paused: boolean = false
+  private budgetExceeded: boolean = false
 
   // Cost tracking
   private totalSpent: number = 0
@@ -502,6 +503,11 @@ export class NexusOrchestrator {
       throw new Error("Orchestrator not initialized")
     }
 
+    // Check budget before spawning
+    if (this.budgetExceeded) {
+      throw new Error("Budget exceeded — cannot spawn new agents")
+    }
+
     const agentId = `agent-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
 
     // Resolve model: override > config > default
@@ -675,7 +681,8 @@ export class NexusOrchestrator {
       this.emit('budget:alert', { remaining, remainingPercent })
     }
 
-    if (this.budget.hardLimit && remaining <= 0) {
+    if (this.budget.hardLimit && remaining <= 0 && !this.budgetExceeded) {
+      this.budgetExceeded = true
       this.emit('budget:exceeded', { totalSpent: this.totalSpent })
       this.pause()
     }
@@ -726,10 +733,11 @@ export class NexusOrchestrator {
 
   getStatus(detailed?: boolean): string {
     const state = this.getState()
-    if (detailed) return JSON.stringify(state, null, 2)
+    if (detailed) return JSON.stringify({ ...state, budgetExceeded: this.budgetExceeded }, null, 2)
     return JSON.stringify({
       running: state.running,
       paused: state.paused,
+      budgetExceeded: this.budgetExceeded,
       agents: state.agents.length,
       tasks: state.tasks.length,
       totalCost: state.totalSpent,
@@ -767,6 +775,14 @@ export class NexusOrchestrator {
     this.paused = false
     this.emit('orchestrator:resumed', {})
     this.notifyStateChange()
+  }
+
+  isBudgetExceeded(): boolean {
+    return this.budgetExceeded
+  }
+
+  resetBudgetExceeded(): void {
+    this.budgetExceeded = false
   }
 
   shutdown(): void {
