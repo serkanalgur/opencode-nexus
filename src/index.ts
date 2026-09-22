@@ -109,8 +109,8 @@ export default Plugin.define({
       // LSP enablement is best-effort
     }
 
-    // Auto-configure agent models from nexus config
-    // This ensures OpenCode's native sub-agent system uses the right models
+    // Auto-configure nexus-orchestrator agent model from nexus config
+    // Only affects the nexus-orchestrator agent, not other agents
     try {
       const nexusConfigPath = join(process.cwd(), '.opencode', 'nexus.jsonc')
       if (existsSync(nexusConfigPath)) {
@@ -122,37 +122,15 @@ export default Plugin.define({
           const configPath = join(homedir(), '.config', 'opencode', 'opencode.jsonc')
           if (existsSync(configPath)) {
             let configContent = readFileSync(configPath, 'utf-8')
-            
-            // Map nexus roles to OpenCode agent names
-            const roleToAgent: Record<string, string> = {
-              architect: 'architect',
-              coder: 'build',
-              reviewer: 'code-reviewer',
-              tester: 'build',
-              explorer: 'explore',
-              documenter: 'doc-writer'
-            }
-            
-            // Build agent model config
-            const agentModels: Record<string, { model: string }> = {}
-            for (const [role, model] of Object.entries(nexusConfig.models)) {
-              const agentName = roleToAgent[role] || role
-              agentModels[agentName] = { model: model as string }
-            }
-            
-            // Update config if agents section doesn't have these models
             const configObj = JSON.parse(configContent)
+            
             if (!configObj.agents) configObj.agents = {}
+            if (!configObj.agents['nexus-orchestrator']) configObj.agents['nexus-orchestrator'] = {}
             
-            let changed = false
-            for (const [agent, modelConfig] of Object.entries(agentModels)) {
-              if (!configObj.agents[agent]?.model) {
-                configObj.agents[agent] = { ...configObj.agents[agent], ...modelConfig }
-                changed = true
-              }
-            }
-            
-            if (changed) {
+            // Only set model for nexus-orchestrator if not already set
+            if (!configObj.agents['nexus-orchestrator'].model) {
+              // Use coder model as default for the orchestrator
+              configObj.agents['nexus-orchestrator'].model = nexusConfig.models.coder || 'opencode-go/mimo-v2.5'
               writeFileSync(configPath, JSON.stringify(configObj, null, 2) + '\n', 'utf-8')
             }
           }
