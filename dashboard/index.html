@@ -466,6 +466,279 @@
     from { opacity: 0; transform: translateY(4px); }
     to { opacity: 1; transform: translateY(0); }
   }
+
+  /* ── Status pulse for working agents ── */
+  .status-working {
+    animation: statusPulse 1.5s infinite;
+  }
+  @keyframes statusPulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+
+  /* ── DAG Visualization ── */
+  .dag-section {
+    margin-bottom: 24px;
+  }
+  .dag-section .section-header h2 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  #dag-container {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 24px;
+    min-height: 120px;
+    overflow-x: auto;
+  }
+  .dag-empty {
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 13px;
+    padding: 20px;
+  }
+  .dag-empty .icon { font-size: 28px; margin-bottom: 8px; }
+  .dag-graph {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding: 8px 0;
+  }
+  .dag-node {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    min-width: 110px;
+    flex-shrink: 0;
+  }
+  .dag-node-box {
+    width: 100px;
+    padding: 10px 8px;
+    border-radius: 8px;
+    border: 2px solid var(--border);
+    background: var(--bg);
+    text-align: center;
+    font-size: 12px;
+    font-weight: 500;
+    transition: border-color 0.3s, box-shadow 0.3s;
+  }
+  .dag-node-box.pending {
+    border-color: var(--text-muted);
+    color: var(--text-muted);
+  }
+  .dag-node-box.running {
+    border-color: var(--blue);
+    color: var(--blue);
+    box-shadow: 0 0 12px rgba(88, 166, 255, 0.3);
+    animation: dagPulse 1.5s infinite;
+  }
+  .dag-node-box.completed {
+    border-color: var(--green);
+    color: var(--green);
+    background: rgba(63, 185, 80, 0.08);
+  }
+  .dag-node-box.failed {
+    border-color: var(--red);
+    color: var(--red);
+    background: rgba(248, 81, 73, 0.08);
+  }
+  .dag-node-box.queued {
+    border-color: var(--yellow);
+    color: var(--yellow);
+  }
+  @keyframes dagPulse {
+    0%, 100% { box-shadow: 0 0 12px rgba(88, 166, 255, 0.3); }
+    50% { box-shadow: 0 0 20px rgba(88, 166, 255, 0.6); }
+  }
+  .dag-node-label {
+    font-size: 10px;
+    color: var(--text-muted);
+    max-width: 110px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: center;
+  }
+  .dag-arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    flex-shrink: 0;
+    color: var(--border);
+    font-size: 18px;
+  }
+  .dag-arrow.active { color: var(--blue); }
+
+  /* ── Config Panel ── */
+  .config-section {
+    margin-bottom: 24px;
+  }
+  .config-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+  }
+  .config-card h3 {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .config-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 16px;
+  }
+  .config-group {
+    background: var(--bg);
+    border-radius: 6px;
+    padding: 14px;
+  }
+  .config-group-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .config-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 0;
+    font-size: 13px;
+  }
+  .config-key {
+    color: var(--text-muted);
+  }
+  .config-val {
+    font-weight: 500;
+    font-family: 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: 12px;
+  }
+  .config-val.enabled { color: var(--green); }
+  .config-val.disabled { color: var(--text-muted); }
+  .config-val.warning { color: var(--yellow); }
+  .config-val.model { color: var(--blue); }
+
+  /* ── Enhanced Log Stream ── */
+  .log-stream-section {
+    margin-bottom: 24px;
+  }
+  .log-stream-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+  }
+  .log-stream-card h3 {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .log-filter-bar {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+  }
+  .log-filter-btn {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-muted);
+    font-size: 11px;
+    padding: 3px 10px;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .log-filter-btn:hover { border-color: var(--blue); color: var(--text); }
+  .log-filter-btn.active {
+    background: rgba(88, 166, 255, 0.15);
+    border-color: var(--blue);
+    color: var(--blue);
+  }
+  .log-stream-container {
+    max-height: 300px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  .log-stream-container::-webkit-scrollbar { width: 6px; }
+  .log-stream-container::-webkit-scrollbar-track { background: transparent; }
+  .log-stream-container::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .log-stream-entry {
+    display: flex;
+    gap: 8px;
+    padding: 5px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+    line-height: 1.5;
+    align-items: flex-start;
+  }
+  .log-stream-entry:hover { background: var(--surface-hover); }
+  .log-stream-entry .ls-time {
+    color: var(--text-muted);
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+    min-width: 65px;
+  }
+  .log-stream-entry .ls-badge {
+    flex-shrink: 0;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-weight: 500;
+    text-transform: uppercase;
+    min-width: 50px;
+    text-align: center;
+  }
+  .log-stream-entry .ls-msg {
+    color: var(--text);
+    word-break: break-word;
+    flex: 1;
+  }
+  .log-stream-entry.event-success .ls-badge { background: rgba(63, 185, 80, 0.15); color: var(--green); }
+  .log-stream-entry.event-success .ls-msg { color: var(--green); }
+  .log-stream-entry.event-warning .ls-badge { background: rgba(210, 153, 34, 0.15); color: var(--yellow); }
+  .log-stream-entry.event-warning .ls-msg { color: var(--yellow); }
+  .log-stream-entry.event-error .ls-badge { background: rgba(248, 81, 73, 0.15); color: var(--red); }
+  .log-stream-entry.event-error .ls-msg { color: var(--red); }
+  .log-stream-entry.event-info .ls-badge { background: rgba(139, 148, 158, 0.15); color: var(--text-muted); }
+  .log-stream-entry.event-task .ls-badge { background: rgba(88, 166, 255, 0.15); color: var(--blue); }
+  .log-stream-entry.event-system .ls-badge { background: rgba(188, 140, 255, 0.15); color: var(--purple); }
+  .log-stream-entry.event-budget .ls-badge { background: rgba(210, 153, 34, 0.15); color: var(--yellow); }
+  .log-stream-entry.hidden { display: none; }
+  .log-stream-count {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-align: right;
+    margin-top: 6px;
+  }
+
+  @media (max-width: 900px) {
+    .config-grid { grid-template-columns: 1fr; }
+  }
 </style>
 </head>
 <body>
@@ -521,6 +794,20 @@
     <div class="no-agents">
       <div class="icon">🤖</div>
       <div class="msg">No agents spawned yet. Tasks will spawn agents automatically.</div>
+    </div>
+  </div>
+
+  <!-- DAG Visualization -->
+  <div class="dag-section">
+    <div class="section-header">
+      <h2>📊 Task Pipeline</h2>
+      <span class="count" id="dag-count">0</span>
+    </div>
+    <div id="dag-container">
+      <div class="dag-empty">
+        <div class="icon">📊</div>
+        <div>No tasks in the pipeline yet.</div>
+      </div>
     </div>
   </div>
 
@@ -583,6 +870,69 @@
     </div>
   </div>
 
+  <!-- Config Panel -->
+  <div class="config-section">
+    <div class="config-card">
+      <h3>⚙️ Configuration</h3>
+      <div class="config-grid">
+        <div class="config-group">
+          <div class="config-group-title">🤖 Models per Role</div>
+          <div id="config-models">
+            <div class="config-row"><span class="config-key">architect</span><span class="config-val model">—</span></div>
+            <div class="config-row"><span class="config-key">coder</span><span class="config-val model">—</span></div>
+            <div class="config-row"><span class="config-key">reviewer</span><span class="config-val model">—</span></div>
+            <div class="config-row"><span class="config-key">tester</span><span class="config-val model">—</span></div>
+            <div class="config-row"><span class="config-key">explorer</span><span class="config-val model">—</span></div>
+            <div class="config-row"><span class="config-key">documenter</span><span class="config-val model">—</span></div>
+          </div>
+        </div>
+        <div class="config-group">
+          <div class="config-group-title">💰 Budget Settings</div>
+          <div id="config-budget">
+            <div class="config-row"><span class="config-key">max budget</span><span class="config-val">$10.00</span></div>
+            <div class="config-row"><span class="config-key">alert threshold</span><span class="config-val warning">30%</span></div>
+            <div class="config-row"><span class="config-key">critical threshold</span><span class="config-val warning">10%</span></div>
+            <div class="config-row"><span class="config-key">auto-terminate</span><span class="config-val enabled">enabled</span></div>
+          </div>
+        </div>
+        <div class="config-group">
+          <div class="config-group-title">🔧 Self-Healing</div>
+          <div id="config-healing">
+            <div class="config-row"><span class="config-key">retry on failure</span><span class="config-val enabled">enabled</span></div>
+            <div class="config-row"><span class="config-key">max retries</span><span class="config-val">3</span></div>
+            <div class="config-row"><span class="config-key">escalation</span><span class="config-val enabled">enabled</span></div>
+            <div class="config-row"><span class="config-key">deadlock detect</span><span class="config-val enabled">enabled</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Enhanced Log Stream -->
+  <div class="log-stream-section">
+    <div class="log-stream-card">
+      <h3>
+        <span>📡 Event Stream</span>
+        <span class="log-filter-bar">
+          <button class="log-filter-btn active" data-filter="all">All</button>
+          <button class="log-filter-btn" data-filter="success">Success</button>
+          <button class="log-filter-btn" data-filter="warning">Warning</button>
+          <button class="log-filter-btn" data-filter="error">Error</button>
+          <button class="log-filter-btn" data-filter="task">Task</button>
+          <button class="log-filter-btn" data-filter="system">System</button>
+        </span>
+      </h3>
+      <div class="log-stream-container" id="log-stream-container">
+        <div class="log-stream-entry event-info">
+          <span class="ls-time">--:--:--</span>
+          <span class="ls-badge">INFO</span>
+          <span class="ls-msg">Waiting for events...</span>
+        </div>
+      </div>
+      <div class="log-stream-count" id="log-stream-count">0 events</div>
+    </div>
+  </div>
+
 </div>
 
 <script>
@@ -599,6 +949,11 @@
   let reconnectTimer = null;
   let startTime = Date.now();
   let logEntries = [];
+
+  // Log Stream
+  let logStreamEntries = [];
+  const MAX_LOG_STREAM = 500;
+  let logFilter = 'all';
 
   // Role emojis
   const ROLE_EMOJI = {
@@ -638,6 +993,19 @@
 
   // Log
   const $logContainer = document.getElementById('log-container');
+
+  // DAG
+  const $dagContainer = document.getElementById('dag-container');
+  const $dagCount = document.getElementById('dag-count');
+
+  // Config
+  const $configModels = document.getElementById('config-models');
+  const $configBudget = document.getElementById('config-budget');
+  const $configHealing = document.getElementById('config-healing');
+
+  // Log Stream
+  const $logStreamContainer = document.getElementById('log-stream-container');
+  const $logStreamCount = document.getElementById('log-stream-count');
 
   // ── Utilities ──
   function fmt$(v) { return '$' + (v || 0).toFixed(2); }
@@ -696,6 +1064,57 @@
     return d.innerHTML;
   }
 
+  // ── Log Stream ──
+  function addLogStream(severity, label, msg) {
+    var entry = document.createElement('div');
+    entry.className = 'log-stream-entry event-' + severity;
+    entry.setAttribute('data-severity', severity);
+    entry.innerHTML = '<span class="ls-time">' + now() + '</span>'
+      + '<span class="ls-badge">' + escHtml(label) + '</span>'
+      + '<span class="ls-msg">' + escHtml(msg) + '</span>';
+
+    logStreamEntries.push({ el: entry, severity: severity });
+    if (logStreamEntries.length > MAX_LOG_STREAM) {
+      var old = logStreamEntries.shift();
+      if (old.el.parentNode) old.el.parentNode.removeChild(old.el);
+    }
+
+    if (logFilter !== 'all' && severity !== logFilter) {
+      entry.classList.add('hidden');
+    }
+
+    if ($logStreamContainer.firstChild) {
+      $logStreamContainer.insertBefore(entry, $logStreamContainer.firstChild);
+    } else {
+      $logStreamContainer.appendChild(entry);
+    }
+    $logStreamCount.textContent = logStreamEntries.length + ' events';
+  }
+
+  // ── Log Filter ──
+  function setupLogFilters() {
+    var btns = document.querySelectorAll('.log-filter-btn');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].addEventListener('click', function() {
+        logFilter = this.getAttribute('data-filter');
+        for (var j = 0; j < btns.length; j++) btns[j].classList.remove('active');
+        this.classList.add('active');
+        applyLogFilter();
+      });
+    }
+  }
+
+  function applyLogFilter() {
+    for (var i = 0; i < logStreamEntries.length; i++) {
+      var e = logStreamEntries[i];
+      if (logFilter === 'all' || e.severity === logFilter) {
+        e.el.classList.remove('hidden');
+      } else {
+        e.el.classList.add('hidden');
+      }
+    }
+  }
+
   // ── Connection ──
   function setConnState(state) {
     $connBadge.className = 'connection-badge ' + state;
@@ -715,17 +1134,20 @@
       ws = new WebSocket(url);
     } catch (e) {
       addLog('error', '❌', 'WebSocket creation failed: ' + e.message);
+      addLogStream('error', 'WS', 'WebSocket creation failed: ' + e.message);
       scheduleReconnect();
       return;
     }
 
     setConnState('reconnecting');
     addLog('info', 'ℹ', 'Connecting to ' + url + '...');
+    addLogStream('info', 'CONN', 'Connecting to ' + url + '...');
 
     ws.onopen = function() {
       setConnState('connected');
       reconnectDelay = 1000;
       addLog('system', '🔌', 'Connected to Nexus server');
+      addLogStream('success', 'CONN', 'Connected to Nexus server');
     };
 
     ws.onmessage = function(evt) {
@@ -741,6 +1163,7 @@
     ws.onclose = function(evt) {
       setConnState('disconnected');
       addLog('error', '🔌', 'Disconnected (code: ' + evt.code + ')');
+      addLogStream('error', 'CONN', 'Disconnected (code: ' + evt.code + ')');
       scheduleReconnect();
     };
 
@@ -753,6 +1176,7 @@
     if (reconnectTimer) return;
     setConnState('reconnecting');
     addLog('info', '🔄', 'Reconnecting in ' + (reconnectDelay / 1000) + 's...');
+    addLogStream('info', 'CONN', 'Reconnecting in ' + (reconnectDelay / 1000) + 's...');
     reconnectTimer = setTimeout(function() {
       reconnectTimer = null;
       reconnectDelay = Math.min(reconnectDelay * 1.5, 30000);
@@ -768,59 +1192,72 @@
       case 'state':
       case 'orchestrator:state':
         renderState(msg.data || msg.state || msg);
+        addLogStream('info', 'STATE', 'State update received');
         break;
 
       case 'agent:spawned':
         addLog('spawn', '🤖', 'Agent spawned: ' + agentLabel(msg.data || msg));
+        addLogStream('success', 'SPAWN', 'Agent spawned: ' + agentLabel(msg.data || msg));
         break;
 
       case 'agent:terminated':
         addLog('info', '🛑', 'Agent terminated: ' + agentLabel(msg.data || msg));
+        addLogStream('warning', 'TERM', 'Agent terminated: ' + agentLabel(msg.data || msg));
         break;
 
       case 'task:started':
       case 'task-assigned':
         addLog('task', '▶', 'Task started: ' + taskLabel(msg.data || msg));
+        addLogStream('task', 'TASK', 'Task started: ' + taskLabel(msg.data || msg));
         break;
 
       case 'task:completed':
       case 'task-completed':
         addLog('task', '✅', 'Task completed: ' + taskLabel(msg.data || msg));
+        addLogStream('success', 'DONE', 'Task completed: ' + taskLabel(msg.data || msg));
         break;
 
       case 'task:failed':
       case 'task-failed':
         addLog('error', '❌', 'Task failed: ' + taskLabel(msg.data || msg));
+        addLogStream('error', 'FAIL', 'Task failed: ' + taskLabel(msg.data || msg));
         break;
 
       case 'budget:alert':
         addLog('budget', '⚠️', 'Budget alert: ' + fmt$(msg.data?.remaining || 0) + ' remaining');
+        addLogStream('warning', 'BUDGET', 'Budget alert: ' + fmt$(msg.data?.remaining || 0) + ' remaining');
         break;
 
       case 'budget:exceeded':
         addLog('error', '🚨', 'Budget exceeded! Spent: ' + fmt$(msg.data?.totalSpent || 0));
+        addLogStream('error', 'BUDGET', 'Budget exceeded! Spent: ' + fmt$(msg.data?.totalSpent || 0));
         break;
 
       case 'orchestrator:paused':
         addLog('system', '⏸️', 'Orchestrator paused');
+        addLogStream('system', 'SYS', 'Orchestrator paused');
         break;
 
       case 'orchestrator:resumed':
         addLog('system', '▶️', 'Orchestrator resumed');
+        addLogStream('system', 'SYS', 'Orchestrator resumed');
         break;
 
       case 'review-completed':
         addLog('task', '🔍', 'Review completed: ' + (msg.data?.taskName || msg.data?.id || ''));
+        addLogStream('success', 'REVIEW', 'Review completed: ' + (msg.data?.taskName || msg.data?.id || ''));
         break;
 
       case 'status-update':
         addLog('info', '📊', 'Status update: ' + JSON.stringify(msg.data || {}).slice(0, 120));
+        addLogStream('info', 'STATUS', 'Status update received');
         break;
 
       default:
         // Generic log
         if (type) {
           addLog('info', '📩', type + ': ' + JSON.stringify(msg.data || msg).slice(0, 150));
+          addLogStream('info', type.toUpperCase().slice(0, 8), JSON.stringify(msg.data || msg).slice(0, 150));
         }
     }
   }
@@ -935,10 +1372,147 @@
       }
       $taskList.innerHTML = thtml;
     }
+
+    // ── DAG Visualization ──
+    renderDAG(tasks);
+
+    // ── Config Panel ──
+    renderConfig(state);
+  }
+
+  // ── DAG Rendering ──
+  function renderDAG(tasks) {
+    if (!tasks || tasks.length === 0) {
+      $dagContainer.innerHTML = '<div class="dag-empty"><div class="icon">📊</div><div>No tasks in the pipeline yet.</div></div>';
+      $dagCount.textContent = '0';
+      return;
+    }
+
+    // Build dependency edges from task deps
+    var taskMap = {};
+    for (var i = 0; i < tasks.length; i++) {
+      taskMap[tasks[i].id] = tasks[i];
+    }
+
+    // Topological sort: build adjacency and in-degree
+    var adj = {};
+    var inDeg = {};
+    for (var i = 0; i < tasks.length; i++) {
+      var tid = tasks[i].id;
+      adj[tid] = [];
+      inDeg[tid] = inDeg[tid] || 0;
+      var deps = tasks[i].deps || tasks[i].dependencies || [];
+      for (var d = 0; d < deps.length; d++) {
+        if (adj[deps[d]]) {
+          adj[deps[d]].push(tid);
+          inDeg[tid] = (inDeg[tid] || 0) + 1;
+        }
+      }
+    }
+
+    // Kahn's algorithm for topological order
+    var queue = [];
+    for (var i = 0; i < tasks.length; i++) {
+      if (!inDeg[tasks[i].id] || inDeg[tasks[i].id] === 0) {
+        queue.push(tasks[i].id);
+      }
+    }
+    var sorted = [];
+    while (queue.length > 0) {
+      var curr = queue.shift();
+      sorted.push(curr);
+      var neighbors = adj[curr] || [];
+      for (var n = 0; n < neighbors.length; n++) {
+        inDeg[neighbors[n]]--;
+        if (inDeg[neighbors[n]] === 0) queue.push(neighbors[n]);
+      }
+    }
+    // Add any remaining (cycles)
+    for (var i = 0; i < tasks.length; i++) {
+      if (sorted.indexOf(tasks[i].id) === -1) sorted.push(tasks[i].id);
+    }
+
+    $dagCount.textContent = sorted.length;
+
+    // Build edges for arrow highlighting
+    var edges = [];
+    for (var i = 0; i < tasks.length; i++) {
+      var deps = tasks[i].deps || tasks[i].dependencies || [];
+      for (var d = 0; d < deps.length; d++) {
+        edges.push({ from: deps[d], to: tasks[i].id });
+      }
+    }
+
+    var html = '<div class="dag-graph">';
+    for (var i = 0; i < sorted.length; i++) {
+      var t = taskMap[sorted[i]];
+      if (!t) continue;
+      var status = t.status || 'pending';
+      var label = t.name || t.id || 'task-' + i;
+      html += '<div class="dag-node">';
+      html += '<div class="dag-node-box ' + escHtml(status) + '">' + escHtml(label) + '</div>';
+      html += '<div class="dag-node-label">' + escHtml(status) + '</div>';
+      html += '</div>';
+      if (i < sorted.length - 1) {
+        // Check if there's a direct edge
+        var hasEdge = false;
+        for (var e = 0; e < edges.length; e++) {
+          if (edges[e].from === sorted[i] && edges[e].to === sorted[i + 1]) {
+            hasEdge = true;
+            break;
+          }
+        }
+        html += '<div class="dag-arrow' + (hasEdge ? ' active' : '') + '">→</div>';
+      }
+    }
+    html += '</div>';
+    $dagContainer.innerHTML = html;
+  }
+
+  // ── Config Rendering ──
+  function renderConfig(state) {
+    if (!state) return;
+
+    // Models per role
+    var models = state.config?.models || state.models || {};
+    var roles = ['architect', 'coder', 'reviewer', 'tester', 'explorer', 'documenter'];
+    var mhtml = '';
+    for (var r = 0; r < roles.length; r++) {
+      var model = models[roles[r]] || '—';
+      mhtml += '<div class="config-row"><span class="config-key">' + roles[r] + '</span>'
+        + '<span class="config-val model">' + escHtml(model) + '</span></div>';
+    }
+    $configModels.innerHTML = mhtml;
+
+    // Budget settings
+    var budget = state.config?.budget || state.budgetConfig || {};
+    var maxBudget = budget.maxBudget || budget.max || MAX_BUDGET;
+    var alertPct = budget.alertThreshold || budget.alertPct || 30;
+    var critPct = budget.criticalThreshold || budget.criticalPct || 10;
+    var autoTerm = budget.autoTerminate != null ? budget.autoTerminate : true;
+    $configBudget.innerHTML =
+      '<div class="config-row"><span class="config-key">max budget</span><span class="config-val">' + fmt$(maxBudget) + '</span></div>'
+      + '<div class="config-row"><span class="config-key">alert threshold</span><span class="config-val warning">' + alertPct + '%</span></div>'
+      + '<div class="config-row"><span class="config-key">critical threshold</span><span class="config-val warning">' + critPct + '%</span></div>'
+      + '<div class="config-row"><span class="config-key">auto-terminate</span><span class="config-val ' + (autoTerm ? 'enabled' : 'disabled') + '">' + (autoTerm ? 'enabled' : 'disabled') + '</span></div>';
+
+    // Self-healing config
+    var healing = state.config?.selfHealing || state.selfHealing || {};
+    var retryOnFail = healing.retryOnFailure != null ? healing.retryOnFailure : true;
+    var maxRetries = healing.maxRetries || 3;
+    var escalation = healing.escalation != null ? healing.escalation : true;
+    var deadlockDetect = healing.deadlockDetection != null ? healing.deadlockDetection : true;
+    $configHealing.innerHTML =
+      '<div class="config-row"><span class="config-key">retry on failure</span><span class="config-val ' + (retryOnFail ? 'enabled' : 'disabled') + '">' + (retryOnFail ? 'enabled' : 'disabled') + '</span></div>'
+      + '<div class="config-row"><span class="config-key">max retries</span><span class="config-val">' + maxRetries + '</span></div>'
+      + '<div class="config-row"><span class="config-key">escalation</span><span class="config-val ' + (escalation ? 'enabled' : 'disabled') + '">' + (escalation ? 'enabled' : 'disabled') + '</span></div>'
+      + '<div class="config-row"><span class="config-key">deadlock detect</span><span class="config-val ' + (deadlockDetect ? 'enabled' : 'disabled') + '">' + (deadlockDetect ? 'enabled' : 'disabled') + '</span></div>';
   }
 
   // ── Init ──
+  setupLogFilters();
   addLog('system', '⚡', 'Nexus Dashboard initialized');
+  addLogStream('system', 'SYS', 'Nexus Dashboard initialized');
   connect();
 
 })();

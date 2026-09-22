@@ -171,10 +171,10 @@ describe('Dashboard integration with Orchestrator', () => {
     expect(orchestrator.dashboard).toBeNull()
   })
 
-  it('should stop dashboard on shutdown', () => {
+  it('should stop dashboard on shutdown', async () => {
     orchestrator.startDashboard(14755, '127.0.0.1')
     expect(orchestrator.dashboard).not.toBeNull()
-    orchestrator.shutdown()
+    await orchestrator.shutdown()
     expect(orchestrator.dashboard).toBeNull()
   })
 
