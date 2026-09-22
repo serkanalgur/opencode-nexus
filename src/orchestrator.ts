@@ -17,6 +17,7 @@ import { LearningModule } from "./learning"
 import { ModuleRegistry, type ModuleContext } from "./modules"
 import { SecurityScanner } from "./security"
 import { CostForecaster } from "./forecast"
+import { CustomRoleManager } from "./custom-roles"
 
 export interface ModelScore {
   model: string
@@ -87,13 +88,13 @@ export class NexusOrchestrator {
   private tasks: Map<string, Task> = new Map()
   private dag: DAG | null = null
   private config: NexusConfig
-  private budget: BudgetConstraint
+  public budget: BudgetConstraint
   private running: boolean = false
   private paused: boolean = false
   private budgetExceeded: boolean = false
 
   // Cost tracking
-  private totalSpent: number = 0
+  public totalSpent: number = 0
   private costByAgent: Map<string, number> = new Map()
   private costByModel: Map<string, number> = new Map()
 
@@ -146,6 +147,9 @@ export class NexusOrchestrator {
   // Cost forecaster for pre-execution estimates
   public forecaster: CostForecaster
 
+  // Custom agent roles defined by the user
+  public customRoles: CustomRoleManager
+
   // State update callback
   private onStateChange: (() => void) | null = null
 
@@ -194,6 +198,9 @@ export class NexusOrchestrator {
 
     // Initialize cost forecaster
     this.forecaster = new CostForecaster()
+
+    // Initialize custom role manager
+    this.customRoles = new CustomRoleManager()
   }
 
   /**
@@ -762,6 +769,11 @@ export class NexusOrchestrator {
    * Build a system prompt for the agent's role
    */
   private buildRolePrompt(role: AgentRole): string {
+    // Check for a custom role first
+    if (this.customRoles.has(role)) {
+      return this.customRoles.getPrompt(role) || `You are a ${role}. Complete the assigned task professionally.`
+    }
+
     const rolePrompts: Record<string, string> = {
       architect: "You are a software architect. Focus on system design, architecture patterns, and high-level technical decisions. Analyze requirements and propose structured solutions.",
       coder: "You are a senior software engineer. Write clean, efficient, well-documented code. Follow best practices and coding standards.",
@@ -916,10 +928,10 @@ export class NexusOrchestrator {
 
     // Map Nexus roles to OpenCode agent types
     const agentTypeMap: Record<string, string> = {
-      architect: 'build',
-      coder: 'build',
+      architect: 'architect',
+      coder: 'build-orchestrator',
       reviewer: 'code-reviewer',
-      tester: 'build',
+      tester: 'build-orchestrator',
       explorer: 'explore',
       documenter: 'doc-writer',
     }
