@@ -134,14 +134,27 @@ export class NexusConfigManager {
   // Get role display name
   getRoleDisplayName(role: string): string {
     const names: Record<string, string> = {
-      architect: '🏗️ Architect',
-      coder: '💻 Coder',
-      reviewer: '🔍 Reviewer',
-      tester: '🧪 Tester',
-      explorer: '🔬 Explorer',
-      documenter: '📝 Documenter'
+      architect: 'Architect',
+      coder: 'Coder',
+      reviewer: 'Reviewer',
+      tester: 'Tester',
+      explorer: 'Explorer',
+      documenter: 'Documenter'
     }
     return names[role] || role
+  }
+
+  // Get role emoji for TUI display
+  getRoleEmoji(role: string): string {
+    const emojis: Record<string, string> = {
+      architect: '🏗️',
+      coder: '💻',
+      reviewer: '🔍',
+      tester: '🧪',
+      explorer: '🔬',
+      documenter: '📝'
+    }
+    return emojis[role] || '🤖'
   }
 
   // Export config for saving
