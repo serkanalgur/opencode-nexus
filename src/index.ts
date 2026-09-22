@@ -1,6 +1,7 @@
 import { Plugin } from "@opencode/plugin"
 import { NexusOrchestrator } from "./orchestrator"
 import { PRESETS } from "./config"
+import { TEMPLATES, instantiateTemplate, listTemplates } from "./templates"
 
 export default Plugin.define({
   id: "nexus",
@@ -263,6 +264,32 @@ export default Plugin.define({
           }
         }
       })
+
+      editor.add({
+        name: "template",
+        description: "List or instantiate task templates",
+        input: {
+          type: "object",
+          properties: {
+            name: { type: "string", description: "Template name to instantiate (or 'list' to show all)" },
+            baseDir: { type: "string", description: "Base directory for file paths" }
+          },
+          additionalProperties: false
+        },
+        execute: async (input: unknown) => {
+          const { name, baseDir } = input as { name?: string; baseDir?: string }
+          if (!name || name === 'list') {
+            const templates = listTemplates()
+            return { content: templates.map(t => `${t}: ${TEMPLATES[t].description}`).join('\n') }
+          }
+          try {
+            const tasks = instantiateTemplate(name, baseDir || process.cwd())
+            return { content: JSON.stringify(tasks, null, 2) }
+          } catch (error: any) {
+            return { content: `Error: ${error.message}` }
+          }
+        }
+      })
     })
 
     // Register session hook for /nexus commands
@@ -290,3 +317,5 @@ export type { MessageStoreConfig } from "./message-store"
 export { HealthMonitor } from "./health"
 export type { HealthCheck, HealthConfig } from "./health"
 export type { Agent, Task, DAG, ExecutionRequest, ExecutionResult } from "./types"
+export { TEMPLATES, instantiateTemplate, listTemplates, getTemplate } from "./templates"
+export type { TaskTemplate, TaskTemplateStep } from "./templates"
