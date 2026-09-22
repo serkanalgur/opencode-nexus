@@ -141,6 +141,10 @@ export class NexusConfigManager {
    * Called by loadFromPath() — not during construction anymore.
    */
   private loadConfigs(basePath: string): void {
+    // Reset storage config so disk config takes precedence
+    // Storage config is only for explicit TUI/preset actions within a session
+    this.storageConfig = null
+
     // Project-level: .opencode/nexus.jsonc
     const projectPath = join(basePath, '.opencode', 'nexus.jsonc')
     this.projectConfig = readJsoncFile(projectPath)
