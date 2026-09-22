@@ -11,6 +11,7 @@ import { detectCycles } from "./dag"
 import { MessageStore, type MessageStoreConfig } from "./message-store"
 import { PersistentMemoryStore, type MemoryStoreConfig } from "./memory-store"
 import { HealthMonitor } from "./health"
+import { MessageRouter } from "./fanout"
 
 export interface ModelScore {
   model: string
@@ -101,6 +102,9 @@ export class NexusOrchestrator {
   // Memory (SQLite-backed persistent store)
   public memoryStore: PersistentMemoryStore
 
+  // Topic-based fan-out router
+  public messageRouter: MessageRouter
+
   // Event handlers
   private eventHandlers: Map<string, Function[]> = new Map()
 
@@ -134,6 +138,7 @@ export class NexusOrchestrator {
     this.configManager = new NexusConfigManager()
     this.messageStore = new MessageStore(messageStoreConfig)
     this.memoryStore = new PersistentMemoryStore(memoryStoreConfig)
+    this.messageRouter = new MessageRouter()
 
     // Initialize escalation policy from config selfHealing settings
     this.escalationPolicy = {
@@ -978,6 +983,7 @@ export class NexusOrchestrator {
   publish(topic: string, message: Omit<AgentMessage, 'id' | 'timestamp'>): void {
     const fullMessage: AgentMessage = {
       ...message,
+      topic: message.topic ?? topic,
       id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
       timestamp: new Date()
     }
@@ -986,8 +992,12 @@ export class NexusOrchestrator {
     // Persist to message store
     this.messageStore.add(fullMessage)
 
+    // Legacy topic-based pub/sub
     const handlers = this.subscribers.get(topic) || []
     handlers.forEach(handler => handler(fullMessage))
+
+    // Fan-out routing (topic + wildcard subscribers)
+    this.messageRouter.route(fullMessage)
   }
 
   subscribe(topic: string, handler: (msg: AgentMessage) => void): () => void {
