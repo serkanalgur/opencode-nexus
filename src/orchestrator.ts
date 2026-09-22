@@ -11,6 +11,16 @@ import { StateBroadcaster } from "./broadcast"
 import { DashboardModule } from "./dashboard"
 >>>>>>> origin/main
 
+export interface ModelScore {
+  model: string
+  provider: string
+  costScore: number      // 0-1, lower cost = higher score
+  qualityScore: number   // 0-1, from estimateModelQuality
+  speedScore: number     // 0-1, estimated based on model size
+  overallScore: number   // weighted combination
+  reasoning: string
+}
+
 export interface OrchestratorState {
   running: boolean
   paused: boolean
@@ -665,29 +675,7 @@ export class NexusOrchestrator {
   // === Model Selection ===
 
   selectModel(role: AgentRole, complexity: ComplexityScore): ModelSelection {
-    const configModel = this.configManager.getModelForRole(role)
-    const [provider, ...modelParts] = configModel.split('/')
-    const model = modelParts.join('/')
-
-    const budgetRemaining = this.budget.maxTotalCost - this.totalSpent
-
-    if (budgetRemaining < 1 && configModel !== 'opencode/minimax-m2.5-free') {
-      return {
-        provider: 'opencode',
-        model: 'minimax-m2.5-free',
-        estimatedCost: 0,
-        estimatedQuality: 0.5,
-        reasoning: 'Budget constrained, using free tier'
-      }
-    }
-
-    return {
-      provider,
-      model,
-      estimatedCost: this.estimateModelCost(model),
-      estimatedQuality: this.estimateModelQuality(model),
-      reasoning: `Configured model for ${role}`
-    }
+    return this.selectBestModel(role, complexity)
   }
 
   private estimateModelCost(model: string): number {
@@ -714,6 +702,86 @@ export class NexusOrchestrator {
       'minimax-m2.5-free': 0.50
     }
     return quality[model] || 0.60
+  }
+
+  private estimateModelSpeed(model: string): number {
+    const speeds: Record<string, number> = {
+      'claude-opus-4-7': 0.4,
+      'claude-sonnet-4-6': 0.7,
+      'gpt-5': 0.6,
+      'claude-haiku-4-5': 0.9,
+      'gemini-2.5-flash': 0.95,
+      'gpt-5-mini': 0.85,
+      'minimax-m2.5-free': 0.8
+    }
+    return speeds[model] || 0.5
+  }
+
+  scoreModel(modelId: string, role: string, complexity: ComplexityScore): ModelScore {
+    const [provider, ...parts] = modelId.split('/')
+    const model = parts.join('/')
+
+    const cost = this.estimateModelCost(model)
+    const quality = this.estimateModelQuality(model)
+    const maxCost = 15.00 // normalize against most expensive
+
+    const costScore = 1 - (cost / maxCost)
+    const speedScore = this.estimateModelSpeed(model)
+
+    // Weight based on complexity: high complexity favors quality, low favors cost
+    const qualityWeight = complexity.overall > 70 ? 0.6 : complexity.overall > 40 ? 0.4 : 0.2
+    const costWeight = 1 - qualityWeight
+
+    const overallScore = (quality * qualityWeight) + (costScore * costWeight)
+
+    return {
+      model,
+      provider,
+      costScore,
+      qualityScore: quality,
+      speedScore,
+      overallScore,
+      reasoning: `Score: ${overallScore.toFixed(2)} (quality: ${quality.toFixed(2)}, cost: ${costScore.toFixed(2)}, speed: ${speedScore.toFixed(2)})`
+    }
+  }
+
+  selectBestModel(role: string, complexity: ComplexityScore): ModelSelection {
+    const configModel = this.configManager.getModelForRole(role)
+
+    // Build candidate list: configured model + alternatives
+    const candidates = [
+      configModel,
+      'anthropic/claude-sonnet-4-6',
+      'anthropic/claude-haiku-4-5',
+      'openai/gpt-5-mini',
+      'google/gemini-2.5-flash',
+      'opencode/minimax-m2.5-free'
+    ]
+
+    // Deduplicate while preserving order
+    const unique = [...new Set(candidates)]
+
+    // Score all candidates
+    const scored = unique.map(m => this.scoreModel(m, role, complexity))
+
+    // Filter by budget
+    const budgetRemaining = this.budget.maxTotalCost - this.totalSpent
+    const affordable = scored.filter(s => {
+      const cost = this.estimateModelCost(s.model)
+      return cost <= budgetRemaining || cost === 0
+    })
+
+    // Pick best — prefer affordable models, but fall back to all if none are affordable
+    const best = (affordable.length > 0 ? affordable : scored)
+      .sort((a, b) => b.overallScore - a.overallScore)[0]
+
+    return {
+      provider: best.provider,
+      model: best.model,
+      estimatedCost: this.estimateModelCost(best.model),
+      estimatedQuality: best.qualityScore,
+      reasoning: best.reasoning
+    }
   }
 
   // === Cost Tracking ===
