@@ -4,6 +4,7 @@ import { PRESETS } from "./config"
 import { TEMPLATES, instantiateTemplate, listTemplates } from "./templates"
 import { GoalManager } from "./goal"
 import { TeamManager } from "./team"
+import { AstGrep } from "./astgrep"
 import { writeFileSync, readFileSync, mkdirSync, existsSync } from "node:fs"
 import { join } from "node:path"
 import { homedir } from "node:os"
@@ -1376,6 +1377,7 @@ You are a Nexus Documenter sub-agent. Write documentation.
 
       // Team management tools
       const teamManager = new TeamManager()
+      const astGrep = new AstGrep()
 
     editor.add({
       name: "team.create",
@@ -1475,6 +1477,39 @@ You are a Nexus Documenter sub-agent. Write documentation.
         return { content: `Team '${team.name}' activated!\n\nTeam is now ready for parallel execution with ${team.members.length} members:\n${team.members.map(m => `  - ${m.role}: ${m.model}`).join('\n')}` }
       }
     })
+
+      // AST-Grep tools
+      editor.add({
+        name: "astgrep.search",
+        description: "Search for AST patterns in codebase",
+        input: {
+          type: "object",
+          properties: {
+            pattern: { type: "string", description: "AST pattern to search for" },
+            language: { type: "string", description: "Programming language (typescript, python, etc.)" },
+            directory: { type: "string", description: "Directory to search in" }
+          },
+          required: ["pattern", "language", "directory"],
+          additionalProperties: false
+        },
+        execute: async (input: unknown) => {
+          const { pattern, language, directory } = input as { pattern: string; language: string; directory: string }
+          const results = astGrep.search(pattern, language, directory)
+          if (results.length === 0) return { content: `No matches found for "${pattern}" in ${language}` }
+          const lines = results.map(r => `${r.file}:${r.line} — ${r.match}`)
+          return { content: `Found ${results.length} matches:\n${lines.join('\n')}` }
+        }
+      })
+
+      editor.add({
+        name: "astgrep.status",
+        description: "Check if ast-grep is installed",
+        input: { type: "object", properties: {}, additionalProperties: false },
+        execute: async () => {
+          const available = astGrep.isAvailable()
+          return { content: available ? "✅ ast-grep is installed" : "❌ ast-grep is not installed. Install with: cargo install ast-grep" }
+        }
+      })
     })
 
     // Register session hook for /nexus commands
@@ -1528,3 +1563,5 @@ export { GoalManager } from "./goal"
 export type { Goal } from "./goal"
 export { TeamManager } from "./team"
 export type { Team, TeamMember } from "./team"
+export { AstGrep } from "./astgrep"
+export type { AstGrepPattern, AstGrepResult } from "./astgrep"

@@ -18,6 +18,7 @@
     --blue: #58a6ff;
     --purple: #bc8cff;
     --cyan: #39d2c0;
+    --orange: #f0883e;
   }
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -93,6 +94,23 @@
     font-size: 12px;
     color: var(--text-muted);
   }
+  .auto-refresh-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-muted);
+    cursor: pointer;
+    user-select: none;
+  }
+  .auto-refresh-toggle input[type="checkbox"] {
+    accent-color: var(--blue);
+    cursor: pointer;
+  }
+  .last-refresh {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
 
   /* ── Main Layout ── */
   .main {
@@ -136,6 +154,7 @@
   .stat-card.blue .value { color: var(--blue); }
   .stat-card.yellow .value { color: var(--yellow); }
   .stat-card.purple .value { color: var(--purple); }
+  .stat-card.red .value { color: var(--red); }
 
   /* ── Section Headers ── */
   .section-header {
@@ -246,6 +265,18 @@
     font-weight: 600;
     font-variant-numeric: tabular-nums;
   }
+  .agent-cost-bar {
+    height: 3px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+    margin-top: 4px;
+  }
+  .agent-cost-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.4s ease;
+  }
 
   /* ── Budget Gauge ── */
   .budget-section {
@@ -336,6 +367,10 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+    max-height: 340px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
   }
   .task-item {
     display: flex;
@@ -345,18 +380,33 @@
     background: var(--bg);
     border-radius: 6px;
     font-size: 13px;
+    gap: 8px;
   }
   .task-info {
     display: flex;
     align-items: center;
     gap: 10px;
     overflow: hidden;
+    flex: 1;
   }
   .task-name {
     font-weight: 500;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .task-role {
+    color: var(--text-muted);
+    font-size: 11px;
+    flex-shrink: 0;
+  }
+  .task-cost {
+    color: var(--text-muted);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+    min-width: 40px;
+    text-align: right;
   }
   .task-status {
     font-size: 11px;
@@ -391,6 +441,29 @@
     font-size: 14px;
     font-weight: 600;
     margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .activity-filter-bar {
+    display: flex;
+    gap: 4px;
+  }
+  .activity-filter-btn {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-muted);
+    font-size: 11px;
+    padding: 3px 10px;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .activity-filter-btn:hover { border-color: var(--blue); color: var(--text); }
+  .activity-filter-btn.active {
+    background: rgba(88, 166, 255, 0.15);
+    border-color: var(--blue);
+    color: var(--blue);
   }
   .log-container {
     max-height: 260px;
@@ -412,8 +485,10 @@
     font-size: 12px;
     font-family: 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
     line-height: 1.5;
+    align-items: flex-start;
   }
   .log-entry:hover { background: var(--surface-hover); }
+  .log-entry.hidden { display: none; }
   .log-time {
     color: var(--text-muted);
     flex-shrink: 0;
@@ -431,6 +506,8 @@
   .log-entry.event-budget .log-icon { color: var(--yellow); }
   .log-entry.event-info .log-icon { color: var(--text-muted); }
   .log-entry.event-system .log-icon { color: var(--purple); }
+  .log-entry.event-success .log-icon { color: var(--green); }
+  .log-entry.event-warning .log-icon { color: var(--yellow); }
 
   /* ── No Agents placeholder ── */
   .no-agents {
@@ -454,8 +531,13 @@
   @media (max-width: 600px) {
     .overview { grid-template-columns: 1fr; }
     .main { padding: 16px; }
-    .header { padding: 12px 16px; }
+    .header { padding: 12px 16px; flex-wrap: wrap; gap: 8px; }
+    .header-right { gap: 8px; flex-wrap: wrap; }
     .gauge-container { flex-direction: column; align-items: flex-start; }
+    .agent-metrics { grid-template-columns: repeat(2, 1fr); }
+    .activity-filter-bar { flex-wrap: wrap; }
+    .task-item { flex-direction: column; align-items: flex-start; gap: 6px; }
+    .task-cost { text-align: left; }
   }
 
   /* ── Fade-in animation ── */
@@ -526,6 +608,7 @@
     font-size: 12px;
     font-weight: 500;
     transition: border-color 0.3s, box-shadow 0.3s;
+    position: relative;
   }
   .dag-node-box.pending {
     border-color: var(--text-muted);
@@ -551,6 +634,15 @@
     border-color: var(--yellow);
     color: var(--yellow);
   }
+  .dag-node-box .dag-progress {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    height: 2px;
+    border-radius: 0 0 6px 6px;
+    background: var(--blue);
+    transition: width 0.4s ease;
+  }
   @keyframes dagPulse {
     0%, 100% { box-shadow: 0 0 12px rgba(88, 166, 255, 0.3); }
     50% { box-shadow: 0 0 20px rgba(88, 166, 255, 0.6); }
@@ -564,6 +656,11 @@
     white-space: nowrap;
     text-align: center;
   }
+  .dag-node-role {
+    font-size: 9px;
+    color: var(--text-muted);
+    opacity: 0.7;
+  }
   .dag-arrow {
     display: flex;
     align-items: center;
@@ -574,6 +671,86 @@
     font-size: 18px;
   }
   .dag-arrow.active { color: var(--blue); }
+  .dag-arrow.completed { color: var(--green); }
+
+  /* ── Cost Chart ── */
+  .cost-section {
+    margin-bottom: 24px;
+  }
+  .cost-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+  }
+  .cost-card h3 {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .cost-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  .cost-chart {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .cost-chart-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+  }
+  .cost-bar-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+  }
+  .cost-bar-label {
+    min-width: 90px;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .cost-bar-track {
+    flex: 1;
+    height: 8px;
+    background: var(--bg);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .cost-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.5s ease;
+  }
+  .cost-bar-value {
+    min-width: 55px;
+    text-align: right;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    font-size: 12px;
+  }
+  .cost-total-row {
+    display: flex;
+    justify-content: space-between;
+    padding-top: 10px;
+    margin-top: 10px;
+    border-top: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .cost-total-label { color: var(--text-muted); }
+  .cost-total-value { font-weight: 700; color: var(--blue); }
 
   /* ── Config Panel ── */
   .config-section {
@@ -633,6 +810,81 @@
   .config-val.disabled { color: var(--text-muted); }
   .config-val.warning { color: var(--yellow); }
   .config-val.model { color: var(--blue); }
+
+  /* ── Config Editor ── */
+  .config-editor-section {
+    margin-bottom: 24px;
+  }
+  .config-editor-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+  }
+  .config-editor-card h3 {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .config-editor-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+  }
+  .config-editor-actions {
+    display: flex;
+    gap: 8px;
+  }
+  .config-btn {
+    padding: 6px 14px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .config-btn:hover { border-color: var(--blue); color: var(--blue); }
+  .config-btn.primary {
+    background: rgba(88, 166, 255, 0.15);
+    border-color: var(--blue);
+    color: var(--blue);
+  }
+  .config-btn.primary:hover {
+    background: rgba(88, 166, 255, 0.25);
+  }
+  .config-textarea {
+    width: 100%;
+    min-height: 180px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-family: 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    padding: 12px;
+    resize: vertical;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .config-textarea:focus {
+    border-color: var(--blue);
+  }
+  .config-status {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 8px;
+    min-height: 18px;
+  }
+  .config-status.error { color: var(--red); }
+  .config-status.success { color: var(--green); }
 
   /* ── Enhanced Log Stream ── */
   .log-stream-section {
@@ -738,6 +990,11 @@
 
   @media (max-width: 900px) {
     .config-grid { grid-template-columns: 1fr; }
+    .cost-grid { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 600px) {
+    .config-editor-actions { flex-wrap: wrap; }
+    .config-btn { flex: 1; text-align: center; }
   }
 </style>
 </head>
@@ -751,6 +1008,10 @@
   </div>
   <div class="header-right">
     <span class="uptime" id="uptime"></span>
+    <label class="auto-refresh-toggle">
+      <input type="checkbox" id="auto-refresh-check" checked> Auto-refresh
+    </label>
+    <span class="last-refresh" id="last-refresh"></span>
     <div class="connection-badge disconnected" id="conn-badge">
       <span class="connection-dot"></span>
       <span id="conn-text">Disconnected</span>
@@ -858,9 +1119,37 @@
     </div>
   </div>
 
+  <!-- Cost Chart -->
+  <div class="cost-section">
+    <div class="cost-card">
+      <h3>💸 Cost Breakdown</h3>
+      <div class="cost-grid">
+        <div class="cost-chart" id="cost-by-role">
+          <div class="cost-chart-title">By Role</div>
+          <div class="empty-message" style="padding:8px">No cost data yet</div>
+        </div>
+        <div class="cost-chart" id="cost-by-model">
+          <div class="cost-chart-title">By Model</div>
+          <div class="empty-message" style="padding:8px">No cost data yet</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Activity Log -->
   <div class="activity-card">
-    <h3>📈 Activity Log</h3>
+    <h3>
+      <span>📈 Activity Log</span>
+      <span class="activity-filter-bar">
+        <button class="activity-filter-btn active" data-afilter="all">All</button>
+        <button class="activity-filter-btn" data-afilter="spawn">Spawn</button>
+        <button class="activity-filter-btn" data-afilter="task">Task</button>
+        <button class="activity-filter-btn" data-afilter="error">Error</button>
+        <button class="activity-filter-btn" data-afilter="budget">Budget</button>
+        <button class="activity-filter-btn" data-afilter="system">System</button>
+        <button class="activity-filter-btn" data-afilter="info">Info</button>
+      </span>
+    </h3>
     <div class="log-container" id="log-container">
       <div class="log-entry event-info">
         <span class="log-time">--:--:--</span>
@@ -908,6 +1197,22 @@
     </div>
   </div>
 
+  <!-- Config Editor -->
+  <div class="config-editor-section">
+    <div class="config-editor-card">
+      <div class="config-editor-header">
+        <h3>📝 Config Editor</h3>
+        <div class="config-editor-actions">
+          <button class="config-btn" id="config-format-btn">Format</button>
+          <button class="config-btn" id="config-validate-btn">Validate</button>
+          <button class="config-btn primary" id="config-apply-btn">Apply Config</button>
+        </div>
+      </div>
+      <textarea class="config-textarea" id="config-editor" spellcheck="false" placeholder="Loading configuration..."></textarea>
+      <div class="config-status" id="config-editor-status"></div>
+    </div>
+  </div>
+
   <!-- Enhanced Log Stream -->
   <div class="log-stream-section">
     <div class="log-stream-card">
@@ -920,6 +1225,7 @@
           <button class="log-filter-btn" data-filter="error">Error</button>
           <button class="log-filter-btn" data-filter="task">Task</button>
           <button class="log-filter-btn" data-filter="system">System</button>
+          <button class="log-filter-btn" data-filter="budget">Budget</button>
         </span>
       </h3>
       <div class="log-stream-container" id="log-stream-container">
@@ -940,88 +1246,113 @@
   'use strict';
 
   // ── State ──
-  const MAX_LOG_ENTRIES = 200;
-  const MAX_BUDGET = 10.00;
-  const CIRCUMFERENCE = 2 * Math.PI * 52; // ~326.73
+  var MAX_LOG_ENTRIES = 200;
+  var MAX_BUDGET = 10.00;
+  var CIRCUMFERENCE = 2 * Math.PI * 52; // ~326.73
+  var AUTO_REFRESH_INTERVAL = 5000;
 
-  let ws = null;
-  let reconnectDelay = 1000;
-  let reconnectTimer = null;
-  let startTime = Date.now();
-  let logEntries = [];
+  var ws = null;
+  var reconnectDelay = 1000;
+  var reconnectTimer = null;
+  var startTime = Date.now();
+  var logEntries = [];
+  var autoRefreshTimer = null;
+  var lastState = null;
 
   // Log Stream
-  let logStreamEntries = [];
-  const MAX_LOG_STREAM = 500;
-  let logFilter = 'all';
+  var logStreamEntries = [];
+  var MAX_LOG_STREAM = 500;
+  var logFilter = 'all';
+
+  // Activity Log filter
+  var activityFilter = 'all';
 
   // Role emojis
-  const ROLE_EMOJI = {
+  var ROLE_EMOJI = {
     architect: '🏗️', coder: '💻', reviewer: '🔍',
     tester: '🧪', explorer: '🔭', documenter: '📝'
   };
 
+  // Role colors for cost bars
+  var ROLE_COLORS = {
+    architect: '#bc8cff', coder: '#58a6ff', reviewer: '#39d2c0',
+    tester: '#3fb950', explorer: '#d29922', documenter: '#8b949e'
+  };
+
   // ── DOM Refs ──
-  const $connBadge = document.getElementById('conn-badge');
-  const $connText = document.getElementById('conn-text');
-  const $uptime = document.getElementById('uptime');
+  var $connBadge = document.getElementById('conn-badge');
+  var $connText = document.getElementById('conn-text');
+  var $uptime = document.getElementById('uptime');
+  var $autoRefreshCheck = document.getElementById('auto-refresh-check');
+  var $lastRefresh = document.getElementById('last-refresh');
 
   // Stats
-  const $statAgents = document.getElementById('stat-agents');
-  const $statAgentsSub = document.getElementById('stat-agents-sub');
-  const $statTasks = document.getElementById('stat-tasks');
-  const $statTasksSub = document.getElementById('stat-tasks-sub');
-  const $statSpent = document.getElementById('stat-spent');
-  const $statSpentSub = document.getElementById('stat-spent-sub');
-  const $statRemaining = document.getElementById('stat-remaining');
-  const $statRemainingSub = document.getElementById('stat-remaining-sub');
+  var $statAgents = document.getElementById('stat-agents');
+  var $statAgentsSub = document.getElementById('stat-agents-sub');
+  var $statTasks = document.getElementById('stat-tasks');
+  var $statTasksSub = document.getElementById('stat-tasks-sub');
+  var $statSpent = document.getElementById('stat-spent');
+  var $statSpentSub = document.getElementById('stat-spent-sub');
+  var $statRemaining = document.getElementById('stat-remaining');
+  var $statRemainingSub = document.getElementById('stat-remaining-sub');
 
   // Agents
-  const $agentsContainer = document.getElementById('agents-container');
-  const $agentCount = document.getElementById('agent-count');
+  var $agentsContainer = document.getElementById('agents-container');
+  var $agentCount = document.getElementById('agent-count');
 
   // Budget
-  const $gaugeFill = document.getElementById('gauge-fill');
-  const $gaugePct = document.getElementById('gauge-pct');
-  const $budgetTotal = document.getElementById('budget-total');
-  const $budgetSpent = document.getElementById('budget-spent');
-  const $budgetRemaining = document.getElementById('budget-remaining');
-  const $budgetStatus = document.getElementById('budget-status');
+  var $gaugeFill = document.getElementById('gauge-fill');
+  var $gaugePct = document.getElementById('gauge-pct');
+  var $budgetTotal = document.getElementById('budget-total');
+  var $budgetSpent = document.getElementById('budget-spent');
+  var $budgetRemaining = document.getElementById('budget-remaining');
+  var $budgetStatus = document.getElementById('budget-status');
 
   // Tasks
-  const $taskList = document.getElementById('task-list');
+  var $taskList = document.getElementById('task-list');
 
   // Log
-  const $logContainer = document.getElementById('log-container');
+  var $logContainer = document.getElementById('log-container');
 
   // DAG
-  const $dagContainer = document.getElementById('dag-container');
-  const $dagCount = document.getElementById('dag-count');
+  var $dagContainer = document.getElementById('dag-container');
+  var $dagCount = document.getElementById('dag-count');
 
   // Config
-  const $configModels = document.getElementById('config-models');
-  const $configBudget = document.getElementById('config-budget');
-  const $configHealing = document.getElementById('config-healing');
+  var $configModels = document.getElementById('config-models');
+  var $configBudget = document.getElementById('config-budget');
+  var $configHealing = document.getElementById('config-healing');
+
+  // Config Editor
+  var $configEditor = document.getElementById('config-editor');
+  var $configEditorStatus = document.getElementById('config-editor-status');
+  var $configFormatBtn = document.getElementById('config-format-btn');
+  var $configValidateBtn = document.getElementById('config-validate-btn');
+  var $configApplyBtn = document.getElementById('config-apply-btn');
 
   // Log Stream
-  const $logStreamContainer = document.getElementById('log-stream-container');
-  const $logStreamCount = document.getElementById('log-stream-count');
+  var $logStreamContainer = document.getElementById('log-stream-container');
+  var $logStreamCount = document.getElementById('log-stream-count');
+
+  // Cost Charts
+  var $costByRole = document.getElementById('cost-by-role');
+  var $costByModel = document.getElementById('cost-by-model');
 
   // ── Utilities ──
   function fmt$(v) { return '$' + (v || 0).toFixed(2); }
 
   function fmtTime(iso) {
     try {
-      const d = new Date(iso);
+      var d = new Date(iso);
       return d.toLocaleTimeString('en-US', { hour12: false });
-    } catch { return '--:--:--'; }
+    } catch (e) { return '--:--:--'; }
   }
 
   function fmtElapsed(ms) {
-    const s = Math.floor(ms / 1000);
-    const h = Math.floor(s / 3600);
-    const m = Math.floor((s % 3600) / 60);
-    const sec = s % 60;
+    var s = Math.floor(ms / 1000);
+    var h = Math.floor(s / 3600);
+    var m = Math.floor((s % 3600) / 60);
+    var sec = s % 60;
     if (h > 0) return h + 'h ' + m + 'm';
     if (m > 0) return m + 'm ' + sec + 's';
     return sec + 's';
@@ -1036,10 +1367,33 @@
     $uptime.textContent = 'Uptime ' + fmtElapsed(Date.now() - startTime);
   }, 1000);
 
+  // ── Auto-refresh ──
+  function startAutoRefresh() {
+    stopAutoRefresh();
+    autoRefreshTimer = setInterval(function() {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        // Request fresh state
+        try { ws.send(JSON.stringify({ type: 'getState' })); } catch (e) {}
+        $lastRefresh.textContent = 'Updated ' + now();
+      }
+    }, AUTO_REFRESH_INTERVAL);
+  }
+
+  function stopAutoRefresh() {
+    if (autoRefreshTimer) { clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
+    $lastRefresh.textContent = '';
+  }
+
+  $autoRefreshCheck.addEventListener('change', function() {
+    if (this.checked) startAutoRefresh();
+    else stopAutoRefresh();
+  });
+
   // ── Activity Log ──
   function addLog(type, icon, msg) {
     var entry = document.createElement('div');
     entry.className = 'log-entry event-' + type;
+    entry.setAttribute('data-atype', type);
     entry.innerHTML = '<span class="log-time">' + now() + '</span>'
       + '<span class="log-icon">' + icon + '</span>'
       + '<span class="log-msg">' + escHtml(msg) + '</span>';
@@ -1050,11 +1404,39 @@
       if (old.parentNode) old.parentNode.removeChild(old);
     }
 
+    // Apply filter
+    if (activityFilter !== 'all' && type !== activityFilter) {
+      entry.classList.add('hidden');
+    }
+
     // Insert at top
     if ($logContainer.firstChild) {
       $logContainer.insertBefore(entry, $logContainer.firstChild);
     } else {
       $logContainer.appendChild(entry);
+    }
+  }
+
+  function applyActivityFilter() {
+    for (var i = 0; i < logEntries.length; i++) {
+      var t = logEntries[i].getAttribute('data-atype');
+      if (activityFilter === 'all' || t === activityFilter) {
+        logEntries[i].classList.remove('hidden');
+      } else {
+        logEntries[i].classList.add('hidden');
+      }
+    }
+  }
+
+  function setupActivityFilters() {
+    var btns = document.querySelectorAll('.activity-filter-btn');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].addEventListener('click', function() {
+        activityFilter = this.getAttribute('data-afilter');
+        for (var j = 0; j < btns.length; j++) btns[j].classList.remove('active');
+        this.classList.add('active');
+        applyActivityFilter();
+      });
     }
   }
 
@@ -1148,6 +1530,7 @@
       reconnectDelay = 1000;
       addLog('system', '🔌', 'Connected to Nexus server');
       addLogStream('success', 'CONN', 'Connected to Nexus server');
+      if ($autoRefreshCheck.checked) startAutoRefresh();
     };
 
     ws.onmessage = function(evt) {
@@ -1164,6 +1547,7 @@
       setConnState('disconnected');
       addLog('error', '🔌', 'Disconnected (code: ' + evt.code + ')');
       addLogStream('error', 'CONN', 'Disconnected (code: ' + evt.code + ')');
+      stopAutoRefresh();
       scheduleReconnect();
     };
 
@@ -1191,7 +1575,8 @@
     switch (type) {
       case 'state':
       case 'orchestrator:state':
-        renderState(msg.data || msg.state || msg);
+        lastState = msg.data || msg.state || msg;
+        renderState(lastState);
         addLogStream('info', 'STATE', 'State update received');
         break;
 
@@ -1248,6 +1633,12 @@
         addLogStream('success', 'REVIEW', 'Review completed: ' + (msg.data?.taskName || msg.data?.id || ''));
         break;
 
+      case 'config:updated':
+        addLog('system', '⚙️', 'Configuration updated');
+        addLogStream('system', 'CONFIG', 'Configuration updated');
+        if (lastState) renderConfig(lastState);
+        break;
+
       case 'status-update':
         addLog('info', '📊', 'Status update: ' + JSON.stringify(msg.data || {}).slice(0, 120));
         addLogStream('info', 'STATUS', 'Status update received');
@@ -1294,11 +1685,12 @@
 
     var runningTasks = tasks.filter(function(t) { return t.status === 'running' || t.status === 'queued'; }).length;
     var completedTasks = tasks.filter(function(t) { return t.status === 'completed'; }).length;
+    var failedTasks = tasks.filter(function(t) { return t.status === 'failed'; }).length;
     $statTasks.textContent = tasks.length;
     $statTasksSub.textContent = runningTasks + ' running, ' + completedTasks + ' done';
 
     $statSpent.textContent = fmt$(totalSpent);
-    $statSpentSub.textContent = 'of ' + fmt$(budgetTotal) + ' budget';
+    $statSpentSub.textContent = 'of ' + fmt$(budgetTotal) + ' budget' + (failedTasks > 0 ? ' · ' + failedTasks + ' failed' : '');
 
     $statRemaining.textContent = fmt$(budgetRemaining);
     $statRemainingSub.textContent = remainingPct.toFixed(0) + '% available';
@@ -1309,10 +1701,18 @@
       $agentsContainer.innerHTML = '<div class="no-agents"><div class="icon">🤖</div>'
         + '<div class="msg">No agents spawned yet. Tasks will spawn agents automatically.</div></div>';
     } else {
+      var maxAgentCost = 0;
+      for (var i = 0; i < agents.length; i++) {
+        if ((agents[i].totalCost || 0) > maxAgentCost) maxAgentCost = agents[i].totalCost;
+      }
+
       var html = '<div class="agents-grid">';
       for (var i = 0; i < agents.length; i++) {
         var a = agents[i];
         var emoji = ROLE_EMOJI[a.role] || '🤖';
+        var costPct = maxAgentCost > 0 ? ((a.totalCost || 0) / maxAgentCost * 100) : 0;
+        var costColor = ROLE_COLORS[a.role] || '#58a6ff';
+
         html += '<div class="agent-card fade-in">';
         html += '<div class="agent-header">';
         html += '<div class="agent-name"><span class="status-dot ' + escHtml(a.status) + '"></span>'
@@ -1320,6 +1720,9 @@
         html += '<span class="agent-role-badge ' + escHtml(a.role) + '">' + escHtml(a.role) + '</span>';
         html += '</div>';
         html += '<div class="agent-meta">📦 ' + escHtml(a.model || 'unknown') + '</div>';
+        if (a.sessionId) {
+          html += '<div class="agent-meta" style="font-size:10px;opacity:0.6">🔗 ' + escHtml(a.sessionId.slice(0, 12)) + '</div>';
+        }
         html += '<div class="agent-metrics">';
         html += '<div class="metric"><span class="metric-label">Tasks</span>'
           + '<span class="metric-value">' + (a.tasksCompleted || 0) + ' done</span></div>';
@@ -1328,6 +1731,7 @@
         html += '<div class="metric"><span class="metric-label">Cost</span>'
           + '<span class="metric-value">' + fmt$(a.totalCost || 0) + '</span></div>';
         html += '</div>';
+        html += '<div class="agent-cost-bar"><div class="agent-cost-fill" style="width:' + costPct + '%;background:' + costColor + '"></div></div>';
         html += '</div>';
       }
       html += '</div>';
@@ -1365,8 +1769,9 @@
         thtml += '<div class="task-item">';
         thtml += '<div class="task-info">';
         thtml += '<span class="task-name">' + escHtml(t.name || t.id) + '</span>';
-        if (t.role) thtml += '<span style="color:var(--text-muted);font-size:11px">' + escHtml(t.role) + '</span>';
+        if (t.role) thtml += '<span class="task-role">' + escHtml(t.role) + '</span>';
         thtml += '</div>';
+        if (t.cost != null) thtml += '<span class="task-cost">' + fmt$(t.cost) + '</span>';
         thtml += '<span class="task-status ' + escHtml(t.status) + '">' + escHtml(t.status) + '</span>';
         thtml += '</div>';
       }
@@ -1376,8 +1781,14 @@
     // ── DAG Visualization ──
     renderDAG(tasks);
 
+    // ── Cost Chart ──
+    renderCostChart(agents, tasks);
+
     // ── Config Panel ──
     renderConfig(state);
+
+    // ── Config Editor ──
+    updateConfigEditor(state);
   }
 
   // ── DAG Rendering ──
@@ -1449,24 +1860,118 @@
       if (!t) continue;
       var status = t.status || 'pending';
       var label = t.name || t.id || 'task-' + i;
+      var progress = t.progress || (status === 'completed' ? 100 : status === 'running' ? 50 : 0);
+
       html += '<div class="dag-node">';
-      html += '<div class="dag-node-box ' + escHtml(status) + '">' + escHtml(label) + '</div>';
+      html += '<div class="dag-node-box ' + escHtml(status) + '">';
+      html += escHtml(label);
+      if (status === 'running' || status === 'completed') {
+        html += '<div class="dag-progress" style="width:' + Math.min(100, progress) + '%"></div>';
+      }
+      html += '</div>';
       html += '<div class="dag-node-label">' + escHtml(status) + '</div>';
+      if (t.role) html += '<div class="dag-node-role">' + escHtml(t.role) + '</div>';
       html += '</div>';
       if (i < sorted.length - 1) {
         // Check if there's a direct edge
         var hasEdge = false;
+        var allComplete = false;
         for (var e = 0; e < edges.length; e++) {
           if (edges[e].from === sorted[i] && edges[e].to === sorted[i + 1]) {
             hasEdge = true;
+            var fromTask = taskMap[sorted[i]];
+            var toTask = taskMap[sorted[i + 1]];
+            allComplete = fromTask && fromTask.status === 'completed';
             break;
           }
         }
-        html += '<div class="dag-arrow' + (hasEdge ? ' active' : '') + '">→</div>';
+        var arrowClass = 'dag-arrow';
+        if (hasEdge) {
+          arrowClass += allComplete ? ' completed' : ' active';
+        }
+        html += '<div class="' + arrowClass + '">→</div>';
       }
     }
     html += '</div>';
     $dagContainer.innerHTML = html;
+  }
+
+  // ── Cost Chart Rendering ──
+  function renderCostChart(agents, tasks) {
+    // Aggregate by role
+    var roleCosts = {};
+    for (var i = 0; i < agents.length; i++) {
+      var a = agents[i];
+      var role = a.role || 'unknown';
+      roleCosts[role] = (roleCosts[role] || 0) + (a.totalCost || 0);
+    }
+    // Also aggregate task costs by role
+    for (var j = 0; j < tasks.length; j++) {
+      var t = tasks[j];
+      if (t.cost && t.role) {
+        // Don't double-count; use task cost if agent data missing
+        if (!roleCosts[t.role]) roleCosts[t.role] = t.cost;
+      }
+    }
+
+    // Aggregate by model
+    var modelCosts = {};
+    for (var i = 0; i < agents.length; i++) {
+      var model = agents[i].model || 'unknown';
+      // Shorten model name
+      var shortModel = model.split('/').pop();
+      modelCosts[shortModel] = (modelCosts[shortModel] || 0) + (agents[i].totalCost || 0);
+    }
+
+    var totalRoleCost = 0;
+    for (var k in roleCosts) totalRoleCost += roleCosts[k];
+    var totalModelCost = 0;
+    for (var k in modelCosts) totalModelCost += modelCosts[k];
+
+    // Render role chart
+    if (Object.keys(roleCosts).length === 0 || totalRoleCost === 0) {
+      $costByRole.innerHTML = '<div class="cost-chart-title">By Role</div>'
+        + '<div class="empty-message" style="padding:8px">No cost data yet</div>';
+    } else {
+      var rhtml = '<div class="cost-chart-title">By Role</div>';
+      var roles = Object.keys(roleCosts).sort(function(a, b) { return roleCosts[b] - roleCosts[a]; });
+      for (var i = 0; i < roles.length; i++) {
+        var r = roles[i];
+        var pct = (roleCosts[r] / totalRoleCost * 100).toFixed(0);
+        var color = ROLE_COLORS[r] || '#58a6ff';
+        rhtml += '<div class="cost-bar-row">'
+          + '<span class="cost-bar-label">' + (ROLE_EMOJI[r] || '🤖') + ' ' + escHtml(r) + '</span>'
+          + '<div class="cost-bar-track"><div class="cost-bar-fill" style="width:' + pct + '%;background:' + color + '"></div></div>'
+          + '<span class="cost-bar-value">' + fmt$(roleCosts[r]) + '</span>'
+          + '</div>';
+      }
+      rhtml += '<div class="cost-total-row"><span class="cost-total-label">Total by Role</span>'
+        + '<span class="cost-total-value">' + fmt$(totalRoleCost) + '</span></div>';
+      $costByRole.innerHTML = rhtml;
+    }
+
+    // Render model chart
+    if (Object.keys(modelCosts).length === 0 || totalModelCost === 0) {
+      $costByModel.innerHTML = '<div class="cost-chart-title">By Model</div>'
+        + '<div class="empty-message" style="padding:8px">No cost data yet</div>';
+    } else {
+      var mhtml = '<div class="cost-chart-title">By Model</div>';
+      var models = Object.keys(modelCosts).sort(function(a, b) { return modelCosts[b] - modelCosts[a]; });
+      var modelColors = ['#58a6ff', '#bc8cff', '#39d2c0', '#3fb950', '#d29922', '#f0883e', '#f85149'];
+      for (var i = 0; i < models.length; i++) {
+        var m = models[i];
+        var pct = (modelCosts[m] / totalModelCost * 100).toFixed(0);
+        var color = modelColors[i % modelColors.length];
+        mhtml += '<div class="cost-bar-row">'
+          + '<span class="cost-bar-label">' + escHtml(m) + '</span>'
+          + '<div class="cost-bar-track"><div class="cost-bar-fill" style="width:' + pct + '%;background:' + color + '"></div></div>'
+          + '<span class="cost-bar-value">' + fmt$(modelCosts[m]) + '</span>'
+          + '</div>';
+      }
+      mhtml += '<div class="cost-total-row"><span class="cost-total-label">Total by Model</span>'
+        + '<span class="cost-total-value">' + fmt$(totalModelCost) + '</span></div>';
+      $costByModel.innerHTML = mhtml;
+    }
   }
 
   // ── Config Rendering ──
@@ -1509,8 +2014,78 @@
       + '<div class="config-row"><span class="config-key">deadlock detect</span><span class="config-val ' + (deadlockDetect ? 'enabled' : 'disabled') + '">' + (deadlockDetect ? 'enabled' : 'disabled') + '</span></div>';
   }
 
+  // ── Config Editor ──
+  function updateConfigEditor(state) {
+    if (!state) return;
+    var configData = state.config || {};
+    // Only update if editor is not focused (user might be editing)
+    if (document.activeElement !== $configEditor) {
+      try {
+        $configEditor.value = JSON.stringify(configData, null, 2);
+      } catch (e) {
+        $configEditor.value = '// Error serializing config';
+      }
+    }
+  }
+
+  $configFormatBtn.addEventListener('click', function() {
+    try {
+      var parsed = JSON.parse($configEditor.value);
+      $configEditor.value = JSON.stringify(parsed, null, 2);
+      $configEditorStatus.textContent = 'Formatted successfully';
+      $configEditorStatus.className = 'config-status success';
+    } catch (e) {
+      $configEditorStatus.textContent = 'Invalid JSON: ' + e.message;
+      $configEditorStatus.className = 'config-status error';
+    }
+  });
+
+  $configValidateBtn.addEventListener('click', function() {
+    try {
+      var parsed = JSON.parse($configEditor.value);
+      var warnings = [];
+      if (parsed.budget && parsed.budget.maxBudget && parsed.budget.maxBudget > 100) {
+        warnings.push('Budget exceeds $100');
+      }
+      if (parsed.selfHealing && parsed.selfHealing.maxRetries && parsed.selfHealing.maxRetries > 10) {
+        warnings.push('Max retries > 10 may cause excessive re-runs');
+      }
+      if (warnings.length > 0) {
+        $configEditorStatus.textContent = 'Valid with warnings: ' + warnings.join('; ');
+        $configEditorStatus.className = 'config-status';
+        $configEditorStatus.style.color = 'var(--yellow)';
+      } else {
+        $configEditorStatus.textContent = 'Valid JSON configuration ✓';
+        $configEditorStatus.className = 'config-status success';
+      }
+    } catch (e) {
+      $configEditorStatus.textContent = 'Invalid JSON: ' + e.message;
+      $configEditorStatus.className = 'config-status error';
+    }
+  });
+
+  $configApplyBtn.addEventListener('click', function() {
+    try {
+      var parsed = JSON.parse($configEditor.value);
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'config:update', data: parsed }));
+        $configEditorStatus.textContent = 'Config update sent to server';
+        $configEditorStatus.className = 'config-status success';
+        addLog('system', '⚙️', 'Config update sent');
+        addLogStream('system', 'CONFIG', 'Config update sent via dashboard');
+      } else {
+        $configEditorStatus.textContent = 'Not connected to server';
+        $configEditorStatus.className = 'config-status error';
+      }
+    } catch (e) {
+      $configEditorStatus.textContent = 'Invalid JSON: ' + e.message;
+      $configEditorStatus.className = 'config-status error';
+    }
+  });
+
   // ── Init ──
   setupLogFilters();
+  setupActivityFilters();
   addLog('system', '⚡', 'Nexus Dashboard initialized');
   addLogStream('system', 'SYS', 'Nexus Dashboard initialized');
   connect();
