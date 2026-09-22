@@ -2,6 +2,7 @@ import { Plugin } from "@opencode/plugin"
 import { NexusOrchestrator } from "./orchestrator"
 import { PRESETS } from "./config"
 import { TEMPLATES, instantiateTemplate, listTemplates } from "./templates"
+import { GoalManager } from "./goal"
 import { writeFileSync, readFileSync, mkdirSync, existsSync } from "node:fs"
 import { join } from "node:path"
 import { homedir } from "node:os"
@@ -392,6 +393,7 @@ You are a Nexus Documenter sub-agent. Write documentation.
     }
 
     const orchestrator = new NexusOrchestrator()
+    const goalManager = new GoalManager()
 
     // Initialize orchestrator with OpenCode context for real session API access
     await orchestrator.initialize(ctx, () => {
@@ -1248,6 +1250,128 @@ You are a Nexus Documenter sub-agent. Write documentation.
           }
         }
       })
+
+      // === Goal Tracking Tools ===
+      editor.add({
+        name: "goal.set",
+        description: "Set a new persistent objective",
+        input: {
+          type: "object",
+          properties: {
+            description: { type: "string", description: "Goal description" },
+            autoContinue: { type: "boolean", description: "Auto-continue (default: true)" }
+          },
+          required: ["description"],
+          additionalProperties: false
+        },
+        execute: async (input: unknown) => {
+          const { description, autoContinue } = input as { description: string; autoContinue?: boolean }
+          const goal = goalManager.set(description, autoContinue ?? true)
+          return { content: `🎯 Goal set: ${goal.description}` }
+        }
+      })
+
+      editor.add({
+        name: "goal.status",
+        description: "Show current goal status",
+        input: { type: "object", properties: {}, additionalProperties: false },
+        execute: async () => {
+          const goal = goalManager.getActive()
+          if (!goal) return { content: "No active goal. Use nexus.goal.set() to create one." }
+          return { content: `🎯 ${goal.description}\nStatus: ${goal.status}\nTasks: ${goal.tasks.length}` }
+        }
+      })
+
+      editor.add({
+        name: "goal.complete",
+        description: "Complete current goal",
+        input: { type: "object", properties: {}, additionalProperties: false },
+        execute: async () => {
+          const goal = goalManager.getActive()
+          if (!goal) return { content: "No active goal." }
+          goalManager.complete(goal.id)
+          return { content: `✅ Goal completed: ${goal.description}` }
+        }
+      })
+
+      editor.add({
+        name: "goal.list",
+        description: "List all goals",
+        input: { type: "object", properties: {}, additionalProperties: false },
+        execute: async () => {
+          const goals = goalManager.getAll()
+          if (goals.length === 0) return { content: "No goals yet." }
+          const lines = goals.map(g => `${g.status === 'active' ? '🎯' : '✅'} ${g.description}`)
+          return { content: lines.join('\n') }
+        }
+      })
+
+      editor.add({
+        name: "goal.status",
+        description: "Show current active goal status",
+        input: {
+          type: "object",
+          properties: {},
+          additionalProperties: false
+        },
+        execute: async () => {
+          const active = goalManager.getActive()
+          if (!active) return { content: "No active goal. Use nexus.goal.set() to set one." }
+          return {
+            content: [
+              `🎯 Active Goal: ${active.description}`,
+              `📋 ID: ${active.id}`,
+              `🔄 Auto-continue: ${active.autoContinue ? 'enabled' : 'disabled'}`,
+              `📊 Status: ${active.status}`,
+              `📎 Tasks: ${active.tasks.length > 0 ? active.tasks.join(', ') : 'none yet'}`,
+              `📅 Created: ${active.createdAt.toISOString()}`,
+              `⏱️ Should continue: ${goalManager.shouldContinue() ? 'yes' : 'no'}`
+            ].join('\n')
+          }
+        }
+      })
+
+      editor.add({
+        name: "goal.complete",
+        description: "Mark current active goal as completed",
+        input: {
+          type: "object",
+          properties: {},
+          additionalProperties: false
+        },
+        execute: async () => {
+          const active = goalManager.getActive()
+          if (!active) return { content: "No active goal to complete." }
+          goalManager.complete(active.id)
+          await ctx.storage.set("nexus-goal", JSON.parse(JSON.stringify(goalManager.getAll())))
+          return {
+            content: [
+              `✅ Goal completed: ${active.description}`,
+              `📋 ID: ${active.id}`,
+              `📎 Tasks tracked: ${active.tasks.length}`
+            ].join('\n')
+          }
+        }
+      })
+
+      editor.add({
+        name: "goal.list",
+        description: "List all goals",
+        input: {
+          type: "object",
+          properties: {},
+          additionalProperties: false
+        },
+        execute: async () => {
+          const goals = goalManager.getAll()
+          if (goals.length === 0) return { content: "No goals set yet. Use nexus.goal.set() to create one." }
+          const lines = goals.map(g => {
+            const icon = g.status === 'active' ? '🎯' : g.status === 'completed' ? '✅' : g.status === 'paused' ? '⏸️' : '❌'
+            return `${icon} [${g.status}] ${g.description} (tasks: ${g.tasks.length})`
+          })
+          return { content: `Goals (${goals.length}):\n${lines.join('\n')}` }
+        }
+      })
     })
 
     // Register session hook for /nexus commands
@@ -1297,3 +1421,5 @@ export { WorktreeManager } from "./worktree"
 export type { AgentWorktree } from "./worktree"
 export { TodoEnforcer } from "./todo"
 export type { TodoItem } from "./todo"
+export { GoalManager } from "./goal"
+export type { Goal } from "./goal"
