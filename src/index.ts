@@ -387,6 +387,43 @@ export default Plugin.define({
           return { content: `Total: ${stats.total} | Success: ${(stats.successRate * 100).toFixed(1)}% | Cost: $${stats.totalCost.toFixed(4)} | Avg: ${stats.avgDuration.toFixed(0)}ms\nBy role: ${JSON.stringify(stats.byRole)}` }
         }
       })
+
+      editor.add({
+        name: "roles.list",
+        description: "List all custom agent roles",
+        input: {
+          type: "object",
+          properties: {},
+          additionalProperties: false
+        },
+        execute: async () => {
+          const roles = orchestrator.customRoles.list()
+          if (roles.length === 0) return { content: "No custom roles defined. Add them in .opencode/nexus.jsonc under 'customRoles'." }
+          const lines = roles.map(r => `${r.emoji} ${r.displayName} (${r.name}): ${r.prompt.substring(0, 60)}...`)
+          return { content: lines.join('\n') }
+        }
+      })
+
+      editor.add({
+        name: "roles.add",
+        description: "Add a custom agent role",
+        input: {
+          type: "object",
+          properties: {
+            name: { type: "string", description: "Role identifier (lowercase, no spaces)" },
+            displayName: { type: "string", description: "Display name" },
+            emoji: { type: "string", description: "Emoji for the role" },
+            prompt: { type: "string", description: "System prompt for this role" },
+            model: { type: "string", description: "Default model (optional)" }
+          },
+          required: ["name", "displayName", "prompt"]
+        },
+        execute: async (input: unknown) => {
+          const { name, displayName, emoji, prompt, model } = input as any
+          orchestrator.customRoles.register({ name, displayName, emoji: emoji || '🤖', prompt, model })
+          return { content: `Custom role '${displayName}' registered` }
+        }
+      })
     })
 
     // Register session hook for /nexus commands
@@ -426,3 +463,5 @@ export { ModuleRegistry } from "./modules"
 export type { NexusModule, ModuleContext, ModuleTool, ModuleHook } from "./modules"
 export { SecurityScanner } from "./security"
 export type { SecurityIssue, SecurityScanResult, SecurityConfig } from "./security"
+export { CustomRoleManager } from "./custom-roles"
+export type { CustomRole } from "./custom-roles"
