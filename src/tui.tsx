@@ -419,8 +419,9 @@ export default Plugin.define({
     })
 
     // === Sidebar Agent Status ===
-    // Ephemeral memory store for agent status (survives hot reloads)
-    const [sidebarState, setSidebarState] = context.storage.memory<SidebarState>("nexus-sidebar-state", {
+    // Durable storage: persists to disk, syncs with server-side storage
+    // where the orchestrator writes agent state via ctx.storage.set
+    const [sidebarState, setSidebarState] = context.storage.store<SidebarState>("nexus-sidebar-state", {
       initial: {
         agents: [],
         totalCost: 0,
