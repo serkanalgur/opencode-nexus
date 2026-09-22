@@ -108,11 +108,33 @@ export default Plugin.define({
               sessionID: agent.sessionID!,
               text: task
             })
+
+            // Analyze task complexity for informational output
+            const complexity = orchestrator.analyzeComplexity({
+              id: `spawn-${Date.now()}`,
+              name: task,
+              description: task,
+              files: { include: [] },
+              dependencies: [],
+              requiredRole: role,
+              complexity: { overall: 0, factors: { fileCount: 0, codeLines: 0, dependencyDepth: 0, domainKnowledge: 0, riskLevel: 'low' } },
+              priority: 'normal',
+              status: 'running'
+            })
+
+            // Store complexity on agent
+            agent.complexity = complexity
+
+            // Get model selection reasoning
+            const modelSelection = orchestrator.selectModel(role, complexity)
+
             await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(orchestrator.getState())))
             const taskPreview = task.length > 80 ? task.substring(0, 77) + '...' : task
             const output = [
               `${agent.name}`,
               `📋 Task: ${taskPreview}`,
+              `📊 Complexity: ${complexity.overall}/100 (${complexity.factors.riskLevel} risk)`,
+              `🤖 Model reasoning: ${modelSelection.reasoning}`,
               `📎 Session: ${agent.sessionID}`
             ].join('\n')
             return { content: output }
