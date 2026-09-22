@@ -34,94 +34,100 @@ export class DashboardModule {
   start(port: number, host: string): void {
     const self = this
 
-    this.server = Bun.serve({
-      port,
-      hostname: host,
+    try {
+      this.server = Bun.serve({
+        port,
+        hostname: host,
 
-      fetch(req, server) {
-        const url = new URL(req.url)
+        fetch(req, server) {
+          const url = new URL(req.url)
 
-        // CORS preflight
-        if (req.method === "OPTIONS") {
-          return new Response(null, { headers: CORS_HEADERS })
-        }
-
-        // WebSocket upgrade
-        if (url.pathname === "/ws/events") {
-          if (server.upgrade(req, { data: {} })) return new Response(null)
-          return new Response("WebSocket upgrade failed", { status: 500 })
-        }
-
-        // REST API endpoints
-        if (url.pathname === "/api/state") {
-          return jsonResponse(self.orchestrator.getState())
-        }
-
-        if (url.pathname === "/api/config") {
-          return jsonResponse(self.orchestrator.configManager.exportConfig())
-        }
-
-        if (url.pathname === "/api/agents") {
-          const state = self.orchestrator.getState()
-          return jsonResponse(state.agents)
-        }
-
-        if (url.pathname === "/api/costs") {
-          return jsonResponse(self.orchestrator.getCostReport())
-        }
-
-        if (url.pathname === "/api/health") {
-          return jsonResponse({ ok: true, uptime: process.uptime() })
-        }
-
-        // Default response
-        return new Response("Nexus Dashboard API", {
-          headers: {
-            "Content-Type": "text/plain",
-            ...CORS_HEADERS,
-          },
-        })
-      },
-
-      websocket: {
-        open(ws: any) {
-          self.clients.add(ws)
-          // Send current state on connect
-          ws.send(
-            JSON.stringify({
-              type: "orchestrator:state",
-              data: self.orchestrator.getState(),
-              timestamp: new Date().toISOString(),
-            })
-          )
-        },
-        message(ws: any, message: any) {
-          // Handle client messages (ping/pong, subscribe)
-          try {
-            const msg = JSON.parse(
-              typeof message === "string" ? message : message.toString()
-            )
-            if (msg.type === "ping") {
-              ws.send(
-                JSON.stringify({
-                  type: "pong",
-                  timestamp: new Date().toISOString(),
-                })
-              )
-            }
-          } catch {
-            // Ignore malformed messages
+          // CORS preflight
+          if (req.method === "OPTIONS") {
+            return new Response(null, { headers: CORS_HEADERS })
           }
-        },
-        close(ws: any) {
-          self.clients.delete(ws)
-        },
-      },
-    })
 
-    console.log(
-      `[nexus] Dashboard server running at http://${host}:${port}`
-    )
+          // WebSocket upgrade
+          if (url.pathname === "/ws/events") {
+            if (server.upgrade(req, { data: {} })) return new Response(null)
+            return new Response("WebSocket upgrade failed", { status: 500 })
+          }
+
+          // REST API endpoints
+          if (url.pathname === "/api/state") {
+            return jsonResponse(self.orchestrator.getState())
+          }
+
+          if (url.pathname === "/api/config") {
+            return jsonResponse(self.orchestrator.configManager.exportConfig())
+          }
+
+          if (url.pathname === "/api/agents") {
+            const state = self.orchestrator.getState()
+            return jsonResponse(state.agents)
+          }
+
+          if (url.pathname === "/api/costs") {
+            return jsonResponse(self.orchestrator.getCostReport())
+          }
+
+          if (url.pathname === "/api/health") {
+            return jsonResponse({ ok: true, uptime: process.uptime() })
+          }
+
+          // Default response
+          return new Response("Nexus Dashboard API", {
+            headers: {
+              "Content-Type": "text/plain",
+              ...CORS_HEADERS,
+            },
+          })
+        },
+
+        websocket: {
+          open(ws: any) {
+            self.clients.add(ws)
+            // Send current state on connect
+            ws.send(
+              JSON.stringify({
+                type: "orchestrator:state",
+                data: self.orchestrator.getState(),
+                timestamp: new Date().toISOString(),
+              })
+            )
+          },
+          message(ws: any, message: any) {
+            // Handle client messages (ping/pong, subscribe)
+            try {
+              const msg = JSON.parse(
+                typeof message === "string" ? message : message.toString()
+              )
+              if (msg.type === "ping") {
+                ws.send(
+                  JSON.stringify({
+                    type: "pong",
+                    timestamp: new Date().toISOString(),
+                  })
+                )
+              }
+            } catch {
+              // Ignore malformed messages
+            }
+          },
+          close(ws: any) {
+            self.clients.delete(ws)
+          },
+        },
+      })
+
+      console.log(
+        `[nexus] Dashboard server running at http://${host}:${port}`
+      )
+    } catch (err: any) {
+      this.server = null
+      console.error(`[nexus] Failed to start dashboard on ${host}:${port}: ${err.message}`)
+      throw new Error(`Dashboard failed to start on port ${port}: ${err.message}`)
+    }
   }
 
   broadcast(event: string, data: unknown): void {

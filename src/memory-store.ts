@@ -142,15 +142,31 @@ export class PersistentMemoryStore {
   }
 
   private rowToEntry(row: any): MemoryEntry {
+    let value: unknown
+    try {
+      value = JSON.parse(row.value)
+    } catch {
+      // Corrupted value — store raw string instead of crashing
+      value = row.value
+    }
+
+    let tags: string[] = []
+    try {
+      tags = JSON.parse(row.tags || '[]')
+    } catch {
+      // Corrupted tags — default to empty array
+      tags = []
+    }
+
     return {
       id: row.id,
       key: row.key,
-      value: JSON.parse(row.value),
+      value,
       scope: row.scope as MemoryScope,
       author: row.author,
       timestamp: new Date(row.timestamp),
       confidence: row.confidence,
-      tags: JSON.parse(row.tags || '[]'),
+      tags,
       ttl: row.ttl || undefined
     }
   }
