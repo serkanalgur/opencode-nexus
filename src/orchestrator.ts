@@ -9,6 +9,7 @@ import { StateBroadcaster } from "./broadcast"
 import { DashboardModule } from "./dashboard"
 import { detectCycles } from "./dag"
 import { MessageStore, type MessageStoreConfig } from "./message-store"
+import { PersistentMemoryStore, type MemoryStoreConfig } from "./memory-store"
 import { HealthMonitor } from "./health"
 import { MessageRouter } from "./fanout"
 
@@ -98,11 +99,11 @@ export class NexusOrchestrator {
   // Message persistence
   public messageStore: MessageStore
 
+  // Memory (SQLite-backed persistent store)
+  public memoryStore: PersistentMemoryStore
+
   // Topic-based fan-out router
   public messageRouter: MessageRouter
-
-  // Memory
-  private memory: Map<string, MemoryEntry> = new Map()
 
   // Event handlers
   private eventHandlers: Map<string, Function[]> = new Map()
@@ -131,11 +132,12 @@ export class NexusOrchestrator {
   // State update callback
   private onStateChange: (() => void) | null = null
 
-  constructor(config?: Partial<NexusConfig>, messageStoreConfig?: Partial<MessageStoreConfig>) {
+  constructor(config?: Partial<NexusConfig>, messageStoreConfig?: Partial<MessageStoreConfig>, memoryStoreConfig?: Partial<MemoryStoreConfig>) {
     this.config = this.mergeConfig(config)
     this.budget = this.config.budget
     this.configManager = new NexusConfigManager()
     this.messageStore = new MessageStore(messageStoreConfig)
+    this.memoryStore = new PersistentMemoryStore(memoryStoreConfig)
     this.messageRouter = new MessageRouter()
 
     // Initialize escalation policy from config selfHealing settings
@@ -632,11 +634,9 @@ export class NexusOrchestrator {
 
     // Gather memory entries for this agent's scope
     const memoryEntries: MemoryEntry[] = []
-    this.memory.forEach((entry) => {
-      if (entry.author === agent.id || entry.author === agent.role) {
-        memoryEntries.push(entry)
-      }
-    })
+    const byAgentId = this.memoryStore.getByAuthor(agent.id)
+    const byRole = this.memoryStore.getByAuthor(agent.role)
+    memoryEntries.push(...byAgentId, ...byRole)
 
     const taskProgress = agent.metrics.tasksCompleted > 0
       ? Math.min(50, agent.metrics.tasksCompleted * 25)
@@ -1013,19 +1013,19 @@ export class NexusOrchestrator {
   // === Memory ===
 
   setMemory(scope: MemoryScope, key: string, value: unknown, author: string): void {
-    const entry: MemoryEntry = {
-      id: `mem-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      key, value, scope, author,
-      timestamp: new Date(),
+    const entry = this.memoryStore.set({
+      key,
+      value,
+      scope,
+      author,
       confidence: 1.0,
       tags: []
-    }
-    this.memory.set(`${scope}:${key}`, entry)
+    })
     this.emit('memory:set', entry)
   }
 
   getMemory(scope: MemoryScope, key: string): MemoryEntry | undefined {
-    return this.memory.get(`${scope}:${key}`)
+    return this.memoryStore.get(key, scope) ?? undefined
   }
 
   // === Query ===
@@ -1087,6 +1087,7 @@ export class NexusOrchestrator {
   shutdown(): void {
     this.healthMonitor?.stop()
     this.stopDashboard()
+    this.memoryStore.close()
     this.agents.forEach((agent) => {
       agent.status = 'terminated'
     })
