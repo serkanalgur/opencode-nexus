@@ -290,6 +290,26 @@ export default Plugin.define({
           }
         }
       })
+
+      editor.add({
+        name: "security.scan",
+        description: "Scan content for security issues",
+        input: {
+          type: "object",
+          properties: {
+            content: { type: "string", description: "Code content to scan" },
+            filename: { type: "string", description: "Filename for context" }
+          },
+          required: ["content"],
+          additionalProperties: false
+        },
+        execute: async (input: unknown) => {
+          const { content, filename } = input as { content: string; filename?: string }
+          const issues = orchestrator.securityScanner.scanContent(content, filename || 'unknown')
+          const result = orchestrator.securityScanner.getResult()
+          return { content: JSON.stringify({ issues: issues.length, score: result.score, details: issues }, null, 2) }
+        }
+      })
     })
 
     // Register session hook for /nexus commands
@@ -327,3 +347,5 @@ export { TEMPLATES, instantiateTemplate, listTemplates, getTemplate } from "./te
 export type { TaskTemplate, TaskTemplateStep } from "./templates"
 export { ModuleRegistry } from "./modules"
 export type { NexusModule, ModuleContext, ModuleTool, ModuleHook } from "./modules"
+export { SecurityScanner } from "./security"
+export type { SecurityIssue, SecurityScanResult, SecurityConfig } from "./security"
