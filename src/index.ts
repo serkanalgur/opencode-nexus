@@ -354,6 +354,57 @@ export default Plugin.define({
           return { content: JSON.stringify({ issues: issues.length, score: result.score, details: issues }, null, 2) }
         }
       })
+
+      editor.add({
+        name: "worktree.enable",
+        description: "Enable git worktree isolation for agents",
+        input: {
+          type: "object",
+          properties: {
+            repoRoot: { type: "string", description: "Repository root (defaults to cwd)" }
+          },
+          additionalProperties: false
+        },
+        execute: async (input: unknown) => {
+          const { repoRoot } = input as { repoRoot?: string }
+          orchestrator.enableWorktrees(repoRoot || process.cwd())
+          return { content: `Git worktree isolation enabled. Agents will get isolated directories.` }
+        }
+      })
+
+      editor.add({
+        name: "worktree.list",
+        description: "List active agent worktrees",
+        input: {
+          type: "object",
+          properties: {},
+          additionalProperties: false
+        },
+        execute: async () => {
+          if (!orchestrator.worktreeManager) return { content: "Worktree isolation not enabled. Use worktree.enable first." }
+          const wts = orchestrator.worktreeManager.list()
+          if (wts.length === 0) return { content: "No active worktrees." }
+          const lines = wts.map(w => `${w.agentId}: ${w.path} (branch: ${w.branch})`)
+          return { content: lines.join('\n') }
+        }
+      })
+
+      editor.add({
+        name: "worktree.disable",
+        description: "Disable worktree isolation and clean up",
+        input: {
+          type: "object",
+          properties: {},
+          additionalProperties: false
+        },
+        execute: async () => {
+          if (orchestrator.worktreeManager) {
+            orchestrator.worktreeManager.cleanupAll()
+            orchestrator.worktreeManager = null
+          }
+          return { content: "Worktree isolation disabled and cleaned up." }
+        }
+      })
     })
 
     // Register session hook for /nexus commands

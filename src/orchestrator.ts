@@ -16,6 +16,7 @@ import { NotificationManager } from "./notifications"
 import { LearningModule } from "./learning"
 import { ModuleRegistry, type ModuleContext } from "./modules"
 import { SecurityScanner } from "./security"
+import { WorktreeManager } from "./worktree"
 
 export interface ModelScore {
   model: string
@@ -141,6 +142,9 @@ export class NexusOrchestrator {
 
   // Security scanner for task output scanning
   public securityScanner: SecurityScanner
+
+  // Worktree manager for agent isolation
+  public worktreeManager: WorktreeManager | null = null
 
   // State update callback
   private onStateChange: (() => void) | null = null
@@ -285,6 +289,13 @@ export class NexusOrchestrator {
         cacheWrite: cost.cacheWrite || 0,
       })
     }
+  }
+
+  /**
+   * Enable git worktree isolation for agents
+   */
+  enableWorktrees(repoRoot?: string): void {
+    this.worktreeManager = new WorktreeManager(repoRoot || process.cwd())
   }
 
   /**
@@ -946,6 +957,18 @@ export class NexusOrchestrator {
     }
 
     this.agents.set(agentId, agent)
+
+    // Create isolated worktree for agent if enabled
+    if (this.worktreeManager) {
+      try {
+        const wt = this.worktreeManager.create(agentId)
+        // Store worktree path on agent for reference
+        ;(agent as any).worktreePath = wt.path
+      } catch {
+        // Worktree creation is optional — agent still works without it
+      }
+    }
+
     this.emit('agent:spawned', agent)
     this.notifyStateChange()
 
@@ -966,6 +989,12 @@ export class NexusOrchestrator {
     if (agent) {
       agent.status = 'terminated'
       this.agents.delete(agentId)
+
+      // Remove isolated worktree if manager is enabled
+      if (this.worktreeManager) {
+        this.worktreeManager.remove(agentId)
+      }
+
       this.emit('agent:terminated', agent)
       this.notifyStateChange()
 
@@ -1276,6 +1305,12 @@ export class NexusOrchestrator {
   async shutdown(): Promise<void> {
     // Tear down all modules before stopping orchestrator components
     await this.moduleRegistry.teardownAll()
+
+    // Cleanup all agent worktrees
+    if (this.worktreeManager) {
+      this.worktreeManager.cleanupAll()
+      this.worktreeManager = null
+    }
 
     this._healthMonitor?.stop()
     this.stopDashboard()
