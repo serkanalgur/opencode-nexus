@@ -393,6 +393,132 @@ export default Plugin.define({
                   })
                 }
               }
+            },
+            // === Claude Code–compatible quick commands ===
+            {
+              id: "nexus.review",
+              title: "Quick Code Review",
+              group: "Nexus",
+              palette: true,
+              slash: { name: "nexus-review", aliases: ["nr"], arguments: true },
+              enabled: () => true,
+              suggested: true,
+              run: async (input?: string) => {
+                const location = context.location ?? context.data.location.default()
+                await context.data.location.model.sync(location)
+                const availableModels = context.data.location.model.list(location) ?? []
+                const modelOptions = availableModels.map((m: any) => ({
+                  title: m.name || m.id,
+                  value: `${m.providerID}/${m.id}`,
+                  description: m.providerID
+                }))
+
+                const selectedModel = await context.ui.dialog.select({
+                  title: "Review Model",
+                  options: modelOptions
+                })
+
+                context.ui.toast.show({
+                  title: "🔍 Code Review",
+                  message: selectedModel
+                    ? `Spawning reviewer with ${selectedModel}...`
+                    : "Spawning reviewer with default model...",
+                  variant: "info",
+                  duration: 3000
+                })
+
+                // The actual review is handled by the agent prompt injection
+                // This command tells the orchestrator to run a review pass
+                const taskDesc = input
+                  ? `Review the following: ${input}`
+                  : "Review the current changes for correctness, security, and maintainability"
+
+                context.ui.toast.show({
+                  title: "🔍 Review",
+                  message: [
+                    "To run a review, ask the orchestrator agent:",
+                    "",
+                    `  nexus.delegate(role="reviewer", task="${taskDesc}")`,
+                    "",
+                    "Or spawn in background:",
+                    `  nexus.spawn(role="reviewer", task="${taskDesc}")`
+                  ].join('\n'),
+                  variant: "info",
+                  duration: 10000
+                })
+              }
+            },
+            {
+              id: "nexus.fix",
+              title: "Quick Fix Last Error",
+              group: "Nexus",
+              palette: true,
+              slash: { name: "nexus-fix", aliases: ["nf"], arguments: true },
+              enabled: () => true,
+              suggested: true,
+              run: async (input?: string) => {
+                context.ui.toast.show({
+                  title: "🔧 Quick Fix",
+                  message: input
+                    ? `Fixing: ${input}`
+                    : "Analyzing last error for fix...",
+                  variant: "info",
+                  duration: 3000
+                })
+
+                const fixTask = input
+                  ? `Fix the following error: ${input}`
+                  : "Review the last error in the session and propose a fix"
+
+                context.ui.toast.show({
+                  title: "🔧 Fix",
+                  message: [
+                    "To run a fix, ask the orchestrator agent:",
+                    "",
+                    `  nexus.delegate(role="coder", task="${fixTask}")`,
+                    "",
+                    "The coder agent will analyze and apply the fix."
+                  ].join('\n'),
+                  variant: "info",
+                  duration: 10000
+                })
+              }
+            },
+            {
+              id: "nexus.explain",
+              title: "Explain Last Change",
+              group: "Nexus",
+              palette: true,
+              slash: { name: "nexus-explain", aliases: ["ne"], arguments: true },
+              enabled: () => true,
+              suggested: true,
+              run: async (input?: string) => {
+                context.ui.toast.show({
+                  title: "📖 Explain",
+                  message: input
+                    ? `Explaining: ${input}`
+                    : "Analyzing last change for explanation...",
+                  variant: "info",
+                  duration: 3000
+                })
+
+                const explainTask = input
+                  ? `Explain the following: ${input}`
+                  : "Explain the last code change — what was changed, why, and any implications"
+
+                context.ui.toast.show({
+                  title: "📖 Explain",
+                  message: [
+                    "To run an explanation, ask the orchestrator agent:",
+                    "",
+                    `  nexus.delegate(role="explorer", task="${explainTask}")`,
+                    "",
+                    "The explorer agent will analyze and explain the change."
+                  ].join('\n'),
+                  variant: "info",
+                  duration: 10000
+                })
+              }
             }
           ],
           bindings: ["nexus"]

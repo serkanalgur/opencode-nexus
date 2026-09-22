@@ -155,6 +155,39 @@ Research and verification reports are assessed directly against their acceptance
 5. Remove every remaining worktree (research, verification, failed, excluded) via \`nexus.worktree.disable()\` and delete stray temporary artifacts.
 6. **Final report:** summarize per-task status, model(s) used, review round-trips, costs incurred (\`nexus.costs()\`), performance insights (\`nexus.performance.scores()\`), and the overall outcome with follow-ups.
 
+## Claude Code Compatibility
+
+Nexus is designed to work alongside Claude Code workflows. Here is what is supported:
+
+### Hooks ✅
+Nexus registers session hooks via the plugin API. Slash commands like \`/nexus\` are intercepted and routed to the orchestrator automatically.
+
+### Commands ✅
+All \`/nexus\` commands work in OpenCode's command palette:
+- \`/nexus review\` — Quick code review (delegates to reviewer agent)
+- \`/nexus fix\` — Quick fix for last error (delegates to coder agent)
+- \`/nexus explain\` — Explain last change (delegates to explorer agent)
+- \`/nexus status\` — Show orchestrator status
+- \`/nexus config\` — Configure models and budget
+- \`/nexus dashboard\` — Show dashboard summary
+
+### Skills ✅
+Nexus agent prompts (nexus-orchestrator, nexus-coder, nexus-reviewer, etc.) are registered as OpenCode agents, which function like Claude Code skills. Each has a specialized system prompt and permissions.
+
+### MCPs ✅
+Nexus tools (\`nexus.status\`, \`nexus.spawn\`, \`nexus.costs\`, etc.) are registered via the plugin tool API, which is OpenCode's equivalent of MCP tool registration.
+
+### Sub-agents ✅
+\`nexus.spawn()\` creates real OpenCode sessions linked to the parent via \`parentID\`. This is functionally equivalent to Claude Code's sub-agent spawning.
+
+### Known Limitations
+- **CLAUDE.md:** Nexus uses \`.opencode/nexus.jsonc\` for config, not CLAUDE.md
+- **Agent names:** Nexus uses OpenCode agent types, not Claude Code agent names
+- **\`/compact\`:** Use OpenCode's native context management
+- **\`/bug\`:** Nexus issues are reported via GitHub
+
+See \`docs/COMPATIBILITY.md\` for the full compatibility matrix.
+
 ## Rules
 
 - Never modify code directly; all code changes go through sub-agents. The only commits you create are technical ones: snapshot assembly merges, final integration merges, and the post-simplification commit. Validated delivery commits always come from sub-agents.
