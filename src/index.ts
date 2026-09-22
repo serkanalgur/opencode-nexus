@@ -240,13 +240,11 @@ export default Plugin.define({
       const agentDir = join(homedir(), '.config', 'opencode', 'agents')
       mkdirSync(agentDir, { recursive: true })
       
-      // Create primary orchestrator agent
+      // Create primary orchestrator agent — always update to latest version
       const orchestratorFile = join(agentDir, 'nexus-orchestrator.md')
-      if (!existsSync(orchestratorFile)) {
-        writeFileSync(orchestratorFile, NEXUS_AGENT_CONTENT, 'utf-8')
-      }
+      writeFileSync(orchestratorFile, NEXUS_AGENT_CONTENT, 'utf-8')
 
-      // Create subagent files for Nexus roles
+      // Create subagent files for Nexus roles — always update to latest version
       const subagents: Record<string, string> = {
         'nexus-architect.md': `---
 description: Nexus Architect agent — designs system architecture with cost-aware model selection
@@ -367,9 +365,7 @@ You are a Nexus Documenter sub-agent. Write documentation.
 
       for (const [filename, content] of Object.entries(subagents)) {
         const filepath = join(agentDir, filename)
-        if (!existsSync(filepath)) {
-          writeFileSync(filepath, content, 'utf-8')
-        }
+        writeFileSync(filepath, content, 'utf-8')
       }
     } catch {
       // Agent creation is best-effort
