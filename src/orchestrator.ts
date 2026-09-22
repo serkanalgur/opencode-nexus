@@ -7,6 +7,7 @@ import type {
 import { NexusConfigManager } from "./config"
 import { StateBroadcaster } from "./broadcast"
 import { DashboardModule } from "./dashboard"
+import { MessageStore, type MessageStoreConfig } from "./message-store"
 import { HealthMonitor } from "./health"
 
 export interface ModelScore {
@@ -76,6 +77,9 @@ export class NexusOrchestrator {
   private messageQueue: AgentMessage[] = []
   private subscribers: Map<string, ((msg: AgentMessage) => void)[]> = new Map()
 
+  // Message persistence
+  public messageStore: MessageStore
+
   // Memory
   private memory: Map<string, MemoryEntry> = new Map()
 
@@ -100,10 +104,11 @@ export class NexusOrchestrator {
   // State update callback
   private onStateChange: (() => void) | null = null
 
-  constructor(config?: Partial<NexusConfig>) {
+  constructor(config?: Partial<NexusConfig>, messageStoreConfig?: Partial<MessageStoreConfig>) {
     this.config = this.mergeConfig(config)
     this.budget = this.config.budget
     this.configManager = new NexusConfigManager()
+    this.messageStore = new MessageStore(messageStoreConfig)
   }
 
   /**
@@ -930,6 +935,10 @@ export class NexusOrchestrator {
       timestamp: new Date()
     }
     this.messageQueue.push(fullMessage)
+
+    // Persist to message store
+    this.messageStore.add(fullMessage)
+
     const handlers = this.subscribers.get(topic) || []
     handlers.forEach(handler => handler(fullMessage))
   }

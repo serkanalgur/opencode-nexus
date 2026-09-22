@@ -260,6 +260,8 @@ export default Plugin.define({
 export { NexusOrchestrator } from "./orchestrator"
 export { StateBroadcaster } from "./broadcast"
 export { NexusConfigManager, DEFAULT_CONFIG } from "./config"
+export { MessageStore } from "./message-store"
+export type { MessageStoreConfig } from "./message-store"
 export { HealthMonitor } from "./health"
 export type { HealthCheck, HealthConfig } from "./health"
 export type { NexusModelConfig, NexusFullConfig } from "./config"
