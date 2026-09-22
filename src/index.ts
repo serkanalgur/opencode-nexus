@@ -721,6 +721,33 @@ export default Plugin.define({
           }
         }
       })
+
+      editor.add({
+        name: "clarify",
+        description: "Ask clarifying question before proceeding with ambiguous task",
+        input: {
+          type: "object",
+          properties: {
+            question: { type: "string", description: "The clarifying question to ask" },
+            options: { type: "string", description: "Comma-separated options to present" },
+            assumption: { type: "string", description: "Default assumption if no response" }
+          },
+          required: ["question"],
+          additionalProperties: false
+        },
+        execute: async (input: unknown) => {
+          const { question, options, assumption } = input as { question: string; options?: string; assumption?: string }
+          const optionList = options ? options.split(',').map(o => o.trim()) : []
+          let response = `❓ ${question}`
+          if (optionList.length > 0) {
+            response += `\nOptions: ${optionList.map((o, i) => `${i+1}. ${o}`).join(', ')}`
+          }
+          if (assumption) {
+            response += `\n💡 Default: ${assumption}`
+          }
+          return { content: response }
+        }
+      })
     })
 
     // Register session hook for /nexus commands
