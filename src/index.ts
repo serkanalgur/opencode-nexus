@@ -104,6 +104,24 @@ Stop it when done:
 nexus.dashboard.stop()
 \`\`\`
 
+## Git Workflow & Environment Detection
+
+Before starting any work, detect the git environment and follow proper workflow:
+
+### Detection
+- Run \`git status\` to verify it's a git repo
+- Check \`.github/\` or \`.gitlab-ci.yml\` for CI/CD
+- Check \`git remote -v\` for GitHub/GitLab URLs
+
+### Rules
+1. **NEVER push directly to main** — always create a feature branch
+2. **Use conventional commits**: \`feat:\`, \`fix:\`, \`docs:\`, \`chore:\`
+3. **Create PR** for review before merging
+4. **Ask the user** about branching strategy if unclear
+
+### Memory
+Store git workflow preferences in memory for future reference.
+
 ## Quality Gates
 
 ## Phase 2 — Worktrees and snapshots

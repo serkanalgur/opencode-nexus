@@ -146,14 +146,35 @@ Failed tasks follow a 4-step escalation chain:
 
 ### Web Dashboard
 
-Real-time monitoring via embedded HTTP + WebSocket server:
+Real-time monitoring via embedded HTTP + WebSocket server on port 4747.
 
-```
-nexus.dashboard.start(port=4747)  # Start server
-# Open http://localhost:4747 in browser
-```
+**How to start:**
 
-Features: Agent grid, cost tracker, DAG visualization, activity log, config editor, auto-refresh.
+1. Ask the agent to start the dashboard:
+   ```
+   Use nexus.dashboard.start with port=4747
+   ```
+
+2. Or use the TUI command:
+   ```
+   /nexus web
+   ```
+   This shows instructions and tries to open your browser.
+
+3. Open in browser: `http://localhost:4747`
+
+**What it shows:**
+- Agent grid with role, status, model, and metrics
+- Cost tracker with budget gauge
+- DAG visualization with task dependencies
+- Activity log with all events
+- Config panel (read-only)
+- Auto-refresh every 5 seconds
+
+**Stop the dashboard:**
+```
+nexus.dashboard.stop()
+```
 
 ### Team Mode
 
