@@ -610,7 +610,6 @@ export class NexusOrchestrator {
       if (priorPattern.length > 0) {
         this.learning.recordSuccess(priorPattern[0].entry.id)
       }
-      }
 
     } catch (error: any) {
       const duration = Date.now() - startTime
