@@ -26,6 +26,12 @@ You are the Nexus Orchestrator — an intelligent multi-agent coordinator. You m
 
 ## How to Use Nexus Tools
 
+### Delegating Tasks (Recommended — spawn + wait + result)
+\`\`\`
+nexus.delegate(role="coder", task="Implement JWT auth")
+nexus.delegate(role="reviewer", task="Review the implementation", timeout=180000)
+\`\`\`
+
 ### Spawning Agents (Wait for Result)
 \`\`\`
 nexus.spawn(role="coder", task="Implement JWT auth", wait=true)
@@ -62,17 +68,17 @@ When given a development request:
 1. **Analyze** — Break into discrete tasks
 2. **Plan** — Determine parallel vs sequential
 3. **Estimate** — Use nexus.forecast for costs
-4. **Spawn** — Parallel tasks: spawn without wait
-5. **Spawn** — Sequential tasks: spawn with wait=true
+4. **Delegate** — Sequential tasks: use nexus.delegate (recommended)
+5. **Spawn** — Parallel tasks: spawn without wait
 6. **Monitor** — nexus.sessions() to track progress
-7. **Review** — nexus.spawn(role="reviewer", wait=true)
+7. **Review** — nexus.delegate(role="reviewer")
 8. **Report** — Summarize outcomes
 
 ## Quality Gates
 
-- Every code change → nexus.spawn(role="reviewer", wait=true)
+- Every code change → nexus.delegate(role="reviewer")
 - Security check → nexus.security.scan()
-- Testing → nexus.spawn(role="tester", wait=true)
+- Testing → nexus.delegate(role="tester")
 `
 
 export default Plugin.define({
@@ -363,7 +369,7 @@ export default Plugin.define({
           properties: {
             role: { type: "string", description: "Agent role (architect, coder, reviewer, tester, explorer, documenter)" },
             task: { type: "string", description: "Task description" },
-            model: { type: "string", description: "Model override (optional)" },
+            model: { type: "string", description: "Model override (optional, e.g. 'anthropic/claude-sonnet-4-6')" },
             wait: { type: "boolean", description: "Wait for completion (default: false)" },
             timeout: { type: "number", description: "Timeout in ms when waiting (default: 120000)" }
           },
@@ -373,8 +379,19 @@ export default Plugin.define({
         execute: async (input: unknown) => {
           const { role, task, model, wait, timeout } = input as { role: string; task: string; model?: string; wait?: boolean; timeout?: number }
           try {
-            // Store current session ID as parent
-            orchestrator.parentSessionID = null // Will be set by OpenCode context if available
+            // Set parent session ID for OpenCode UI linking
+            // This will be populated by the context if available
+            if (!orchestrator.parentSessionID) {
+              try {
+                // Attempt to get current session ID from context
+                const currentSession = (ctx as any).session?.current?.()
+                if (currentSession?.id) {
+                  orchestrator.parentSessionID = currentSession.id
+                }
+              } catch {
+                // Context may not expose current session in all environments
+              }
+            }
 
             const agent = await orchestrator.spawnAgent({ role, model })
             await orchestrator.ctx.session.prompt({
@@ -382,16 +399,59 @@ export default Plugin.define({
               text: task
             })
 
-            // If wait is requested, wait for completion
+            agent.status = 'working'
+            orchestrator.notifyStateChange()
+
+            // If wait is requested, block until completion or timeout
             if (wait) {
               const waitTimeout = timeout || 120000
+              const waitPromise = orchestrator.ctx.session.wait({ sessionID: agent.sessionID! })
+              const timeoutPromise = new Promise((_, reject) =>
+                setTimeout(() => reject(new Error(`Timed out after ${waitTimeout}ms`)), waitTimeout)
+              )
+
               try {
-                await orchestrator.ctx.session.wait({ sessionID: agent.sessionID! })
-              } catch {
-                // Timeout or error — agent may still be running
+                await Promise.race([waitPromise, timeoutPromise])
+              } catch (waitError: any) {
+                // Timeout or cancellation — agent may still be running
+                agent.status = 'working'
+                orchestrator.notifyStateChange()
+
+                // Try to get whatever results are available
+                try {
+                  const messages = await orchestrator.ctx.session.context({ sessionID: agent.sessionID! })
+                  const lastMsg = messages.filter((m: any) => m.role === 'assistant').pop()
+                  if (lastMsg) {
+                    agent.status = 'completed'
+                    await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(orchestrator.getState())))
+                    const taskPreview = task.length > 80 ? task.substring(0, 77) + '...' : task
+                    return {
+                      content: [
+                        `${agent.name}`,
+                        `📋 Task: ${taskPreview}`,
+                        `⏱️ Status: ${waitError.message || 'timeout'}`,
+                        `📎 Session: ${agent.sessionID}`,
+                        `\n--- Partial Result ---`,
+                        typeof lastMsg.content === 'string' ? lastMsg.content : JSON.stringify(lastMsg.content)
+                      ].join('\n')
+                    }
+                  }
+                } catch {
+                  // Context read also failed
+                }
+
+                return {
+                  content: [
+                    `${agent.name}`,
+                    `📋 Task: ${task.length > 80 ? task.substring(0, 77) + '...' : task}`,
+                    `⏱️ Status: ${waitError.message || 'timeout'}`,
+                    `📎 Session: ${agent.sessionID}`,
+                    `💡 Use nexus.result(sessionID="${agent.sessionID}") to check later`
+                  ].join('\n')
+                }
               }
 
-              // Get results
+              // Wait completed — get final results
               try {
                 const messages = await orchestrator.ctx.session.context({ sessionID: agent.sessionID! })
                 const lastMsg = messages.filter((m: any) => m.role === 'assistant').pop()
@@ -408,15 +468,25 @@ export default Plugin.define({
                     `✅ Status: completed`,
                     `📎 Session: ${agent.sessionID}`,
                     `\n--- Result ---`,
-                    result
+                    typeof result === 'string' ? result : JSON.stringify(result)
                   ].join('\n')
                 }
               } catch {
-                // Context read failed
+                // Context read failed after successful wait
+                agent.status = 'completed'
+                await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(orchestrator.getState())))
+                return {
+                  content: [
+                    `${agent.name}`,
+                    `✅ Status: completed`,
+                    `📎 Session: ${agent.sessionID}`,
+                    `⚠️ Could not read result output`
+                  ].join('\n')
+                }
               }
             }
 
-            // Analyze task complexity for informational output
+            // Non-wait: return spawn info with complexity analysis
             const complexity = orchestrator.analyzeComplexity({
               id: `spawn-${Date.now()}`,
               name: task,
@@ -428,11 +498,8 @@ export default Plugin.define({
               priority: 'normal',
               status: 'running'
             })
-
-            // Store complexity on agent
             agent.complexity = complexity
 
-            // Get model selection reasoning
             const modelSelection = orchestrator.selectModel(role, complexity)
 
             await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(orchestrator.getState())))
@@ -443,11 +510,84 @@ export default Plugin.define({
               `📊 Complexity: ${complexity.overall}/100 (${complexity.factors.riskLevel} risk)`,
               `🤖 Model reasoning: ${modelSelection.reasoning}`,
               `📎 Session: ${agent.sessionID}`,
-              `💡 Use wait=true to wait for completion`
+              `💡 Use wait=true to wait for completion, or nexus.result() to fetch later`
             ].join('\n')
             return { content: output }
           } catch (error: any) {
             return { content: `Failed to spawn agent: ${error.message}` }
+          }
+        }
+      })
+
+      editor.add({
+        name: "delegate",
+        description: "Delegate a task to a sub-agent and wait for result (convenience wrapper around spawn+wait)",
+        input: {
+          type: "object",
+          properties: {
+            role: { type: "string", description: "Agent role (architect, coder, reviewer, tester, explorer, documenter)" },
+            task: { type: "string", description: "Task description" },
+            model: { type: "string", description: "Model override (optional)" },
+            timeout: { type: "number", description: "Timeout in ms (default: 120000)" }
+          },
+          required: ["role", "task"],
+          additionalProperties: false
+        },
+        execute: async (input: unknown) => {
+          const { role, task, model, timeout } = input as { role: string; task: string; model?: string; timeout?: number }
+          try {
+            const agent = await orchestrator.spawnAgent({ role, model })
+            await orchestrator.ctx.session.prompt({
+              sessionID: agent.sessionID!,
+              text: task
+            })
+
+            agent.status = 'working'
+            orchestrator.notifyStateChange()
+
+            const waitTimeout = timeout || 120000
+            const waitPromise = orchestrator.ctx.session.wait({ sessionID: agent.sessionID! })
+            const timeoutPromise = new Promise<'timeout'>((resolve) =>
+              setTimeout(() => resolve('timeout'), waitTimeout)
+            )
+
+            const outcome = await Promise.race([waitPromise.then(() => 'completed' as const), timeoutPromise])
+
+            // Get the result regardless of outcome
+            try {
+              const messages = await orchestrator.ctx.session.context({ sessionID: agent.sessionID! })
+              const lastMsg = messages.filter((m: any) => m.role === 'assistant').pop()
+              const resultContent = lastMsg?.content || (outcome === 'timeout' ? 'Timed out — agent may still be running' : 'Completed with no output')
+
+              agent.status = outcome === 'timeout' ? 'working' : 'completed'
+              orchestrator.notifyStateChange()
+              await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(orchestrator.getState())))
+
+              const statusIcon = outcome === 'timeout' ? '⏱️' : '✅'
+              return {
+                content: [
+                  `${agent.name}`,
+                  `📋 Task: ${task.length > 80 ? task.substring(0, 77) + '...' : task}`,
+                  `${statusIcon} Status: ${outcome}`,
+                  `📎 Session: ${agent.sessionID}`,
+                  `\n--- Result ---`,
+                  typeof resultContent === 'string' ? resultContent : JSON.stringify(resultContent)
+                ].join('\n')
+              }
+            } catch {
+              agent.status = outcome === 'timeout' ? 'working' : 'completed'
+              orchestrator.notifyStateChange()
+              return {
+                content: [
+                  `${agent.name}`,
+                  `${outcome === 'timeout' ? '⏱️' : '✅'} Status: ${outcome}`,
+                  `📎 Session: ${agent.sessionID}`,
+                  `⚠️ Could not read result output`
+                ].join('\n')
+              }
+            }
+          } catch (error: any) {
+            return { content: `Delegate failed: ${error.message}` }
           }
         }
       })

@@ -479,7 +479,7 @@ export class NexusOrchestrator {
     }
   }
 
-  protected notifyStateChange(): void {
+  public notifyStateChange(): void {
     if (this.stateChangeTimer) return
     this.stateChangeTimer = setTimeout(() => {
       this.stateChangeTimer = null
@@ -790,16 +790,30 @@ export class NexusOrchestrator {
 
     } catch (error: any) {
       const duration = Date.now() - startTime
+      const errorMessage = error.message || "Task failed"
       const result: TaskResult = {
         success: false,
-        error: error.message || "Task failed",
+        error: errorMessage,
         duration,
         tokensUsed: 0,
         cost: 0
       }
 
-      this.dag!.markFailed(node.id, new Error(result.error!))
+      this.dag!.markFailed(node.id, new Error(errorMessage))
       agent.metrics.tasksFailed++
+      agent.status = 'failed'
+
+      // Emit failure event for listeners
+      this.emit('task:failed', {
+        taskId: node.id,
+        taskName: node.task.name,
+        agentId: agent.id,
+        role: node.task.requiredRole,
+        model: agent.model.model,
+        error: errorMessage,
+        duration,
+        sessionID: agent.sessionID
+      })
 
       // Record performance metrics for failed task
       this.performanceTracker.record({
@@ -811,7 +825,7 @@ export class NexusOrchestrator {
         tokensUsed: result.tokensUsed
       })
 
-      // Record failed execution to history
+      // Record failed execution to history (with session ID for traceability)
       this.executionHistory.record({
         taskId: node.id,
         taskName: node.task.name,
@@ -823,15 +837,23 @@ export class NexusOrchestrator {
         tokensUsed: result.tokensUsed,
         startedAt: new Date(startTime),
         completedAt: new Date(),
-        error: result.error
+        error: errorMessage
       })
+
+      // Notify on task failure
+      if (this.notifications?.isEnabled()) {
+        this.notifications.notify({ title: 'Nexus: Task Failed', body: `${node.task.name} failed: ${errorMessage}`, sound: true })
+      }
 
       // Self-healing: retry or respawn
       if (this.config.selfHealing.enabled) {
-        await this.handleFailure(agent, node, new Error(result.error!))
+        await this.handleFailure(agent, node, new Error(errorMessage))
       }
     } finally {
-      agent.status = 'idle'
+      // Only reset to idle if agent is still in a non-terminal state
+      if (agent.status !== 'terminated' && agent.status !== 'failed') {
+        agent.status = 'idle'
+      }
       node.task.status = node.status === 'completed' ? 'completed' : 'failed'
       this.notifyStateChange()
     }
@@ -1016,6 +1038,12 @@ export class NexusOrchestrator {
       agent: agentType,
       model: modelName ? { providerID: provider, id: modelName } : undefined,
       parentID: this.parentSessionID || undefined,
+      metadata: {
+        nexusRole: config.role,
+        nexusTask: config.task?.name || 'direct-spawn',
+        nexusAgentId: agentId,
+        nexusModel: modelConfig,
+      },
     })
 
     const agent: Agent = {
