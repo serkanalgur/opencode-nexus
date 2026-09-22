@@ -832,10 +832,21 @@ export class NexusOrchestrator {
     const roleEmoji = this.configManager.getRoleEmoji(config.role)
     const title = `${roleEmoji} ${this.configManager.getRoleDisplayName(config.role)} — ${modelConfig}`
 
+    // Map Nexus roles to OpenCode agent types
+    const agentTypeMap: Record<string, string> = {
+      architect: 'build',
+      coder: 'build',
+      reviewer: 'code-reviewer',
+      tester: 'build',
+      explorer: 'explore',
+      documenter: 'doc-writer',
+    }
+    const agentType = agentTypeMap[config.role] || 'build'
+
     // Create session with agent and model params directly (most reliable method)
     const session = await this.ctx.session.create({
       title,
-      agent: 'build',
+      agent: agentType,
       model: modelName ? { providerID: provider, id: modelName } : undefined,
     })
 
