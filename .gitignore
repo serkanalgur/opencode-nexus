@@ -10,5 +10,7 @@ coverage/
 *.tgz
 .worktrees/
 RESEARCH.md
-.opencode/COMPARISON.md
+.opencode/
 SIDEBAR_INVESTIGATION.md
+.opencode/
+COMPARISON.md
