@@ -152,6 +152,7 @@ describe('PersistentMemoryStore', () => {
       // Delay to ensure different timestamps
       await new Promise(r => setTimeout(r, 2))
       store.set({ key: 'k2', value: 'v2', scope: 'project', author: 'a2', confidence: 1.0, tags: [] })
+      await new Promise(r => setTimeout(r, 2))
       store.set({ key: 'k3', value: 'v3', scope: 'project', author: 'a3', confidence: 1.0, tags: [] })
 
       const recent = store.getRecent(2)
