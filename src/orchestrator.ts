@@ -15,6 +15,7 @@ import { MessageRouter } from "./fanout"
 import { NotificationManager } from "./notifications"
 import { LearningModule } from "./learning"
 import { ModuleRegistry, type ModuleContext } from "./modules"
+import { SecurityScanner } from "./security"
 
 export interface ModelScore {
   model: string
@@ -138,6 +139,9 @@ export class NexusOrchestrator {
   // Module registry for composable features
   public moduleRegistry: ModuleRegistry
 
+  // Security scanner for task output scanning
+  public securityScanner: SecurityScanner
+
   // State update callback
   private onStateChange: (() => void) | null = null
 
@@ -177,6 +181,9 @@ export class NexusOrchestrator {
 
     // Initialize learning module with config min confidence
     this.learning = new LearningModule(this.config.learning.minConfidence)
+
+    // Initialize security scanner
+    this.securityScanner = new SecurityScanner()
   }
 
   /**
@@ -630,6 +637,19 @@ export class NexusOrchestrator {
       const priorPattern = this.learning.findSolutions(`task ${node.id} failed`)
       if (priorPattern.length > 0) {
         this.learning.recordSuccess(priorPattern[0].entry.id)
+      }
+
+      // Scan task output for security issues
+      if (typeof output === 'string' && output.length > 0) {
+        const securityIssues = this.securityScanner.scanContent(output, node.task.name)
+        if (securityIssues.length > 0) {
+          this.emit('security:issues-found', {
+            taskId: node.id,
+            taskName: node.task.name,
+            issues: securityIssues,
+            totalIssues: securityIssues.length
+          })
+        }
       }
 
     } catch (error: any) {
