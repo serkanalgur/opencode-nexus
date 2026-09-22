@@ -16,6 +16,7 @@ import { NotificationManager } from "./notifications"
 import { LearningModule } from "./learning"
 import { ModuleRegistry, type ModuleContext } from "./modules"
 import { SecurityScanner } from "./security"
+import { ExecutionHistory } from "./history"
 
 export interface ModelScore {
   model: string
@@ -142,6 +143,9 @@ export class NexusOrchestrator {
   // Security scanner for task output scanning
   public securityScanner: SecurityScanner
 
+  // Execution history tracking
+  public executionHistory: ExecutionHistory
+
   // State update callback
   private onStateChange: (() => void) | null = null
 
@@ -187,6 +191,9 @@ export class NexusOrchestrator {
 
     // Initialize security scanner
     this.securityScanner = new SecurityScanner()
+
+    // Initialize execution history tracker
+    this.executionHistory = new ExecutionHistory()
   }
 
   /**
@@ -698,6 +705,20 @@ export class NexusOrchestrator {
       this.costByAgent.set(agent.id, (this.costByAgent.get(agent.id) || 0) + result.cost)
       this.checkBudget()
 
+      // Record successful execution to history
+      this.executionHistory.record({
+        taskId: node.id,
+        taskName: node.task.name,
+        role: node.task.requiredRole,
+        model: agent.model.model,
+        status: 'success',
+        cost: result.cost,
+        duration: result.duration,
+        tokensUsed: result.tokensUsed,
+        startedAt: new Date(startTime),
+        completedAt: new Date(),
+      })
+
       // Notify on task completion
       if (this.notifications?.isEnabled()) {
         this.notifications.notify({ title: 'Nexus: Task Complete', body: `${node.task.name} completed successfully` })
@@ -734,6 +755,21 @@ export class NexusOrchestrator {
 
       this.dag!.markFailed(node.id, new Error(result.error!))
       agent.metrics.tasksFailed++
+
+      // Record failed execution to history
+      this.executionHistory.record({
+        taskId: node.id,
+        taskName: node.task.name,
+        role: node.task.requiredRole,
+        model: agent.model.model,
+        status: 'failed',
+        cost: result.cost,
+        duration: result.duration,
+        tokensUsed: result.tokensUsed,
+        startedAt: new Date(startTime),
+        completedAt: new Date(),
+        error: result.error
+      })
 
       // Self-healing: retry or respawn
       if (this.config.selfHealing.enabled) {

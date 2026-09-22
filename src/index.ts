@@ -354,6 +354,39 @@ export default Plugin.define({
           return { content: JSON.stringify({ issues: issues.length, score: result.score, details: issues }, null, 2) }
         }
       })
+
+      editor.add({
+        name: "history.list",
+        description: "List execution history",
+        input: {
+          type: "object",
+          properties: {
+            count: { type: "number", description: "Number of recent entries" }
+          },
+          additionalProperties: false
+        },
+        execute: async (input: unknown) => {
+          const { count } = input as { count?: number }
+          const records = count ? orchestrator.executionHistory.getRecent(count) : orchestrator.executionHistory.getAll()
+          if (records.length === 0) return { content: "No execution history yet." }
+          const lines = records.map(r => `${r.status === 'success' ? '✅' : '❌'} ${r.taskName} (${r.role}) — $${r.cost.toFixed(4)} — ${r.duration}ms`)
+          return { content: lines.join('\n') }
+        }
+      })
+
+      editor.add({
+        name: "history.stats",
+        description: "Show execution statistics",
+        input: {
+          type: "object",
+          properties: {},
+          additionalProperties: false
+        },
+        execute: async () => {
+          const stats = orchestrator.executionHistory.getStats()
+          return { content: `Total: ${stats.total} | Success: ${(stats.successRate * 100).toFixed(1)}% | Cost: $${stats.totalCost.toFixed(4)} | Avg: ${stats.avgDuration.toFixed(0)}ms\nBy role: ${JSON.stringify(stats.byRole)}` }
+        }
+      })
     })
 
     // Register session hook for /nexus commands
