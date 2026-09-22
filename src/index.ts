@@ -9,7 +9,7 @@ export default Plugin.define({
     const orchestrator = new NexusOrchestrator()
 
     // Initialize orchestrator with OpenCode context for real session API access
-    orchestrator.initialize(ctx, () => {
+    await orchestrator.initialize(ctx, () => {
       // State change callback - persist to storage for TUI consumption
       const state = orchestrator.getState()
       ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(state))).catch(() => {}
@@ -323,3 +323,5 @@ export type { HealthCheck, HealthConfig } from "./health"
 export type { Agent, Task, DAG, ExecutionRequest, ExecutionResult } from "./types"
 export { TEMPLATES, instantiateTemplate, listTemplates, getTemplate } from "./templates"
 export type { TaskTemplate, TaskTemplateStep } from "./templates"
+export { ModuleRegistry } from "./modules"
+export type { NexusModule, ModuleContext, ModuleTool, ModuleHook } from "./modules"
