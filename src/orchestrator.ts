@@ -5,6 +5,11 @@ import type {
   SpawnConfig, RecoveryAction, HealthStatus, NexusConfig, TaskResult
 } from "./types"
 import { NexusConfigManager } from "./config"
+<<<<<<< HEAD
+import { StateBroadcaster } from "./broadcast"
+=======
+import { DashboardModule } from "./dashboard"
+>>>>>>> origin/main
 
 export interface ModelScore {
   model: string
@@ -70,10 +75,18 @@ export class NexusOrchestrator {
   private eventHandlers: Map<string, Function[]> = new Map()
 
   // Config manager
-  private configManager: NexusConfigManager
+  public configManager: NexusConfigManager
 
   // OpenCode context (set during initialization)
   public ctx: any = null
+
+<<<<<<< HEAD
+  // WebSocket broadcaster (set via initBroadcaster)
+  public broadcaster: StateBroadcaster | null = null
+=======
+  // Dashboard server
+  public dashboard: DashboardModule | null = null
+>>>>>>> origin/main
 
   // State update callback
   private onStateChange: (() => void) | null = null
@@ -93,6 +106,45 @@ export class NexusOrchestrator {
 
     // Load project/global config files from disk
     this.configManager.loadFromPath(process.cwd())
+  }
+
+  /**
+<<<<<<< HEAD
+   * Wire up the StateBroadcaster so that every notifyStateChange() call
+   * also triggers a throttled broadcast to WebSocket clients.
+   */
+  initBroadcaster(opts?: { throttleMs?: number }): void {
+    this.broadcaster = new StateBroadcaster(this, opts)
+    // Chain into the existing onStateChange callback
+    const previousOnStateChange = this.onStateChange
+    this.onStateChange = () => {
+      previousOnStateChange?.()
+      this.broadcaster?.broadcastState()
+=======
+   * Start the web dashboard server
+   */
+  startDashboard(port?: number, host?: string): void {
+    const dashPort = port || this.config.dashboard.port
+    const dashHost = host || this.config.dashboard.host
+    this.dashboard = new DashboardModule(this)
+    this.dashboard.start(dashPort, dashHost)
+
+    // Wire up events for broadcasting
+    this.on('agent:spawned', (agent) => this.dashboard!.broadcast('agent:spawned', agent))
+    this.on('agent:terminated', (agent) => this.dashboard!.broadcast('agent:terminated', agent))
+    this.on('budget:alert', (data) => this.dashboard!.broadcast('budget:alert', data))
+    this.on('budget:exceeded', (data) => this.dashboard!.broadcast('budget:exceeded', data))
+  }
+
+  /**
+   * Stop the web dashboard server
+   */
+  stopDashboard(): void {
+    if (this.dashboard) {
+      this.dashboard.stop()
+      this.dashboard = null
+>>>>>>> origin/main
+    }
   }
 
   /**
@@ -857,6 +909,7 @@ export class NexusOrchestrator {
   }
 
   shutdown(): void {
+    this.stopDashboard()
     this.agents.forEach((agent) => {
       agent.status = 'terminated'
     })

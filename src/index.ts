@@ -88,6 +88,88 @@ export default Plugin.define({
       })
 
       editor.add({
+        name: "config.save",
+        description: "Save Nexus config to disk (project or global)",
+        input: {
+          type: "object",
+          properties: {
+            level: { type: "string", enum: ["project", "global"], description: "Config level to save" },
+            basePath: { type: "string", description: "Project root (for project-level, defaults to cwd)" }
+          },
+          required: ["level"],
+          additionalProperties: false
+        },
+        execute: async (input: unknown) => {
+          const { level, basePath } = input as { level: 'project' | 'global'; basePath?: string }
+          orchestrator.configManager.saveConfig(level, basePath || process.cwd())
+          const location = level === 'project'
+            ? `${basePath || process.cwd()}/.opencode/nexus.jsonc`
+            : '~/.config/opencode/nexus.jsonc'
+          return { content: `Config saved to ${level} level at ${location}` }
+        }
+      })
+
+      editor.add({
+        name: "config.init",
+        description: "Initialize default config files for project and/or global",
+        input: {
+          type: "object",
+          properties: {
+            level: { type: "string", enum: ["project", "global", "both"], description: "Which config to initialize" },
+            basePath: { type: "string", description: "Project root" }
+          },
+          required: ["level"],
+          additionalProperties: false
+        },
+        execute: async (input: unknown) => {
+          const { level, basePath } = input as { level: 'project' | 'global' | 'both'; basePath?: string }
+          const path = basePath || process.cwd()
+          const locations: string[] = []
+          if (level === 'project' || level === 'both') {
+            orchestrator.configManager.saveProjectConfig(path)
+            locations.push(`${path}/.opencode/nexus.jsonc`)
+          }
+          if (level === 'global' || level === 'both') {
+            orchestrator.configManager.saveGlobalConfig()
+            locations.push('~/.config/opencode/nexus.jsonc')
+          }
+          return { content: `Config initialized at ${level} level(s): ${locations.join(', ')}` }
+        }
+      })
+
+      editor.add({
+        name: "dashboard.start",
+        description: "Start the web dashboard server",
+        input: {
+          type: "object",
+          properties: {
+            port: { type: "number", description: "Port (default: 4747)" },
+            host: { type: "string", description: "Host (default: 127.0.0.1)" }
+          },
+          additionalProperties: false
+        },
+        execute: async (input: unknown) => {
+          const { port, host } = input as { port?: number; host?: string }
+          orchestrator.startDashboard(port, host)
+          return { content: `Dashboard started at http://${host || '127.0.0.1'}:${port || 4747}` }
+        }
+      })
+
+      editor.add({
+        name: "dashboard.stop",
+        description: "Stop the web dashboard server",
+        input: {
+          type: "object",
+          properties: {},
+          additionalProperties: false
+        },
+        execute: async () => {
+          orchestrator.stopDashboard()
+          return { content: "Dashboard stopped" }
+        }
+      })
+
+      editor.add({
         name: "spawn",
         description: "Spawn a sub-agent for a task",
         input: {
@@ -161,6 +243,7 @@ export default Plugin.define({
 })
 
 export { NexusOrchestrator } from "./orchestrator"
+export { StateBroadcaster } from "./broadcast"
 export { NexusConfigManager, DEFAULT_CONFIG } from "./config"
 export type { NexusModelConfig, NexusFullConfig } from "./config"
 export type { Agent, Task, DAG, ExecutionRequest, ExecutionResult } from "./types"
