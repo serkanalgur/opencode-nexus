@@ -2,6 +2,7 @@ import { Plugin } from "@opencode/plugin"
 import { NexusOrchestrator } from "./orchestrator"
 import { PRESETS } from "./config"
 import { TEMPLATES, instantiateTemplate, listTemplates } from "./templates"
+import { AstGrep } from "./astgrep"
 import { writeFileSync, readFileSync, mkdirSync, existsSync } from "node:fs"
 import { join } from "node:path"
 import { homedir } from "node:os"
@@ -1178,6 +1179,71 @@ You are a Nexus Documenter sub-agent. Write documentation.
           return { content: response }
         }
       })
+
+      // AST-grep tools
+      const astgrep = new AstGrep()
+
+      editor.add({
+        name: "astgrep.search",
+        description: "Search for AST patterns in codebase using ast-grep",
+        input: {
+          type: "object",
+          properties: {
+            pattern: { type: "string", description: "AST-grep pattern to search for (e.g. 'console.log($$$)')" },
+            language: { type: "string", description: "Programming language (typescript, javascript, python, rust, go, etc.)" },
+            directory: { type: "string", description: "Directory to search in" }
+          },
+          required: ["pattern", "language", "directory"],
+          additionalProperties: false
+        },
+        execute: async (input: unknown) => {
+          const { pattern, language, directory } = input as { pattern: string; language: string; directory: string }
+          const results = astgrep.search(pattern, language, directory)
+          if (results.length === 0) {
+            return { content: `No matches found for pattern '${pattern}' in ${directory} (${language})` }
+          }
+          const lines = results.map(r => `📄 ${r.file}:${r.line}:${r.column}\n   ${r.match}`)
+          return { content: `Found ${results.length} match(es) for '${pattern}':\n\n${lines.join('\n\n')}` }
+        }
+      })
+
+      editor.add({
+        name: "astgrep.rewrite",
+        description: "Rewrite AST patterns in codebase using ast-grep",
+        input: {
+          type: "object",
+          properties: {
+            pattern: { type: "string", description: "AST-grep pattern to match" },
+            rewrite: { type: "string", description: "Rewrite rule (e.g. 'console.log($$$)' → 'logger.info($$$)')" },
+            language: { type: "string", description: "Programming language" },
+            directory: { type: "string", description: "Directory to rewrite in" }
+          },
+          required: ["pattern", "rewrite", "language", "directory"],
+          additionalProperties: false
+        },
+        execute: async (input: unknown) => {
+          const { pattern, rewrite, language, directory } = input as { pattern: string; rewrite: string; language: string; directory: string }
+          const { count, results } = astgrep.rewrite(pattern, rewrite, language, directory)
+          if (count === 0) {
+            return { content: `No rewrites applied for pattern '${pattern}' in ${directory}` }
+          }
+          const files = [...new Set(results.map(r => r.file))]
+          return { content: `Rewrote ${count} occurrence(s) across ${files.length} file(s):\n${files.map(f => `  📄 ${f}`).join('\n')}` }
+        }
+      })
+
+      editor.add({
+        name: "astgrep.status",
+        description: "Check if ast-grep is installed",
+        input: {
+          type: "object",
+          properties: {},
+          additionalProperties: false
+        },
+        execute: async () => {
+          return { content: astgrep.status() }
+        }
+      })
     })
 
     // Register session hook for /nexus commands
@@ -1225,3 +1291,5 @@ export { CostForecaster } from "./forecast"
 export type { CostEstimate, ForecastResult } from "./forecast"
 export { WorktreeManager } from "./worktree"
 export type { AgentWorktree } from "./worktree"
+export { AstGrep } from "./astgrep"
+export type { AstGrepPattern, AstGrepResult } from "./astgrep"
