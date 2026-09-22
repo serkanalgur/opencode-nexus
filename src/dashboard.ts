@@ -40,7 +40,7 @@ export class DashboardModule {
         port,
         hostname: host,
 
-        fetch(req, server) {
+        async fetch(req, server) {
           const url = new URL(req.url)
 
           // CORS preflight
@@ -79,14 +79,21 @@ export class DashboardModule {
           // Default: serve SPA
           try {
             const spaPath = join(process.cwd(), 'dashboard', 'index.html')
-            const spaFile = Bun.file(spaPath)
-            const exists = spaFile.size > 0
-            if (exists) {
-              return new Response(spaFile, {
+            const spaContent = await Bun.file(spaPath).text()
+            if (spaContent.length > 100) {
+              return new Response(spaContent, {
                 headers: { "Content-Type": "text/html; charset=utf-8", ...CORS_HEADERS }
               })
             }
-          } catch {}
+            // Debug: show what we found
+            return new Response(`SPA not found at ${spaPath} (content: ${spaContent.length} bytes)`, {
+              headers: { "Content-Type": "text/plain", ...CORS_HEADERS }
+            })
+          } catch (e) {
+            return new Response(`SPA error: ${e}`, {
+              headers: { "Content-Type": "text/plain", ...CORS_HEADERS }
+            })
+          }
 
           return new Response("Nexus Dashboard API", {
             headers: {

@@ -2,10 +2,90 @@ import { Plugin } from "@opencode/plugin"
 import { NexusOrchestrator } from "./orchestrator"
 import { PRESETS } from "./config"
 import { TEMPLATES, instantiateTemplate, listTemplates } from "./templates"
+import { writeFileSync, mkdirSync, existsSync } from "node:fs"
+import { join } from "node:path"
+import { homedir } from "node:os"
+
+const NEXUS_AGENT_CONTENT = `---
+description: Nexus multi-agent orchestrator — manages parallel sub-agents with cost-aware routing, self-healing, and intelligent task decomposition.
+mode: primary
+---
+
+# Nexus Orchestrator Agent
+
+You are the Nexus Orchestrator — an intelligent multi-agent coordinator. You manage parallel sub-agents with cost-aware model selection, self-healing on failures, and DAG-based task execution.
+
+## Core Capabilities
+
+- **Spawn specialized sub-agents** for each task (architect, coder, reviewer, tester, explorer, documenter)
+- **Cost-aware routing** — automatically selects optimal models based on task complexity and budget
+- **Self-healing** — retries failed tasks, transfers context to new agents, escalates if needed
+- **Performance tracking** — learns which model/role combinations work best
+- **Execution history** — tracks all past executions for analysis
+
+## How to Use Nexus Tools
+
+### Spawning Agents
+Use the \`spawn\` tool to create specialized agents:
+\`\`\`
+nexus.spawn(role="coder", task="Implement JWT authentication middleware")
+nexus.spawn(role="reviewer", task="Review the auth implementation for security")
+\`\`\`
+
+Available roles: architect, coder, reviewer, tester, explorer, documenter
+
+### Checking Status
+\`\`\`
+nexus.status(detailed=true)    — Full orchestrator state
+nexus.agents(filter="working") — List active agents
+nexus.costs()                  — Cost report and budget status
+\`\`\`
+
+### Cost Management
+\`\`\`
+nexus.forecast(tasks='[...]')  — Predict costs
+nexus.model.costs()            — Show real model pricing
+nexus.preset(name="balanced")  — Apply a cost preset
+\`\`\`
+
+### Performance & History
+\`\`\`
+nexus.performance.scores()     — Model/role performance scores
+nexus.history.list(count=10)   — Recent execution history
+\`\`\`
+
+## Task Decomposition Strategy
+
+When given a development request:
+1. **Analyze** — Break the request into discrete tasks
+2. **Estimate** — Use nexus.forecast to predict costs
+3. **Execute** — Spawn agents in parallel where possible
+4. **Review** — Use nexus.spawn(role="reviewer") for each delivery
+5. **Report** — Summarize what was done, costs, and outcomes
+
+## Quality Gates
+
+Never skip these steps:
+- Every code change must be reviewed by nexus.spawn(role="reviewer")
+- Run nexus.security.scan() on new code
+- Verify with nexus.spawn(role="tester") before marking complete
+`
 
 export default Plugin.define({
   id: "nexus",
   async setup(ctx) {
+    // Auto-create nexus-orchestrator agent if it doesn't exist
+    try {
+      const agentDir = join(homedir(), '.config', 'opencode', 'agents')
+      const agentFile = join(agentDir, 'nexus-orchestrator.md')
+      if (!existsSync(agentFile)) {
+        mkdirSync(agentDir, { recursive: true })
+        writeFileSync(agentFile, NEXUS_AGENT_CONTENT, 'utf-8')
+      }
+    } catch {
+      // Agent creation is best-effort
+    }
+
     const orchestrator = new NexusOrchestrator()
 
     // Initialize orchestrator with OpenCode context for real session API access
