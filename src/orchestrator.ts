@@ -8,6 +8,7 @@ import { NexusConfigManager } from "./config"
 import { StateBroadcaster } from "./broadcast"
 import { DashboardModule } from "./dashboard"
 import { MessageStore, type MessageStoreConfig } from "./message-store"
+import { HealthMonitor } from "./health"
 
 export interface ModelScore {
   model: string
@@ -38,6 +39,7 @@ export interface OrchestratorState {
     id: string
     name: string
     role: string
+    priority: string
     status: string
     assignedAgent?: string
     result?: { success: boolean; output?: string; error?: string; duration: number }
@@ -45,6 +47,15 @@ export interface OrchestratorState {
   totalSpent: number
   budgetRemaining: number
   lastUpdated: string
+}
+
+export interface ContextTransferData {
+  previousAgentId: string
+  partialResults: string[]
+  decisions: string[]
+  memoryEntries: MemoryEntry[]
+  taskProgress: number // 0-100 percentage
+  errorLog: string[]
 }
 
 export class NexusOrchestrator {
@@ -87,6 +98,9 @@ export class NexusOrchestrator {
   // Dashboard server
   public dashboard: DashboardModule | null = null
 
+  // Health monitor
+  public healthMonitor: HealthMonitor | null = null
+
   // State update callback
   private onStateChange: (() => void) | null = null
 
@@ -106,6 +120,11 @@ export class NexusOrchestrator {
 
     // Load project/global config files from disk
     this.configManager.loadFromPath(process.cwd())
+
+    // Initialize health monitor
+    this.healthMonitor = new HealthMonitor({
+      checkInterval: this.config.agents.healthCheckInterval
+    })
   }
 
   /**
@@ -169,6 +188,7 @@ export class NexusOrchestrator {
       id: t.id,
       name: t.name,
       role: t.requiredRole,
+      priority: t.priority || 'normal',
       status: t.status,
       assignedAgent: t.assignedAgent,
       result: t.result ? {
@@ -344,7 +364,13 @@ export class NexusOrchestrator {
             }
           }
         })
-        return ready
+        // Sort by priority: critical > high > normal > low
+        const priorityOrder: Record<string, number> = { critical: 0, high: 1, normal: 2, low: 3 }
+        return ready.sort((a, b) => {
+          const pa = priorityOrder[a.task.priority] ?? 2
+          const pb = priorityOrder[b.task.priority] ?? 2
+          return pa - pb
+        })
       },
       markComplete: (nodeId: string, result) => {
         const node = dag.nodes.get(nodeId)
@@ -410,7 +436,7 @@ export class NexusOrchestrator {
     }
   }
 
-  private async spawnAndExecute(node: DAGNode): Promise<void> {
+  private async spawnAndExecute(node: DAGNode, transferContext?: ContextTransferData): Promise<void> {
     // Analyze complexity and select model
     const complexity = this.analyzeComplexity(node.task)
     const model = this.selectModel(node.task.requiredRole, complexity)
@@ -428,13 +454,13 @@ export class NexusOrchestrator {
     this.notifyStateChange()
 
     // Execute task via OpenCode session
-    await this.executeTask(agent, node)
+    await this.executeTask(agent, node, transferContext)
   }
 
   /**
    * Execute a task by sending it to a real OpenCode session
    */
-  private async executeTask(agent: Agent, node: DAGNode): Promise<void> {
+  private async executeTask(agent: Agent, node: DAGNode, transferContext?: ContextTransferData): Promise<void> {
     if (!this.ctx || !agent.sessionID) {
       node.status = 'failed'
       node.result = {
@@ -454,7 +480,16 @@ export class NexusOrchestrator {
     try {
       // Build the prompt for the agent
       const rolePrompt = this.buildRolePrompt(node.task.requiredRole)
-      const taskPrompt = `${rolePrompt}\n\n## Task\n${node.task.name}\n\n${node.task.description}\n\n## Scope\nFiles: ${node.task.files.include.join(', ')}`
+      let taskPrompt = `${rolePrompt}\n\n## Task\n${node.task.name}\n\n${node.task.description}\n\n## Scope\nFiles: ${node.task.files.include.join(', ')}`
+
+      if (transferContext) {
+        taskPrompt += `\n\n## Previous Agent Context (from failed agent ${transferContext.previousAgentId})`
+        taskPrompt += `\nPartial results: ${transferContext.partialResults.join(', ') || 'None'}`
+        taskPrompt += `\nDecisions made: ${transferContext.decisions.join(', ') || 'None'}`
+        taskPrompt += `\nProgress: ${transferContext.taskProgress}%`
+        taskPrompt += `\nErrors encountered: ${transferContext.errorLog.join(', ') || 'None'}`
+        taskPrompt += `\n\nPlease continue from where the previous agent left off.`
+      }
 
       // Send the task to the session
       await this.ctx.session.prompt({
@@ -530,32 +565,101 @@ export class NexusOrchestrator {
     return rolePrompts[role] || `You are a ${role}. Complete the assigned task professionally.`
   }
 
+  /**
+   * Collect context from a failing agent for transfer to a respawned agent
+   */
+  collectContext(agent: Agent): ContextTransferData {
+    // Gather partial results from session context if available
+    const partialResults: string[] = []
+    const decisions: string[] = []
+    const errorLog: string[] = []
+
+    // Extract recent session messages as partial results
+    if (agent.sessionID && this.ctx) {
+      // Note: In production, this would pull from the session context API.
+      // For now we capture what we can from agent state.
+      if (agent.metrics.tasksCompleted > 0) {
+        partialResults.push(`${agent.metrics.tasksCompleted} task(s) completed before failure`)
+      }
+      if (agent.metrics.tasksFailed > 0) {
+        errorLog.push(`${agent.metrics.tasksFailed} task(s) failed`)
+      }
+    }
+
+    // Gather memory entries for this agent's scope
+    const memoryEntries: MemoryEntry[] = []
+    this.memory.forEach((entry) => {
+      if (entry.author === agent.id || entry.author === agent.role) {
+        memoryEntries.push(entry)
+      }
+    })
+
+    const taskProgress = agent.metrics.tasksCompleted > 0
+      ? Math.min(50, agent.metrics.tasksCompleted * 25)
+      : 0
+
+    return {
+      previousAgentId: agent.id,
+      partialResults,
+      decisions,
+      memoryEntries,
+      taskProgress,
+      errorLog
+    }
+  }
+
   private async handleFailure(agent: Agent, node: DAGNode, error: Error): Promise<void> {
     const failureCount = agent.metrics.tasksFailed + 1
 
     if (failureCount < this.config.selfHealing.maxRetries) {
+      // Collect context from the failing agent
+      const context = this.collectContext(agent)
+
+      // Store context in memory so it persists across retries
+      if (this.config.selfHealing.contextTransfer) {
+        this.setMemory('agent', `context:${agent.id}`, context, agent.id)
+      }
+
       // Retry with delay
       const delay = this.config.selfHealing.retryDelay *
         Math.pow(this.config.selfHealing.backoffMultiplier, failureCount - 1)
 
       await this.sleep(delay)
 
-      // Retry by re-executing the task
+      // Retry by re-executing the task with context transfer
       if (agent.sessionID) {
         node.status = 'running'
         this.notifyStateChange()
-        await this.executeTask(agent, node)
+        await this.executeTask(agent, node, context)
       }
     } else {
-      node.status = 'failed'
-      node.result = {
-        success: false,
-        error: `Max retries (${this.config.selfHealing.maxRetries}) exceeded: ${error.message}`,
-        duration: 0,
-        tokensUsed: 0,
-        cost: 0
+      // Max retries exceeded — collect context and attempt respawn with new agent
+      const context = this.collectContext(agent)
+
+      // Store final context in memory
+      if (this.config.selfHealing.contextTransfer) {
+        this.setMemory('agent', `context:${agent.id}:final`, context, agent.id)
       }
-      this.notifyStateChange()
+
+      // Terminate the failed agent
+      await this.terminateAgent(agent.id)
+
+      // Respawn with context transfer
+      if (this.config.selfHealing.contextTransfer) {
+        node.status = 'running'
+        this.notifyStateChange()
+        await this.spawnAndExecute(node, context)
+      } else {
+        node.status = 'failed'
+        node.result = {
+          success: false,
+          error: `Max retries (${this.config.selfHealing.maxRetries}) exceeded: ${error.message}`,
+          duration: 0,
+          tokensUsed: 0,
+          cost: 0
+        }
+        this.notifyStateChange()
+      }
     }
   }
 
@@ -622,6 +726,11 @@ export class NexusOrchestrator {
     this.emit('agent:spawned', agent)
     this.notifyStateChange()
 
+    // Start health monitoring if not already running
+    if (this.healthMonitor && !this.healthMonitor.isActive()) {
+      this.healthMonitor.start(() => Array.from(this.agents.values()))
+    }
+
     return agent
   }
 
@@ -632,6 +741,11 @@ export class NexusOrchestrator {
       this.agents.delete(agentId)
       this.emit('agent:terminated', agent)
       this.notifyStateChange()
+
+      // Stop health monitoring if no more agents
+      if (this.healthMonitor && this.agents.size === 0) {
+        this.healthMonitor.stop()
+      }
     }
   }
 
@@ -914,6 +1028,7 @@ export class NexusOrchestrator {
   }
 
   shutdown(): void {
+    this.healthMonitor?.stop()
     this.stopDashboard()
     this.agents.forEach((agent) => {
       agent.status = 'terminated'
