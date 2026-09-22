@@ -5,7 +5,11 @@ import type {
   SpawnConfig, RecoveryAction, HealthStatus, NexusConfig, TaskResult
 } from "./types"
 import { NexusConfigManager } from "./config"
+<<<<<<< HEAD
+import { StateBroadcaster } from "./broadcast"
+=======
 import { DashboardModule } from "./dashboard"
+>>>>>>> origin/main
 
 export interface OrchestratorState {
   running: boolean
@@ -66,8 +70,13 @@ export class NexusOrchestrator {
   // OpenCode context (set during initialization)
   public ctx: any = null
 
+<<<<<<< HEAD
+  // WebSocket broadcaster (set via initBroadcaster)
+  public broadcaster: StateBroadcaster | null = null
+=======
   // Dashboard server
   public dashboard: DashboardModule | null = null
+>>>>>>> origin/main
 
   // State update callback
   private onStateChange: (() => void) | null = null
@@ -90,6 +99,18 @@ export class NexusOrchestrator {
   }
 
   /**
+<<<<<<< HEAD
+   * Wire up the StateBroadcaster so that every notifyStateChange() call
+   * also triggers a throttled broadcast to WebSocket clients.
+   */
+  initBroadcaster(opts?: { throttleMs?: number }): void {
+    this.broadcaster = new StateBroadcaster(this, opts)
+    // Chain into the existing onStateChange callback
+    const previousOnStateChange = this.onStateChange
+    this.onStateChange = () => {
+      previousOnStateChange?.()
+      this.broadcaster?.broadcastState()
+=======
    * Start the web dashboard server
    */
   startDashboard(port?: number, host?: string): void {
@@ -112,6 +133,7 @@ export class NexusOrchestrator {
     if (this.dashboard) {
       this.dashboard.stop()
       this.dashboard = null
+>>>>>>> origin/main
     }
   }
 
