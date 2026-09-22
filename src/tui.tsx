@@ -211,21 +211,23 @@ export default Plugin.define({
                       break
                     case 'web':
                     case 'w':
-                      // Start web dashboard server
-                      try {
+                      {
                         const port = parts[1] ? parseInt(parts[1]) : 4747
-                        // Use orchestrator's startDashboard via the server plugin
+                        const host = parts[2] || '127.0.0.1'
                         context.ui.toast.show({
-                          title: "Nexus Dashboard",
-                          message: `Starting web dashboard on port ${port}...\nOpen http://localhost:${port} in your browser`,
-                          variant: "success",
-                          duration: 5000
-                        })
-                      } catch (e: any) {
-                        context.ui.toast.show({
-                          title: "Nexus",
-                          message: `Failed to start dashboard: ${e.message}`,
-                          variant: "error"
+                          title: "⚡ Nexus Web Dashboard",
+                          message: [
+                            `Port: ${port}  Host: ${host}`,
+                            "",
+                            "To start the dashboard, ask the agent:",
+                            `  nexus.dashboard.start(port=${port}, host="${host}")`,
+                            "",
+                            `Then open: http://${host}:${port}`,
+                            "",
+                            "Or use /nexus-dashboard for a config summary."
+                          ].join('\n'),
+                          variant: "info",
+                          duration: 12000
                         })
                       }
                       break
@@ -296,6 +298,34 @@ export default Plugin.define({
               suggested: true,
               run: async () => {
                 await handleDashboard()
+              }
+            },
+            {
+              id: "nexus.web",
+              title: "Start Nexus Web Dashboard",
+              group: "Nexus",
+              palette: true,
+              slash: { name: "nexus-web", aliases: ["nw"], arguments: true },
+              enabled: () => true,
+              suggested: true,
+              run: async (input?: string) => {
+                const port = input ? parseInt(input) : 4747
+                const host = '127.0.0.1'
+                context.ui.toast.show({
+                  title: "⚡ Nexus Web Dashboard",
+                  message: [
+                    `Port: ${port}  Host: ${host}`,
+                    "",
+                    "To start the dashboard, ask the agent:",
+                    `  nexus.dashboard.start(port=${port}, host="${host}")`,
+                    "",
+                    `Then open: http://${host}:${port}`,
+                    "",
+                    "Tip: The dashboard shows live agent status, costs, and history."
+                  ].join('\n'),
+                  variant: "info",
+                  duration: 12000
+                })
               }
             },
             {

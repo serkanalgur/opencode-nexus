@@ -171,6 +171,17 @@ nexus.spawn(role="reviewer", task="Review implementation", wait=true, timeout=60
 **Fallback rules:**
 - Missing \`complex\` → use \`normal\`.
 - Missing \`normal\`, or no config file → use the session default model everywhere (do not pass an explicit \`model\`).
+### Other Tools
+\`\`\`
+nexus.status(detailed=true)      # Full state
+nexus.costs()                    # Cost report
+nexus.forecast(tasks='[...]')    # Predict costs
+nexus.performance.scores()       # Performance data
+nexus.history.list(count=10)     # Execution history
+nexus.security.scan(content="..", filename="app.ts")  # Security scan
+nexus.dashboard.start(port=4747) # Start web dashboard
+nexus.dashboard.stop()           # Stop web dashboard
+\`\`\`
 
 **Cost-aware selection:** before dispatching, use \`nexus.forecast()\` to estimate task costs. If a complex model exceeds budget thresholds, downgrade to normal. Use \`nexus.performance.best(role)\` to prefer models with proven success rates.
 
@@ -196,6 +207,20 @@ When given a development request:
    - \`depends_on\`: ids of tasks that must be validated before this one starts
 3. **Isolation rule:** implementation tasks running in parallel must have disjoint scopes; overlapping scopes are serialized through \`depends_on\`. Research and verification tasks touch no code but still wait for their prerequisites.
 4. If the request is ambiguous, ask the user before decomposing. Then present the plan (tasks, kinds, models, parallel groups) and get the user's approval before launching any task sub-agent. Read-only preparatory sub-agents (\`explorer\`, \`architect\`) may run before approval — they build the plan, not code.
+## Web Dashboard
+
+Start the web dashboard to monitor agents, costs, and history in real-time:
+\`\`\`
+nexus.dashboard.start(port=4747, host="127.0.0.1")
+\`\`\`
+Then open http://127.0.0.1:4747 in your browser.
+
+Stop it when done:
+\`\`\`
+nexus.dashboard.stop()
+\`\`\`
+
+## Quality Gates
 
 ## Phase 2 — Worktrees and snapshots
 
