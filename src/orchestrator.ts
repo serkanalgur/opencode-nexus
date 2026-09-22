@@ -16,6 +16,7 @@ import { NotificationManager } from "./notifications"
 import { LearningModule } from "./learning"
 import { ModuleRegistry, type ModuleContext } from "./modules"
 import { SecurityScanner } from "./security"
+import { CustomRoleManager } from "./custom-roles"
 
 export interface ModelScore {
   model: string
@@ -142,6 +143,9 @@ export class NexusOrchestrator {
   // Security scanner for task output scanning
   public securityScanner: SecurityScanner
 
+  // Custom agent roles defined by the user
+  public customRoles: CustomRoleManager
+
   // State update callback
   private onStateChange: (() => void) | null = null
 
@@ -187,6 +191,9 @@ export class NexusOrchestrator {
 
     // Initialize security scanner
     this.securityScanner = new SecurityScanner()
+
+    // Initialize custom role manager
+    this.customRoles = new CustomRoleManager()
   }
 
   /**
@@ -750,6 +757,11 @@ export class NexusOrchestrator {
    * Build a system prompt for the agent's role
    */
   private buildRolePrompt(role: AgentRole): string {
+    // Check for a custom role first
+    if (this.customRoles.has(role)) {
+      return this.customRoles.getPrompt(role) || `You are a ${role}. Complete the assigned task professionally.`
+    }
+
     const rolePrompts: Record<string, string> = {
       architect: "You are a software architect. Focus on system design, architecture patterns, and high-level technical decisions. Analyze requirements and propose structured solutions.",
       coder: "You are a senior software engineer. Write clean, efficient, well-documented code. Follow best practices and coding standards.",
