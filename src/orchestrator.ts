@@ -16,6 +16,7 @@ import { NotificationManager } from "./notifications"
 import { LearningModule } from "./learning"
 import { ModuleRegistry, type ModuleContext } from "./modules"
 import { SecurityScanner } from "./security"
+import { PerformanceTracker } from "./performance"
 import { ExecutionHistory } from "./history"
 import { CustomRoleManager } from "./custom-roles"
 
@@ -144,6 +145,9 @@ export class NexusOrchestrator {
   // Security scanner for task output scanning
   public securityScanner: SecurityScanner
 
+  // Performance tracker for model/role scoring
+  public performanceTracker: PerformanceTracker
+
   // Execution history tracking
   public executionHistory: ExecutionHistory
 
@@ -195,6 +199,9 @@ export class NexusOrchestrator {
 
     // Initialize security scanner
     this.securityScanner = new SecurityScanner()
+
+    // Initialize performance tracker
+    this.performanceTracker = new PerformanceTracker()
 
     // Initialize execution history tracker
     this.executionHistory = new ExecutionHistory()
@@ -712,6 +719,16 @@ export class NexusOrchestrator {
       this.costByAgent.set(agent.id, (this.costByAgent.get(agent.id) || 0) + result.cost)
       this.checkBudget()
 
+      // Record performance metrics
+      this.performanceTracker.record({
+        model: agent.model.model,
+        role: node.task.requiredRole,
+        success: result.success,
+        duration: result.duration,
+        cost: result.cost,
+        tokensUsed: result.tokensUsed
+      })
+
       // Record successful execution to history
       this.executionHistory.record({
         taskId: node.id,
@@ -762,6 +779,16 @@ export class NexusOrchestrator {
 
       this.dag!.markFailed(node.id, new Error(result.error!))
       agent.metrics.tasksFailed++
+
+      // Record performance metrics for failed task
+      this.performanceTracker.record({
+        model: agent.model.model,
+        role: node.task.requiredRole,
+        success: result.success,
+        duration: result.duration,
+        cost: result.cost,
+        tokensUsed: result.tokensUsed
+      })
 
       // Record failed execution to history
       this.executionHistory.record({
