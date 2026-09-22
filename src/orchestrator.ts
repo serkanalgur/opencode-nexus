@@ -51,6 +51,22 @@ export interface OrchestratorState {
   lastUpdated: string
 }
 
+export interface EscalationPolicy {
+  maxRetries: number
+  retryDelay: number
+  enableRespawn: boolean
+  fallbackModels: string[]
+  alertOnFailure: boolean
+}
+
+export const DEFAULT_ESCALATION: EscalationPolicy = {
+  maxRetries: 3,
+  retryDelay: 1000,
+  enableRespawn: true,
+  fallbackModels: ['google/gemini-2.5-flash', 'anthropic/claude-haiku-4-5'],
+  alertOnFailure: true
+}
+
 export interface ContextTransferData {
   previousAgentId: string
   partialResults: string[]
@@ -106,6 +122,12 @@ export class NexusOrchestrator {
   // Health monitor
   public healthMonitor: HealthMonitor | null = null
 
+  // Escalation policy for self-healing
+  private escalationPolicy: EscalationPolicy
+
+  // Per-node retry counts for escalation tracking
+  private nodeRetryCounts: Map<string, number> = new Map()
+
   // State update callback
   private onStateChange: (() => void) | null = null
 
@@ -115,6 +137,14 @@ export class NexusOrchestrator {
     this.configManager = new NexusConfigManager()
     this.messageStore = new MessageStore(messageStoreConfig)
     this.messageRouter = new MessageRouter()
+
+    // Initialize escalation policy from config selfHealing settings
+    this.escalationPolicy = {
+      ...DEFAULT_ESCALATION,
+      maxRetries: this.config.selfHealing.maxRetries,
+      retryDelay: this.config.selfHealing.retryDelay,
+      enableRespawn: this.config.selfHealing.contextTransfer
+    }
   }
 
   /**
@@ -623,58 +653,66 @@ export class NexusOrchestrator {
   }
 
   private async handleFailure(agent: Agent, node: DAGNode, error: Error): Promise<void> {
-    const failureCount = agent.metrics.tasksFailed + 1
+    const policy = this.escalationPolicy
+    const retryCount = this.nodeRetryCounts.get(node.id) || 0
 
-    if (failureCount < this.config.selfHealing.maxRetries) {
-      // Collect context from the failing agent
-      const context = this.collectContext(agent)
-
-      // Store context in memory so it persists across retries
-      if (this.config.selfHealing.contextTransfer) {
-        this.setMemory('session', `context:${agent.id}`, context, agent.id)
-      }
-
-      // Retry with delay
-      const delay = this.config.selfHealing.retryDelay *
-        Math.pow(this.config.selfHealing.backoffMultiplier, failureCount - 1)
-
+    // Step 1: Retry with exponential backoff
+    if (retryCount < policy.maxRetries) {
+      this.nodeRetryCounts.set(node.id, retryCount + 1)
+      const delay = policy.retryDelay * Math.pow(2, retryCount) // exponential backoff
       await this.sleep(delay)
 
-      // Retry by re-executing the task with context transfer
-      if (agent.sessionID) {
-        node.status = 'running'
-        this.notifyStateChange()
-        await this.executeTask(agent, node, context)
-      }
-    } else {
-      // Max retries exceeded — collect context and attempt respawn with new agent
+      // Re-spawn and execute the node
+      node.status = 'pending'
+      this.notifyStateChange()
+      await this.spawnAndExecute(node)
+      return
+    }
+
+    // Step 2: Respawn with context transfer
+    if (policy.enableRespawn && this.config.selfHealing.contextTransfer) {
       const context = this.collectContext(agent)
+      this.setMemory('session', `context:${agent.id}`, context, agent.id)
 
-      // Store final context in memory
-      if (this.config.selfHealing.contextTransfer) {
-        this.setMemory('session', `context:${agent.id}:final`, context, agent.id)
-      }
-
-      // Terminate the failed agent
+      // Terminate the failed agent before respawning
       await this.terminateAgent(agent.id)
 
-      // Respawn with context transfer
-      if (this.config.selfHealing.contextTransfer) {
-        node.status = 'running'
+      // Respawn with context
+      node.status = 'pending'
+      this.notifyStateChange()
+      await this.spawnAndExecute(node, context)
+      return
+    }
+
+    // Step 3: Try fallback model
+    if (policy.fallbackModels.length > 0) {
+      const fallbackModel = policy.fallbackModels.shift()
+      if (fallbackModel) {
+        // Terminate the failed agent
+        await this.terminateAgent(agent.id)
+
+        // Spawn with fallback model override
+        node.status = 'pending'
         this.notifyStateChange()
-        await this.spawnAndExecute(node, context)
-      } else {
-        node.status = 'failed'
-        node.result = {
-          success: false,
-          error: `Max retries (${this.config.selfHealing.maxRetries}) exceeded: ${error.message}`,
-          duration: 0,
-          tokensUsed: 0,
-          cost: 0
-        }
-        this.notifyStateChange()
+        await this.spawnAgent({ role: node.task.requiredRole, model: fallbackModel })
+        return
       }
     }
+
+    // Step 4: Alert and mark as failed
+    if (policy.alertOnFailure) {
+      this.emit('agent:escalation', { agentId: agent.id, taskId: node.id, error: error.message })
+    }
+
+    node.status = 'failed'
+    node.result = {
+      success: false,
+      error: error.message,
+      duration: 0,
+      tokensUsed: 0,
+      cost: 0
+    }
+    this.notifyStateChange()
   }
 
   // === Agent Management ===
