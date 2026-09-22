@@ -459,6 +459,65 @@ export default Plugin.define({
           return { content: `Custom role '${displayName}' registered` }
         }
       })
+
+      editor.add({
+        name: "forecast",
+        description: "Estimate cost before executing tasks",
+        input: {
+          type: "object",
+          properties: {
+            tasks: { type: "string", description: "JSON array of tasks with role, model, and complexity" }
+          },
+          required: ["tasks"]
+        },
+        execute: async (input: unknown) => {
+          const { tasks } = input as { tasks: string }
+          const taskList = JSON.parse(tasks)
+          const remaining = orchestrator.budget.maxTotalCost - orchestrator.totalSpent
+          const result = orchestrator.forecaster.forecastAll(taskList, remaining)
+          const lines = result.estimates.map(e => `${e.taskName}: ~$${e.estimatedCost.toFixed(4)} (${e.model})`)
+          lines.push(`\nTotal: ~$${result.totalEstimatedCost.toFixed(4)}`)
+          lines.push(`Budget remaining: $${remaining.toFixed(2)}`)
+          lines.push(`Within budget: ${result.withinBudget ? '✅' : '❌'}`)
+          return { content: lines.join('\n') }
+        }
+      })
+
+      editor.add({
+        name: "worktree.enable",
+        description: "Enable git worktree isolation for agents",
+        input: { type: "object", properties: { repoRoot: { type: "string", description: "Repository root (defaults to cwd)" } } },
+        execute: async (input: unknown) => {
+          const { repoRoot } = input as { repoRoot?: string }
+          orchestrator.enableWorktrees(repoRoot || process.cwd())
+          return { content: "Git worktree isolation enabled." }
+        }
+      })
+
+      editor.add({
+        name: "worktree.list",
+        description: "List active agent worktrees",
+        input: { type: "object", properties: {}, additionalProperties: false },
+        execute: async () => {
+          if (!orchestrator.worktreeManager) return { content: "Worktree isolation not enabled." }
+          const wts = orchestrator.worktreeManager.list()
+          if (wts.length === 0) return { content: "No active worktrees." }
+          return { content: wts.map(w => `${w.agentId}: ${w.path}`).join('\n') }
+        }
+      })
+
+      editor.add({
+        name: "worktree.disable",
+        description: "Disable worktree isolation and clean up",
+        input: { type: "object", properties: {}, additionalProperties: false },
+        execute: async () => {
+          if (orchestrator.worktreeManager) {
+            orchestrator.worktreeManager.cleanupAll()
+            orchestrator.worktreeManager = null
+          }
+          return { content: "Worktree isolation disabled." }
+        }
+      })
     })
 
     // Register session hook for /nexus commands
@@ -502,3 +561,7 @@ export { PerformanceTracker } from "./performance"
 export type { PerformanceEntry, PerformanceScore } from "./performance"
 export { CustomRoleManager } from "./custom-roles"
 export type { CustomRole } from "./custom-roles"
+export { CostForecaster } from "./forecast"
+export type { CostEstimate, ForecastResult } from "./forecast"
+export { WorktreeManager } from "./worktree"
+export type { AgentWorktree } from "./worktree"

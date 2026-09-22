@@ -19,6 +19,8 @@ import { SecurityScanner } from "./security"
 import { PerformanceTracker } from "./performance"
 import { ExecutionHistory } from "./history"
 import { CustomRoleManager } from "./custom-roles"
+import { CostForecaster } from "./forecast"
+import { WorktreeManager } from "./worktree"
 
 export interface ModelScore {
   model: string
@@ -89,13 +91,13 @@ export class NexusOrchestrator {
   private tasks: Map<string, Task> = new Map()
   private dag: DAG | null = null
   private config: NexusConfig
-  private budget: BudgetConstraint
+  public budget: BudgetConstraint
   private running: boolean = false
   private paused: boolean = false
   private budgetExceeded: boolean = false
 
   // Cost tracking
-  private totalSpent: number = 0
+  public totalSpent: number = 0
   private costByAgent: Map<string, number> = new Map()
   private costByModel: Map<string, number> = new Map()
 
@@ -154,6 +156,12 @@ export class NexusOrchestrator {
   // Custom agent roles defined by the user
   public customRoles: CustomRoleManager
 
+  // Cost forecaster for pre-execution estimates
+  public forecaster: CostForecaster
+
+  // Git worktree manager for agent isolation
+  public worktreeManager: WorktreeManager | null = null
+
   // State update callback
   private onStateChange: (() => void) | null = null
 
@@ -208,6 +216,9 @@ export class NexusOrchestrator {
 
     // Initialize custom role manager
     this.customRoles = new CustomRoleManager()
+
+    // Initialize cost forecaster
+    this.forecaster = new CostForecaster()
   }
 
   /**
@@ -346,6 +357,13 @@ export class NexusOrchestrator {
       this.dashboard.stop()
       this.dashboard = null
     }
+  }
+
+  /**
+   * Enable git worktree isolation for agents
+   */
+  enableWorktrees(repoRoot?: string): void {
+    this.worktreeManager = new WorktreeManager(repoRoot || process.cwd())
   }
 
   /**
