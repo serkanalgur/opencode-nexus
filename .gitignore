@@ -8,4 +8,4 @@ dist/
 coverage/
 .nyc_output/
 *.tgz
-RESEARCH.md
+.worktrees/
