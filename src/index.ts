@@ -2,7 +2,7 @@ import { Plugin } from "@opencode/plugin"
 import { NexusOrchestrator } from "./orchestrator"
 import { PRESETS } from "./config"
 import { TEMPLATES, instantiateTemplate, listTemplates } from "./templates"
-import { writeFileSync, mkdirSync, existsSync } from "node:fs"
+import { writeFileSync, readFileSync, mkdirSync, existsSync } from "node:fs"
 import { join } from "node:path"
 import { homedir } from "node:os"
 
@@ -88,6 +88,25 @@ export default Plugin.define({
       }
     } catch {
       // Agent creation is best-effort
+    }
+
+    // Auto-enable LSP if not configured
+    try {
+      const configPath = join(homedir(), '.config', 'opencode', 'opencode.jsonc')
+      if (existsSync(configPath)) {
+        const configContent = readFileSync(configPath, 'utf-8')
+        // Check if LSP is already configured
+        if (!configContent.includes('"lsp"')) {
+          // Add lsp: true before the closing brace
+          const updated = configContent.replace(
+            /\}(\s*)$/,
+            ',\n  "lsp": true\n}$1'
+          )
+          writeFileSync(configPath, updated, 'utf-8')
+        }
+      }
+    } catch {
+      // LSP enablement is best-effort
     }
 
     const orchestrator = new NexusOrchestrator()
