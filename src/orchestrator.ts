@@ -37,6 +37,7 @@ export interface OrchestratorState {
     id: string
     name: string
     role: string
+    priority: string
     status: string
     assignedAgent?: string
     result?: { success: boolean; output?: string; error?: string; duration: number }
@@ -164,6 +165,7 @@ export class NexusOrchestrator {
       id: t.id,
       name: t.name,
       role: t.requiredRole,
+      priority: t.priority || 'normal',
       status: t.status,
       assignedAgent: t.assignedAgent,
       result: t.result ? {
@@ -339,7 +341,13 @@ export class NexusOrchestrator {
             }
           }
         })
-        return ready
+        // Sort by priority: critical > high > normal > low
+        const priorityOrder: Record<string, number> = { critical: 0, high: 1, normal: 2, low: 3 }
+        return ready.sort((a, b) => {
+          const pa = priorityOrder[a.task.priority] ?? 2
+          const pb = priorityOrder[b.task.priority] ?? 2
+          return pa - pb
+        })
       },
       markComplete: (nodeId: string, result) => {
         const node = dag.nodes.get(nodeId)
