@@ -2,6 +2,25 @@
 import { Plugin } from "@opencode/plugin/tui"
 import { NexusConfigManager } from "./config"
 
+// Types for agent status in the sidebar
+interface AgentStatus {
+  id: string
+  name: string
+  role: string
+  status: 'idle' | 'working' | 'completed' | 'failed' | 'terminated'
+  model: string
+  sessionID?: string
+  spawnedAt: string
+  tasksCompleted: number
+  tasksFailed: number
+}
+
+interface SidebarState {
+  agents: AgentStatus[]
+  totalCost: number
+  budgetRemaining: number
+}
+
 export default Plugin.define({
   id: "nexus.cli",
   setup(context) {
@@ -360,8 +379,138 @@ export default Plugin.define({
       duration: 3000
     })
 
+    // === Sidebar Agent Status ===
+    // Ephemeral memory store for agent status (survives hot reloads)
+    const [sidebarState, setSidebarState] = context.storage.memory<SidebarState>("nexus-sidebar-state", {
+      initial: {
+        agents: [],
+        totalCost: 0,
+        budgetRemaining: 10.00
+      }
+    })
+
+    // Subscribe to state changes from the server plugin
+    const unsubStorage = context.data.on("session.updated", (event) => {
+      // When sessions update, we can sync state
+      // The server plugin persists state to storage, we read it here
+    })
+
+    // Register sidebar content slot
+    const unsubSidebar = context.ui.slot({
+      append: "sidebar.content",
+      render: (props) => {
+        // Get child sessions (sub-agents) for the current session
+        const family = context.data.session.family(props.sessionID)
+        const sessions = context.data.session.list()
+        
+        // Filter to show only child sessions (sub-agents)
+        const childSessions = family
+          .filter(id => id !== props.sessionID)
+          .map(id => context.data.session.get(id))
+          .filter(Boolean)
+
+        if (childSessions.length === 0 && sidebarState.agents.length === 0) {
+          return null
+        }
+
+        // Merge data from both sources
+        const agents = sidebarState.agents.length > 0 
+          ? sidebarState.agents 
+          : childSessions.map(s => ({
+              id: s!.id,
+              name: s!.title || s!.id.slice(0, 12),
+              role: 'agent',
+              status: s!.status === 'running' ? 'working' as const : 'completed' as const,
+              model: '',
+              sessionID: s!.id,
+              spawnedAt: new Date().toISOString(),
+              tasksCompleted: 0,
+              tasksFailed: 0
+            }))
+
+        const activeAgents = agents.filter(a => a.status === 'working' || a.status === 'idle')
+        const completedAgents = agents.filter(a => a.status === 'completed')
+        const failedAgents = agents.filter(a => a.status === 'failed')
+
+        return (
+          <div style={{ 
+            padding: '8px', 
+            borderTop: '1px solid #333',
+            marginTop: '8px'
+          }}>
+            {/* Header */}
+            <div style={{ 
+              fontSize: '11px', 
+              color: '#888', 
+              marginBottom: '4px',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center'
+            }}>
+              <span>🤖 Nexus Agents</span>
+              <span style={{ color: '#666' }}>
+                {activeAgents.length} active
+              </span>
+            </div>
+
+            {/* Active Agents */}
+            {activeAgents.map(agent => (
+              <div 
+                key={agent.id}
+                style={{ 
+                  fontSize: '10px', 
+                  padding: '2px 0',
+                  color: agent.status === 'working' ? '#4ade80' : '#94a3b8'
+                }}
+              >
+                <span>{agent.status === 'working' ? '🔄' : '⏸️'}</span>
+                {' '}{agent.name}
+                {agent.model && (
+                  <span style={{ color: '#64748b' }}> — {agent.model.split('/').pop()}</span>
+                )}
+              </div>
+            ))}
+
+            {/* Completed Agents */}
+            {completedAgents.length > 0 && (
+              <div style={{ 
+                marginTop: '4px', 
+                paddingTop: '4px', 
+                borderTop: '1px solid #222' 
+              }}>
+                <div style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>
+                  ✅ {completedAgents.length} completed
+                </div>
+              </div>
+            )}
+
+            {/* Failed Agents */}
+            {failedAgents.length > 0 && (
+              <div style={{ marginTop: '2px' }}>
+                <div style={{ fontSize: '10px', color: '#ef4444', marginBottom: '2px' }}>
+                  ❌ {failedAgents.length} failed
+                </div>
+              </div>
+            )}
+
+            {/* Cost Summary */}
+            {sidebarState.totalCost > 0 && (
+              <div style={{ 
+                marginTop: '4px', 
+                fontSize: '10px', 
+                color: '#666' 
+              }}>
+                💰 ${sidebarState.totalCost.toFixed(4)} / ${sidebarState.budgetRemaining.toFixed(2)} remaining
+              </div>
+            )}
+          </div>
+        )
+      }
+    })
+
     return () => {
-      // Cleanup
+      unsubStorage()
+      unsubSidebar()
     }
   }
 })
