@@ -185,6 +185,9 @@ export class NexusOrchestrator {
   // Real model pricing from OpenCode (populated via loadModelCosts)
   public modelCosts: Map<string, { input: number; output: number; cacheRead: number; cacheWrite: number }> = new Map()
 
+  // Parent session ID for linking child sessions
+  public parentSessionID: string | null = null
+
   constructor(config?: Partial<NexusConfig>, messageStoreConfig?: Partial<MessageStoreConfig>, memoryStoreConfig?: Partial<MemoryStoreConfig>) {
     this.config = this.mergeConfig(config)
     this.budget = this.config.budget
@@ -1007,10 +1010,12 @@ export class NexusOrchestrator {
     const agentType = agentTypeMap[config.role] || 'build'
 
     // Create session with agent and model params directly (most reliable method)
+    // Use parentID to link child session to parent in OpenCode UI
     const session = await this.ctx.session.create({
       title,
       agent: agentType,
       model: modelName ? { providerID: provider, id: modelName } : undefined,
+      parentID: this.parentSessionID || undefined,
     })
 
     const agent: Agent = {

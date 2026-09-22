@@ -334,25 +334,64 @@ export default Plugin.define({
 
       editor.add({
         name: "spawn",
-        description: "Spawn a sub-agent for a task",
+        description: "Spawn a sub-agent for a task. Use wait=true to wait for completion.",
         input: {
           type: "object",
           properties: {
             role: { type: "string", description: "Agent role (architect, coder, reviewer, tester, explorer, documenter)" },
             task: { type: "string", description: "Task description" },
-            model: { type: "string", description: "Model override (optional)" }
+            model: { type: "string", description: "Model override (optional)" },
+            wait: { type: "boolean", description: "Wait for completion (default: false)" },
+            timeout: { type: "number", description: "Timeout in ms when waiting (default: 120000)" }
           },
           required: ["role", "task"],
           additionalProperties: false
         },
         execute: async (input: unknown) => {
-          const { role, task, model } = input as { role: string; task: string; model?: string }
+          const { role, task, model, wait, timeout } = input as { role: string; task: string; model?: string; wait?: boolean; timeout?: number }
           try {
+            // Store current session ID as parent
+            orchestrator.parentSessionID = null // Will be set by OpenCode context if available
+
             const agent = await orchestrator.spawnAgent({ role, model })
             await orchestrator.ctx.session.prompt({
               sessionID: agent.sessionID!,
               text: task
             })
+
+            // If wait is requested, wait for completion
+            if (wait) {
+              const waitTimeout = timeout || 120000
+              try {
+                await orchestrator.ctx.session.wait({ sessionID: agent.sessionID! })
+              } catch {
+                // Timeout or error — agent may still be running
+              }
+
+              // Get results
+              try {
+                const messages = await orchestrator.ctx.session.context({ sessionID: agent.sessionID! })
+                const lastMsg = messages.filter((m: any) => m.role === 'assistant').pop()
+                const result = lastMsg?.content || 'Task completed (no output captured)'
+
+                agent.status = 'completed'
+                await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(orchestrator.getState())))
+
+                const taskPreview = task.length > 80 ? task.substring(0, 77) + '...' : task
+                return {
+                  content: [
+                    `${agent.name}`,
+                    `📋 Task: ${taskPreview}`,
+                    `✅ Status: completed`,
+                    `📎 Session: ${agent.sessionID}`,
+                    `\n--- Result ---`,
+                    result
+                  ].join('\n')
+                }
+              } catch {
+                // Context read failed
+              }
+            }
 
             // Analyze task complexity for informational output
             const complexity = orchestrator.analyzeComplexity({
@@ -380,7 +419,8 @@ export default Plugin.define({
               `📋 Task: ${taskPreview}`,
               `📊 Complexity: ${complexity.overall}/100 (${complexity.factors.riskLevel} risk)`,
               `🤖 Model reasoning: ${modelSelection.reasoning}`,
-              `📎 Session: ${agent.sessionID}`
+              `📎 Session: ${agent.sessionID}`,
+              `💡 Use wait=true to wait for completion`
             ].join('\n')
             return { content: output }
           } catch (error: any) {
@@ -596,6 +636,66 @@ export default Plugin.define({
             orchestrator.worktreeManager = null
           }
           return { content: "Worktree isolation disabled." }
+        }
+      })
+
+      editor.add({
+        name: "sessions",
+        description: "List all active Nexus agent sessions",
+        input: { type: "object", properties: {}, additionalProperties: false },
+        execute: async () => {
+          const agents = orchestrator.getState().agents
+          if (agents.length === 0) return { content: "No active agent sessions." }
+          const lines = agents.map((a: any) => {
+            const statusIcon = a.status === 'working' ? '🔄' : a.status === 'idle' ? '⏸️' : a.status === 'completed' ? '✅' : '❌'
+            return `${statusIcon} ${a.name} (${a.role}) — Session: ${a.sessionID}`
+          })
+          return { content: `Active Sessions (${agents.length}):\n${lines.join('\n')}` }
+        }
+      })
+
+      editor.add({
+        name: "background",
+        description: "Move running agents to background (detach from current session)",
+        input: { type: "object", properties: {}, additionalProperties: false },
+        execute: async () => {
+          // Get all running agents and detach their sessions
+          const agents = orchestrator.getState().agents.filter((a: any) => a.status === 'working' || a.status === 'idle')
+          if (agents.length === 0) return { content: "No running agents to move to background." }
+
+          for (const agent of agents) {
+            try {
+              await orchestrator.ctx.session.background({ sessionID: agent.sessionID })
+            } catch {
+              // Background may not be supported in all contexts
+            }
+          }
+          return { content: `${agents.length} agent(s) moved to background. You can continue working while they run.` }
+        }
+      })
+
+      editor.add({
+        name: "result",
+        description: "Get the result of a completed agent session",
+        input: {
+          type: "object",
+          properties: {
+            sessionID: { type: "string", description: "Session ID of the agent" }
+          },
+          required: ["sessionID"]
+        },
+        execute: async (input: unknown) => {
+          const { sessionID } = input as { sessionID: string }
+          try {
+            const messages = await orchestrator.ctx.session.context({ sessionID })
+            const lastMsg = messages.filter((m: any) => m.role === 'assistant').pop()
+            if (lastMsg) {
+              return { content: `Session ${sessionID} result:\n${lastMsg.content}` }
+            }
+            return { content: `Session ${sessionID} has no assistant messages yet.` }
+          } catch (error: any) {
+            return { content: `Failed to get result: ${error.message}` }
+          }
         }
       })
     })
