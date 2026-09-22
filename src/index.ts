@@ -365,10 +365,24 @@ export default Plugin.define({
       const state = orchestrator.getState()
       ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(state))).catch(() => {}
       )
+      // Also persist sidebar-specific state for the TUI plugin
+      const sidebarState = {
+        agents: state.agents,
+        totalCost: state.totalSpent,
+        budgetRemaining: state.budgetRemaining
+      }
+      ctx.storage.set("nexus-sidebar-state", JSON.parse(JSON.stringify(sidebarState))).catch(() => {})
     })
 
     // Persist initial state
     await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(orchestrator.getState())))
+    // Persist initial sidebar state for TUI plugin
+    const initialState = orchestrator.getState()
+    await ctx.storage.set("nexus-sidebar-state", JSON.parse(JSON.stringify({
+      agents: initialState.agents,
+      totalCost: initialState.totalSpent,
+      budgetRemaining: initialState.budgetRemaining
+    })))
 
     // Register tools
     await ctx.tool.transform((editor) => {
