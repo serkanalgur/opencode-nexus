@@ -236,7 +236,9 @@ export class NexusOrchestrator {
     this.onStateChange = onStateChange ?? null
 
     // Load project/global config files from disk
-    this.configManager.loadFromPath(process.cwd())
+    // Use plugin location directory, not process.cwd() which may be wrong
+    const projectDir = ctx.location?.directory || process.cwd()
+    this.configManager.loadFromPath(projectDir)
 
     // Load real model pricing from OpenCode
     await this.loadModelCosts()
