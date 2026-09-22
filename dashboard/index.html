@@ -1,0 +1,947 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nexus Dashboard</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface-hover: #1c2129;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --text-muted: #8b949e;
+    --green: #3fb950;
+    --yellow: #d29922;
+    --red: #f85149;
+    --blue: #58a6ff;
+    --purple: #bc8cff;
+    --cyan: #39d2c0;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ── Header ── */
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .header-logo {
+    font-size: 22px;
+  }
+  .header-title {
+    font-size: 18px;
+    font-weight: 600;
+  }
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .connection-badge {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 500;
+    background: rgba(63, 185, 80, 0.15);
+    color: var(--green);
+    transition: all 0.3s ease;
+  }
+  .connection-badge.disconnected {
+    background: rgba(248, 81, 73, 0.15);
+    color: var(--red);
+  }
+  .connection-badge.reconnecting {
+    background: rgba(210, 153, 34, 0.15);
+    color: var(--yellow);
+  }
+  .connection-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    animation: pulse 2s infinite;
+  }
+  .disconnected .connection-dot { background: var(--red); animation: none; }
+  .reconnecting .connection-dot { background: var(--yellow); animation: pulse 0.8s infinite; }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+  .uptime {
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  /* ── Main Layout ── */
+  .main {
+    padding: 24px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+
+  /* ── Overview Cards ── */
+  .overview {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .stat-card .label {
+    font-size: 12px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .stat-card .value {
+    font-size: 28px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat-card .sub {
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .stat-card.green .value { color: var(--green); }
+  .stat-card.blue .value { color: var(--blue); }
+  .stat-card.yellow .value { color: var(--yellow); }
+  .stat-card.purple .value { color: var(--purple); }
+
+  /* ── Section Headers ── */
+  .section-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+  .section-header h2 {
+    font-size: 16px;
+    font-weight: 600;
+  }
+  .section-header .count {
+    background: var(--border);
+    color: var(--text-muted);
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 12px;
+  }
+
+  /* ── Agent Grid ── */
+  .agents-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  .agent-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    transition: border-color 0.2s;
+  }
+  .agent-card:hover {
+    border-color: var(--blue);
+  }
+  .agent-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .agent-name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .agent-role-badge {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-weight: 500;
+    text-transform: capitalize;
+  }
+  .agent-role-badge.architect { background: rgba(188, 140, 255, 0.15); color: var(--purple); }
+  .agent-role-badge.coder { background: rgba(88, 166, 255, 0.15); color: var(--blue); }
+  .agent-role-badge.reviewer { background: rgba(57, 210, 192, 0.15); color: var(--cyan); }
+  .agent-role-badge.tester { background: rgba(63, 185, 80, 0.15); color: var(--green); }
+  .agent-role-badge.explorer { background: rgba(210, 153, 34, 0.15); color: var(--yellow); }
+  .agent-role-badge.documenter { background: rgba(139, 148, 158, 0.15); color: var(--text-muted); }
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .status-dot.spawning { background: var(--yellow); animation: pulse 1s infinite; }
+  .status-dot.idle { background: var(--yellow); }
+  .status-dot.working { background: var(--green); animation: pulse 1.5s infinite; }
+  .status-dot.blocked { background: var(--red); }
+  .status-dot.completed { background: var(--blue); }
+  .status-dot.failed { background: var(--red); }
+  .status-dot.terminated { background: var(--text-muted); }
+  .agent-meta {
+    font-size: 12px;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .agent-metrics {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
+  .metric {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .metric .metric-label {
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+  }
+  .metric .metric-value {
+    font-size: 14px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ── Budget Gauge ── */
+  .budget-section {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  .budget-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+  }
+  .budget-card h3 {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 16px;
+  }
+  .gauge-container {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+  }
+  .gauge-ring {
+    position: relative;
+    width: 120px;
+    height: 120px;
+    flex-shrink: 0;
+  }
+  .gauge-ring svg {
+    transform: rotate(-90deg);
+  }
+  .gauge-ring circle {
+    fill: none;
+    stroke-width: 8;
+    stroke-linecap: round;
+  }
+  .gauge-ring .track { stroke: var(--border); }
+  .gauge-ring .fill { stroke: var(--green); transition: stroke-dashoffset 0.6s ease, stroke 0.3s; }
+  .gauge-ring .fill.warning { stroke: var(--yellow); }
+  .gauge-ring .fill.danger { stroke: var(--red); }
+  .gauge-center {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+  .gauge-pct {
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .gauge-pct-label {
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+  }
+  .budget-details {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    justify-content: center;
+  }
+  .budget-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 13px;
+  }
+  .budget-row .budget-label { color: var(--text-muted); }
+  .budget-row .budget-val { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  /* ── Tasks List ── */
+  .tasks-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+  }
+  .tasks-card h3 {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 16px;
+  }
+  .task-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .task-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 12px;
+    background: var(--bg);
+    border-radius: 6px;
+    font-size: 13px;
+  }
+  .task-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    overflow: hidden;
+  }
+  .task-name {
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .task-status {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-weight: 500;
+    text-transform: capitalize;
+    flex-shrink: 0;
+  }
+  .task-status.pending { background: rgba(139, 148, 158, 0.15); color: var(--text-muted); }
+  .task-status.queued { background: rgba(210, 153, 34, 0.15); color: var(--yellow); }
+  .task-status.running { background: rgba(63, 185, 80, 0.15); color: var(--green); }
+  .task-status.completed { background: rgba(88, 166, 255, 0.15); color: var(--blue); }
+  .task-status.failed { background: rgba(248, 81, 73, 0.15); color: var(--red); }
+  .task-status.cancelled { background: rgba(139, 148, 158, 0.15); color: var(--text-muted); }
+  .empty-message {
+    text-align: center;
+    padding: 24px;
+    color: var(--text-muted);
+    font-size: 13px;
+  }
+
+  /* ── Activity Log ── */
+  .activity-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 24px;
+  }
+  .activity-card h3 {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 16px;
+  }
+  .log-container {
+    max-height: 260px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  .log-container::-webkit-scrollbar { width: 6px; }
+  .log-container::-webkit-scrollbar-track { background: transparent; }
+  .log-container::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .log-entry {
+    display: flex;
+    gap: 10px;
+    padding: 6px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+    line-height: 1.5;
+  }
+  .log-entry:hover { background: var(--surface-hover); }
+  .log-time {
+    color: var(--text-muted);
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+  }
+  .log-icon {
+    flex-shrink: 0;
+    width: 16px;
+    text-align: center;
+  }
+  .log-msg { color: var(--text); word-break: break-word; }
+  .log-entry.event-spawn .log-icon { color: var(--green); }
+  .log-entry.event-task .log-icon { color: var(--blue); }
+  .log-entry.event-error .log-icon { color: var(--red); }
+  .log-entry.event-budget .log-icon { color: var(--yellow); }
+  .log-entry.event-info .log-icon { color: var(--text-muted); }
+  .log-entry.event-system .log-icon { color: var(--purple); }
+
+  /* ── No Agents placeholder ── */
+  .no-agents {
+    background: var(--surface);
+    border: 1px dashed var(--border);
+    border-radius: 8px;
+    padding: 40px;
+    text-align: center;
+    color: var(--text-muted);
+    margin-bottom: 24px;
+  }
+  .no-agents .icon { font-size: 32px; margin-bottom: 8px; }
+  .no-agents .msg { font-size: 13px; }
+
+  /* ── Responsive ── */
+  @media (max-width: 900px) {
+    .overview { grid-template-columns: repeat(2, 1fr); }
+    .budget-section { grid-template-columns: 1fr; }
+    .agents-grid { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 600px) {
+    .overview { grid-template-columns: 1fr; }
+    .main { padding: 16px; }
+    .header { padding: 12px 16px; }
+    .gauge-container { flex-direction: column; align-items: flex-start; }
+  }
+
+  /* ── Fade-in animation ── */
+  .fade-in {
+    animation: fadeIn 0.3s ease;
+  }
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <div class="header-left">
+    <span class="header-logo">⚡</span>
+    <span class="header-title">Nexus Dashboard</span>
+  </div>
+  <div class="header-right">
+    <span class="uptime" id="uptime"></span>
+    <div class="connection-badge disconnected" id="conn-badge">
+      <span class="connection-dot"></span>
+      <span id="conn-text">Disconnected</span>
+    </div>
+  </div>
+</div>
+
+<!-- Main Content -->
+<div class="main">
+
+  <!-- Overview Stats -->
+  <div class="overview">
+    <div class="stat-card green">
+      <span class="label">Agents</span>
+      <span class="value" id="stat-agents">0</span>
+      <span class="sub" id="stat-agents-sub">No agents spawned</span>
+    </div>
+    <div class="stat-card blue">
+      <span class="label">Tasks</span>
+      <span class="value" id="stat-tasks">0</span>
+      <span class="sub" id="stat-tasks-sub">No tasks</span>
+    </div>
+    <div class="stat-card yellow">
+      <span class="label">Spent</span>
+      <span class="value" id="stat-spent">$0.00</span>
+      <span class="sub" id="stat-spent-sub">of $10.00 budget</span>
+    </div>
+    <div class="stat-card purple">
+      <span class="label">Remaining</span>
+      <span class="value" id="stat-remaining">$10.00</span>
+      <span class="sub" id="stat-remaining-sub">100% available</span>
+    </div>
+  </div>
+
+  <!-- Agent Grid -->
+  <div class="section-header">
+    <h2>🤖 Agents</h2>
+    <span class="count" id="agent-count">0</span>
+  </div>
+  <div id="agents-container">
+    <div class="no-agents">
+      <div class="icon">🤖</div>
+      <div class="msg">No agents spawned yet. Tasks will spawn agents automatically.</div>
+    </div>
+  </div>
+
+  <!-- Budget + Tasks side by side -->
+  <div class="budget-section">
+    <!-- Budget Gauge -->
+    <div class="budget-card">
+      <h3>💰 Budget</h3>
+      <div class="gauge-container">
+        <div class="gauge-ring">
+          <svg width="120" height="120" viewBox="0 0 120 120">
+            <circle class="track" cx="60" cy="60" r="52"></circle>
+            <circle class="fill" id="gauge-fill" cx="60" cy="60" r="52"
+              stroke-dasharray="326.73" stroke-dashoffset="0"></circle>
+          </svg>
+          <div class="gauge-center">
+            <span class="gauge-pct" id="gauge-pct">100%</span>
+            <span class="gauge-pct-label">Left</span>
+          </div>
+        </div>
+        <div class="budget-details">
+          <div class="budget-row">
+            <span class="budget-label">Total Budget</span>
+            <span class="budget-val" id="budget-total">$10.00</span>
+          </div>
+          <div class="budget-row">
+            <span class="budget-label">Spent</span>
+            <span class="budget-val" id="budget-spent">$0.00</span>
+          </div>
+          <div class="budget-row">
+            <span class="budget-label">Remaining</span>
+            <span class="budget-val" id="budget-remaining">$10.00</span>
+          </div>
+          <div class="budget-row">
+            <span class="budget-label">Status</span>
+            <span class="budget-val" id="budget-status" style="color: var(--green)">Healthy</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tasks -->
+    <div class="tasks-card">
+      <h3>📋 Tasks</h3>
+      <div class="task-list" id="task-list">
+        <div class="empty-message">No tasks yet</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Activity Log -->
+  <div class="activity-card">
+    <h3>📈 Activity Log</h3>
+    <div class="log-container" id="log-container">
+      <div class="log-entry event-info">
+        <span class="log-time">--:--:--</span>
+        <span class="log-icon">ℹ</span>
+        <span class="log-msg">Waiting for connection to Nexus server...</span>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  // ── State ──
+  const MAX_LOG_ENTRIES = 200;
+  const MAX_BUDGET = 10.00;
+  const CIRCUMFERENCE = 2 * Math.PI * 52; // ~326.73
+
+  let ws = null;
+  let reconnectDelay = 1000;
+  let reconnectTimer = null;
+  let startTime = Date.now();
+  let logEntries = [];
+
+  // Role emojis
+  const ROLE_EMOJI = {
+    architect: '🏗️', coder: '💻', reviewer: '🔍',
+    tester: '🧪', explorer: '🔭', documenter: '📝'
+  };
+
+  // ── DOM Refs ──
+  const $connBadge = document.getElementById('conn-badge');
+  const $connText = document.getElementById('conn-text');
+  const $uptime = document.getElementById('uptime');
+
+  // Stats
+  const $statAgents = document.getElementById('stat-agents');
+  const $statAgentsSub = document.getElementById('stat-agents-sub');
+  const $statTasks = document.getElementById('stat-tasks');
+  const $statTasksSub = document.getElementById('stat-tasks-sub');
+  const $statSpent = document.getElementById('stat-spent');
+  const $statSpentSub = document.getElementById('stat-spent-sub');
+  const $statRemaining = document.getElementById('stat-remaining');
+  const $statRemainingSub = document.getElementById('stat-remaining-sub');
+
+  // Agents
+  const $agentsContainer = document.getElementById('agents-container');
+  const $agentCount = document.getElementById('agent-count');
+
+  // Budget
+  const $gaugeFill = document.getElementById('gauge-fill');
+  const $gaugePct = document.getElementById('gauge-pct');
+  const $budgetTotal = document.getElementById('budget-total');
+  const $budgetSpent = document.getElementById('budget-spent');
+  const $budgetRemaining = document.getElementById('budget-remaining');
+  const $budgetStatus = document.getElementById('budget-status');
+
+  // Tasks
+  const $taskList = document.getElementById('task-list');
+
+  // Log
+  const $logContainer = document.getElementById('log-container');
+
+  // ── Utilities ──
+  function fmt$(v) { return '$' + (v || 0).toFixed(2); }
+
+  function fmtTime(iso) {
+    try {
+      const d = new Date(iso);
+      return d.toLocaleTimeString('en-US', { hour12: false });
+    } catch { return '--:--:--'; }
+  }
+
+  function fmtElapsed(ms) {
+    const s = Math.floor(ms / 1000);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    if (h > 0) return h + 'h ' + m + 'm';
+    if (m > 0) return m + 'm ' + sec + 's';
+    return sec + 's';
+  }
+
+  function now() {
+    return new Date().toLocaleTimeString('en-US', { hour12: false });
+  }
+
+  // ── Uptime ticker ──
+  setInterval(function() {
+    $uptime.textContent = 'Uptime ' + fmtElapsed(Date.now() - startTime);
+  }, 1000);
+
+  // ── Activity Log ──
+  function addLog(type, icon, msg) {
+    var entry = document.createElement('div');
+    entry.className = 'log-entry event-' + type;
+    entry.innerHTML = '<span class="log-time">' + now() + '</span>'
+      + '<span class="log-icon">' + icon + '</span>'
+      + '<span class="log-msg">' + escHtml(msg) + '</span>';
+
+    logEntries.push(entry);
+    if (logEntries.length > MAX_LOG_ENTRIES) {
+      var old = logEntries.shift();
+      if (old.parentNode) old.parentNode.removeChild(old);
+    }
+
+    // Insert at top
+    if ($logContainer.firstChild) {
+      $logContainer.insertBefore(entry, $logContainer.firstChild);
+    } else {
+      $logContainer.appendChild(entry);
+    }
+  }
+
+  function escHtml(s) {
+    var d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  // ── Connection ──
+  function setConnState(state) {
+    $connBadge.className = 'connection-badge ' + state;
+    if (state === 'connected') {
+      $connText.textContent = 'Live';
+    } else if (state === 'reconnecting') {
+      $connText.textContent = 'Reconnecting...';
+    } else {
+      $connText.textContent = 'Disconnected';
+    }
+  }
+
+  function connect() {
+    var url = 'ws://' + location.hostname + ':' + location.port + '/ws/events';
+
+    try {
+      ws = new WebSocket(url);
+    } catch (e) {
+      addLog('error', '❌', 'WebSocket creation failed: ' + e.message);
+      scheduleReconnect();
+      return;
+    }
+
+    setConnState('reconnecting');
+    addLog('info', 'ℹ', 'Connecting to ' + url + '...');
+
+    ws.onopen = function() {
+      setConnState('connected');
+      reconnectDelay = 1000;
+      addLog('system', '🔌', 'Connected to Nexus server');
+    };
+
+    ws.onmessage = function(evt) {
+      try {
+        var msg = JSON.parse(evt.data);
+        handleMessage(msg);
+      } catch (e) {
+        // Not JSON, log as-is
+        addLog('info', '📩', typeof evt.data === 'string' ? evt.data : '[binary]');
+      }
+    };
+
+    ws.onclose = function(evt) {
+      setConnState('disconnected');
+      addLog('error', '🔌', 'Disconnected (code: ' + evt.code + ')');
+      scheduleReconnect();
+    };
+
+    ws.onerror = function() {
+      setConnState('disconnected');
+    };
+  }
+
+  function scheduleReconnect() {
+    if (reconnectTimer) return;
+    setConnState('reconnecting');
+    addLog('info', '🔄', 'Reconnecting in ' + (reconnectDelay / 1000) + 's...');
+    reconnectTimer = setTimeout(function() {
+      reconnectTimer = null;
+      reconnectDelay = Math.min(reconnectDelay * 1.5, 30000);
+      connect();
+    }, reconnectDelay);
+  }
+
+  // ── Message Handler ──
+  function handleMessage(msg) {
+    var type = msg.type || msg.event || '';
+
+    switch (type) {
+      case 'state':
+      case 'orchestrator:state':
+        renderState(msg.data || msg.state || msg);
+        break;
+
+      case 'agent:spawned':
+        addLog('spawn', '🤖', 'Agent spawned: ' + agentLabel(msg.data || msg));
+        break;
+
+      case 'agent:terminated':
+        addLog('info', '🛑', 'Agent terminated: ' + agentLabel(msg.data || msg));
+        break;
+
+      case 'task:started':
+      case 'task-assigned':
+        addLog('task', '▶', 'Task started: ' + taskLabel(msg.data || msg));
+        break;
+
+      case 'task:completed':
+      case 'task-completed':
+        addLog('task', '✅', 'Task completed: ' + taskLabel(msg.data || msg));
+        break;
+
+      case 'task:failed':
+      case 'task-failed':
+        addLog('error', '❌', 'Task failed: ' + taskLabel(msg.data || msg));
+        break;
+
+      case 'budget:alert':
+        addLog('budget', '⚠️', 'Budget alert: ' + fmt$(msg.data?.remaining || 0) + ' remaining');
+        break;
+
+      case 'budget:exceeded':
+        addLog('error', '🚨', 'Budget exceeded! Spent: ' + fmt$(msg.data?.totalSpent || 0));
+        break;
+
+      case 'orchestrator:paused':
+        addLog('system', '⏸️', 'Orchestrator paused');
+        break;
+
+      case 'orchestrator:resumed':
+        addLog('system', '▶️', 'Orchestrator resumed');
+        break;
+
+      case 'review-completed':
+        addLog('task', '🔍', 'Review completed: ' + (msg.data?.taskName || msg.data?.id || ''));
+        break;
+
+      case 'status-update':
+        addLog('info', '📊', 'Status update: ' + JSON.stringify(msg.data || {}).slice(0, 120));
+        break;
+
+      default:
+        // Generic log
+        if (type) {
+          addLog('info', '📩', type + ': ' + JSON.stringify(msg.data || msg).slice(0, 150));
+        }
+    }
+  }
+
+  function agentLabel(d) {
+    if (!d) return '';
+    if (d.name) return d.name;
+    if (d.role) return d.role;
+    return d.id || 'unknown';
+  }
+
+  function taskLabel(d) {
+    if (!d) return '';
+    if (d.name) return d.name;
+    return d.id || 'unknown';
+  }
+
+  // ── Render State ──
+  function renderState(state) {
+    if (!state) return;
+
+    var agents = state.agents || [];
+    var tasks = state.tasks || [];
+    var totalSpent = state.totalSpent || 0;
+    var budgetRemaining = state.budgetRemaining != null ? state.budgetRemaining : (MAX_BUDGET - totalSpent);
+    var budgetTotal = totalSpent + budgetRemaining;
+    if (budgetTotal <= 0) budgetTotal = MAX_BUDGET;
+    var remainingPct = Math.max(0, Math.min(100, (budgetRemaining / budgetTotal) * 100));
+
+    // ── Overview Stats ──
+    $statAgents.textContent = agents.length;
+    var activeCount = agents.filter(function(a) { return a.status === 'working'; }).length;
+    $statAgentsSub.textContent = activeCount + ' working, ' + (agents.length - activeCount) + ' idle';
+
+    var runningTasks = tasks.filter(function(t) { return t.status === 'running' || t.status === 'queued'; }).length;
+    var completedTasks = tasks.filter(function(t) { return t.status === 'completed'; }).length;
+    $statTasks.textContent = tasks.length;
+    $statTasksSub.textContent = runningTasks + ' running, ' + completedTasks + ' done';
+
+    $statSpent.textContent = fmt$(totalSpent);
+    $statSpentSub.textContent = 'of ' + fmt$(budgetTotal) + ' budget';
+
+    $statRemaining.textContent = fmt$(budgetRemaining);
+    $statRemainingSub.textContent = remainingPct.toFixed(0) + '% available';
+
+    // ── Agent Cards ──
+    $agentCount.textContent = agents.length;
+    if (agents.length === 0) {
+      $agentsContainer.innerHTML = '<div class="no-agents"><div class="icon">🤖</div>'
+        + '<div class="msg">No agents spawned yet. Tasks will spawn agents automatically.</div></div>';
+    } else {
+      var html = '<div class="agents-grid">';
+      for (var i = 0; i < agents.length; i++) {
+        var a = agents[i];
+        var emoji = ROLE_EMOJI[a.role] || '🤖';
+        html += '<div class="agent-card fade-in">';
+        html += '<div class="agent-header">';
+        html += '<div class="agent-name"><span class="status-dot ' + escHtml(a.status) + '"></span>'
+          + emoji + ' ' + escHtml(a.name || a.role) + '</div>';
+        html += '<span class="agent-role-badge ' + escHtml(a.role) + '">' + escHtml(a.role) + '</span>';
+        html += '</div>';
+        html += '<div class="agent-meta">📦 ' + escHtml(a.model || 'unknown') + '</div>';
+        html += '<div class="agent-metrics">';
+        html += '<div class="metric"><span class="metric-label">Tasks</span>'
+          + '<span class="metric-value">' + (a.tasksCompleted || 0) + ' done</span></div>';
+        html += '<div class="metric"><span class="metric-label">Failed</span>'
+          + '<span class="metric-value">' + (a.tasksFailed || 0) + '</span></div>';
+        html += '<div class="metric"><span class="metric-label">Cost</span>'
+          + '<span class="metric-value">' + fmt$(a.totalCost || 0) + '</span></div>';
+        html += '</div>';
+        html += '</div>';
+      }
+      html += '</div>';
+      $agentsContainer.innerHTML = html;
+    }
+
+    // ── Budget Gauge ──
+    var offset = CIRCUMFERENCE * (1 - remainingPct / 100);
+    $gaugeFill.style.strokeDashoffset = offset;
+    $gaugeFill.className = 'fill' + (remainingPct < 20 ? ' danger' : remainingPct < 40 ? ' warning' : '');
+    $gaugePct.textContent = remainingPct.toFixed(0) + '%';
+
+    $budgetTotal.textContent = fmt$(budgetTotal);
+    $budgetSpent.textContent = fmt$(totalSpent);
+    $budgetRemaining.textContent = fmt$(budgetRemaining);
+
+    if (remainingPct < 10) {
+      $budgetStatus.textContent = 'Critical';
+      $budgetStatus.style.color = 'var(--red)';
+    } else if (remainingPct < 30) {
+      $budgetStatus.textContent = 'Warning';
+      $budgetStatus.style.color = 'var(--yellow)';
+    } else {
+      $budgetStatus.textContent = 'Healthy';
+      $budgetStatus.style.color = 'var(--green)';
+    }
+
+    // ── Tasks List ──
+    if (tasks.length === 0) {
+      $taskList.innerHTML = '<div class="empty-message">No tasks yet</div>';
+    } else {
+      var thtml = '';
+      for (var j = 0; j < tasks.length; j++) {
+        var t = tasks[j];
+        thtml += '<div class="task-item">';
+        thtml += '<div class="task-info">';
+        thtml += '<span class="task-name">' + escHtml(t.name || t.id) + '</span>';
+        if (t.role) thtml += '<span style="color:var(--text-muted);font-size:11px">' + escHtml(t.role) + '</span>';
+        thtml += '</div>';
+        thtml += '<span class="task-status ' + escHtml(t.status) + '">' + escHtml(t.status) + '</span>';
+        thtml += '</div>';
+      }
+      $taskList.innerHTML = thtml;
+    }
+  }
+
+  // ── Init ──
+  addLog('system', '⚡', 'Nexus Dashboard initialized');
+  connect();
+
+})();
+</script>
+</body>
+</html>
