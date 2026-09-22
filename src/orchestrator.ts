@@ -626,7 +626,7 @@ export class NexusOrchestrator {
 
       // Store context in memory so it persists across retries
       if (this.config.selfHealing.contextTransfer) {
-        this.setMemory('agent', `context:${agent.id}`, context, agent.id)
+        this.setMemory('session', `context:${agent.id}`, context, agent.id)
       }
 
       // Retry with delay
@@ -647,7 +647,7 @@ export class NexusOrchestrator {
 
       // Store final context in memory
       if (this.config.selfHealing.contextTransfer) {
-        this.setMemory('agent', `context:${agent.id}:final`, context, agent.id)
+        this.setMemory('session', `context:${agent.id}:final`, context, agent.id)
       }
 
       // Terminate the failed agent
