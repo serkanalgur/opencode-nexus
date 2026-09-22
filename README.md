@@ -9,7 +9,7 @@
 
 **Adaptive Multi-Agent Orchestration with Cost Intelligence**
 
-[Installation](#installation) • [Quick Start](#quick-start) • [Features](#features) • [TUI Commands](#tui-commands) • [Tools](#tools) • [Configuration](#configuration) • [Development](#development) • [Contributing](#contributing)
+[Installation](#installation) • [Quick Start](#quick-start) • [Features](#features) • [Agents](#agents) • [Tools](#tools) • [Configuration](#configuration) • [Development](#development)
 
 </div>
 
@@ -17,7 +17,7 @@
 
 ## What is OpenCode Nexus?
 
-OpenCode Nexus is an agent orchestration plugin for [OpenCode V2](https://opencode.ai) that spawns **real sub-agent sessions** with **cost-aware routing**, **DAG-based task execution**, **self-healing**, and a **TUI dashboard**.
+OpenCode Nexus is an agent orchestration plugin for [OpenCode V2](https://opencode.ai) that spawns **real sub-agent sessions** with **cost-aware routing**, **DAG-based task execution**, **self-healing**, and a **TUI/web dashboard**.
 
 ### Key Capabilities
 
@@ -30,10 +30,15 @@ OpenCode Nexus is an agent orchestration plugin for [OpenCode V2](https://openco
 | **Self-Healing** | Retries with exponential backoff, context transfer, escalation policies |
 | **Web Dashboard** | Real-time monitoring via HTTP + WebSocket server on port 4747 |
 | **TUI Dashboard** | Monitor agents, budget, and config from the terminal |
+| **Team Mode** | Lead agent orchestrates specialist agents in parallel |
+| **Todo & Goal Tracking** | Enforce task completion, persist objectives across sessions |
 | **Persistent Memory** | SQLite-backed memory store with TTL and search |
 | **Learning Module** | Pattern recognition from failures, confidence scoring |
 | **JSONC Config** | Read/write project and global config files with comments |
-| **Slash Commands** | `/nexus`, `/nexus-dashboard`, `/nexus-model`, and more |
+| **LSP Integration** | Auto-enabled for TypeScript, Python, Go, and 30+ languages |
+| **AST-Grep** | Pattern-aware code search and rewriting |
+| **Security Scanning** | Automated secrets and vulnerability detection |
+| **Slash Commands** | `/nexus`, `/nexus web`, `/nexus review`, and more |
 
 ---
 
@@ -50,13 +55,21 @@ bun add -g @serkanalgur/opencode-nexus
 opencode plugin @serkanalgur/opencode-nexus --global
 ```
 
-Or manually add to `~/.config/opencode/opencode.json`:
+Or manually add to `~/.config/opencode/opencode.jsonc`:
 
-```json
+```jsonc
 {
   "plugins": ["@serkanalgur/opencode-nexus"]
 }
 ```
+
+### Auto-Setup
+
+On first load, Nexus automatically:
+- Creates `nexus-orchestrator` agent in `~/.config/opencode/agents/`
+- Creates subagent files: `nexus-coder`, `nexus-explorer`, `nexus-reviewer`, `nexus-tester`, `nexus-architect`, `nexus-documenter`
+- Enables LSP in OpenCode config
+- Configures agent models from `.opencode/nexus.jsonc`
 
 ---
 
@@ -64,110 +77,61 @@ Or manually add to `~/.config/opencode/opencode.json`:
 
 ### 1. Configure Agent Models
 
-Press **Ctrl+N** or type `/nexus` to open the configuration dialog and select models for each agent role.
+Press **Ctrl+N** or type `/nexus` to open the configuration dialog. Select where to save (project or global).
 
-### 2. Use Slash Commands
+### 2. Use the Nexus Orchestrator
+
+Select `nexus-orchestrator` as your primary agent, then:
+
+```
+# Spawn agents for tasks
+Use nexus.spawn with role="coder" and task="Implement JWT auth"
+
+# Wait for completion and get results
+Use nexus.spawn with role="reviewer" and task="Review the implementation" and wait=true
+
+# Delegate (convenience wrapper)
+Use nexus.delegate with role="tester" and task="Write tests for auth module"
+
+# Check progress
+Use nexus.sessions
+
+# Track goals
+Use nexus.goal.set with description="Build complete auth system"
+```
+
+### 3. Use Slash Commands
 
 ```
 /nexus              # Open full configuration
-/nexus config       # Configure models & budget
-/nexus status       # Show config summary
-/nexus dashboard    # Show dashboard
-/nexus model        # Select model for a role
-/nexus reset        # Reset to defaults
-```
-
-### 3. Spawn Agents via Tools
-
-From any agent prompt, use the nexus tools:
-
-```
-Use the nexus.spawn tool to create a coder agent for implementing JWT auth
-Use the nexus.status tool to check orchestrator state
-Use the nexus.agents tool to list all spawned agents
-Use the nexus.costs tool to see cost breakdown
-```
-
-### 4. Programmatic Usage
-
-```typescript
-import { NexusOrchestrator } from '@serkanalgur/opencode-nexus'
-
-const orchestrator = new NexusOrchestrator({
-  budget: { maxTotalCost: 10.00 }
-})
-
-// Initialize with OpenCode context (done automatically by plugin)
-orchestrator.initialize(ctx)
-
-// Spawn a real agent session
-const agent = await orchestrator.spawnAgent({ role: 'coder' })
-
-// Execute tasks in DAG
-const result = await orchestrator.execute({
-  tasks: [
-    {
-      id: 'task-1',
-      name: 'Implement auth',
-      description: 'Add JWT authentication',
-      requiredRole: 'coder',
-      complexity: { overall: 60, factors: { fileCount: 3, codeLines: 200, dependencyDepth: 2, domainKnowledge: 40, riskLevel: 'medium' } },
-      dependencies: [],
-      files: { include: ['src/auth/**'] },
-      priority: 'high',
-      status: 'pending'
-    }
-  ]
-})
-
-console.log(`Completed in ${result.totalDuration}ms, cost: $${result.totalCost}`)
+/nexus web          # Start web dashboard (open http://localhost:4747)
+/nexus review       # Quick code review
+/nexus fix          # Quick fix for last error
+/nexus explain      # Explain last change
 ```
 
 ---
 
 ## Features
 
-### Real OpenCode Sessions
-
-Each agent runs in its own OpenCode session with the correct model and role-specific system prompt:
-
-```typescript
-// Creates a real OpenCode session with descriptive title
-const session = await ctx.session.create({
-  title: '💻 Coder — anthropic/claude-sonnet-4-6',
-  agent: 'build',
-  model: { providerID: 'anthropic', id: 'claude-sonnet-4-6' }
-})
-
-// Sends the task prompt
-await ctx.session.prompt({ sessionID: session.id, text: 'You are a senior software engineer...' })
-```
-
-### Role-Specific System Prompts
-
-Each agent role gets a specialized prompt:
-
-| Role | OpenCode Agent | Focus |
-|------|----------------|-------|
-| **Architect** | `architect` | System design, architecture patterns, high-level decisions |
-| **Coder** | `build-orchestrator` | Clean, efficient code following best practices |
-| **Reviewer** | `code-reviewer` | Code review for correctness, security, performance |
-| **Tester** | `build-orchestrator` | Comprehensive tests, edge cases, quality assurance |
-| **Explorer** | `explore` | Codebase navigation, architecture analysis |
-| **Documenter** | `doc-writer` | Clear technical documentation |
-
 ### Cost-Aware Model Selection
 
-Nexus scores models by quality, cost, and speed — then picks the optimal one per task complexity:
+Models are configured per role in `.opencode/nexus.jsonc`. Nexus scores models by quality, cost, and speed — then picks the optimal one:
 
-```typescript
-// High-complexity tasks favor quality models
-// Low-complexity tasks favor cheap/fast models
-// Budget remaining filters out unaffordable models
-
-const result = orchestrator.selectBestModel('coder', complexityScore)
-// → { provider: 'anthropic', model: 'claude-sonnet-4-6', overallScore: 0.82 }
+```jsonc
+{
+  "models": {
+    "architect": "opencode/muse-spark-1.3-contributor-free",
+    "coder": "opencode/mimo-v2.6-flash-free",
+    "reviewer": "opencode/muse-spark-1.2-contributor-free",
+    "tester": "opencode-go/mimo-v2.5",
+    "explorer": "opencode/big-pickle",
+    "documenter": "opencode/big-pickle"
+  }
+}
 ```
+
+When you call `nexus.spawn(role="coder")`, the coder model from config is used automatically.
 
 ### Self-Healing with Escalation
 
@@ -178,29 +142,62 @@ Failed tasks follow a 4-step escalation chain:
 3. **Fallback Model** — Try cheaper alternative model
 4. **Alert** — Emit escalation event, mark as failed
 
-```typescript
-const orchestrator = new NexusOrchestrator({
-  selfHealing: {
-    enabled: true,
-    maxRetries: 3,
-    contextTransfer: true
-  }
-})
-```
-
 ### Web Dashboard
 
 Real-time monitoring via embedded HTTP + WebSocket server:
 
-```bash
-# Start dashboard
-Use nexus.dashboard.start with port=4747
-
-# Open in browser
-open http://localhost:4747
+```
+nexus.dashboard.start(port=4747)  # Start server
+# Open http://localhost:4747 in browser
 ```
 
-Features: Agent grid, cost tracker, DAG visualization, activity log, config panel.
+Features: Agent grid, cost tracker, DAG visualization, activity log, config editor, auto-refresh.
+
+### Team Mode
+
+Create a team of specialist agents working in parallel:
+
+```
+nexus.team.create(name="auth-team", leadRole="architect")
+nexus.team.addMember(teamId="...", role="coder", model="opencode/mimo-v2.6-flash-free")
+nexus.team.addMember(teamId="...", role="reviewer", model="opencode/muse-spark-1.2-contributor-free")
+nexus.team.activate(teamId="...")
+```
+
+### Todo & Goal Tracking
+
+Track tasks and persist objectives across sessions:
+
+```
+nexus.todo.add(description="Implement auth middleware")
+nexus.todo.list()
+nexus.todo.complete(id="...")
+
+nexus.goal.set(description="Build complete auth system")
+nexus.goal.status()
+nexus.goal.complete()
+```
+
+### LSP Integration
+
+OpenCode's built-in LSP servers are auto-enabled. Supports 30+ languages including TypeScript, Python, Go, Rust, and more.
+
+### AST-Grep
+
+Pattern-aware code search and rewriting:
+
+```
+nexus.astgrep.search(pattern="console.log($$$)", language="typescript", directory="src/")
+nexus.astgrep.rewrite(pattern="var $X", rewrite="const $X", language="typescript", directory="src/")
+```
+
+### Security Scanning
+
+Automated secrets and vulnerability detection:
+
+```
+nexus.security.scan(content="const API_KEY = \"sk-123\"", filename="config.ts")
+```
 
 ### Persistent Memory
 
@@ -215,9 +212,6 @@ orchestrator.memoryStore.set({
   confidence: 0.9,
   tags: ['api', 'design']
 })
-
-// Search across all memory
-const results = orchestrator.memoryStore.search('api pattern')
 ```
 
 ### Learning Module
@@ -225,35 +219,11 @@ const results = orchestrator.memoryStore.search('api pattern')
 Records failure patterns and solutions, building confidence over time:
 
 ```typescript
-// Automatically records failures during execution
-// Finds similar past failures and suggests solutions
-// Confidence increases with successful reuse
-
 const solutions = orchestrator.learning.findSolutions('TypeScript TS2345 error')
 // → [{ entry: { solution: 'Add type cast', confidence: 0.85 }, similarity: 0.7 }]
 ```
 
-### JSONC Configuration
-
-Read and write config files with comments:
-
-```jsonc
-// .opencode/nexus.jsonc (project-level)
-{
-  // Agent models for each role
-  "models": {
-    "architect": "anthropic/claude-sonnet-4-6",
-    "coder": "opencode-go/mimo-v2.5"
-  },
-  "budget": { "maxTotalCost": 10.00 }
-}
-```
-
-Precedence: project > global > TUI > defaults.
-
 ### Preset Configurations
-
-Quickly apply predefined configs:
 
 | Preset | Models | Budget | Self-Healing |
 |--------|--------|--------|--------------|
@@ -262,83 +232,73 @@ Quickly apply predefined configs:
 | **enterprise** | Top-tier | $50 | On (5 retries) |
 | **cost-optimized** | Cheapest | $3 | On (2 retries) |
 
-### Composable Modules
+---
 
-Extend Nexus with custom modules:
+## Agents
 
-```typescript
-import { NexusPlugin } from '@serkanalgur/opencode-nexus'
+Nexus creates 7 agent files in `~/.config/opencode/agents/`:
 
-NexusPlugin.register({
-  name: 'my-custom-module',
-  description: 'Custom feature',
-  version: '1.0.0',
-  setup: async (ctx) => { /* ... */ },
-  teardown: async () => { /* ... */ }
-})
-```
+| Agent | Mode | Purpose |
+|-------|------|---------|
+| `nexus-orchestrator` | primary | Main orchestrator — decompose, dispatch, integrate |
+| `nexus-architect` | subagent | System design and architecture |
+| `nexus-coder` | subagent | Implement code tasks |
+| `nexus-reviewer` | subagent | Code review (read-only) |
+| `nexus-tester` | subagent | Write and run tests |
+| `nexus-explorer` | subagent | Explore codebases (read-only) |
+| `nexus-documenter` | subagent | Write documentation |
 
-### Custom Agent Roles
+### Clarify Skill
 
-Define your own agent roles with custom prompts:
-
-```jsonc
-// .opencode/nexus.jsonc
-{
-  "customRoles": [
-    {
-      "name": "security-auditor",
-      "displayName": "Security Auditor",
-      "emoji": "🔐",
-      "prompt": "You are a security auditor. Focus on OWASP Top 10, vulnerability scanning, and security best practices.",
-      "model": "anthropic/claude-sonnet-4-6"
-    }
-  ]
-}
-```
-
-Or register dynamically via tools: `nexus.roles.add(name="security-auditor", displayName="Security Auditor", prompt="...")`
-
-### Execution History
-
-Track all task executions with costs, durations, and outcomes:
+When instructions are ambiguous, use `nexus.clarify`:
 
 ```
-nexus.history.list(count=10)  — Recent executions
-nexus.history.stats()         — Success rate, avg cost, breakdown by role
+nexus.clarify(question="Should I use JWT or OAuth?", options="JWT, OAuth", assumption="JWT")
 ```
 
-### Cost Forecasting
+---
 
-Predict costs before executing tasks:
+## Tools
 
-```typescript
-const forecast = orchestrator.forecaster.forecastAll([
-  { task: myTask, role: 'coder', model: 'claude-sonnet-4-6', complexity: score }
-], budgetRemaining)
-// → { totalEstimatedCost: 0.0234, withinBudget: true }
-```
-
-### Agent Performance Scoring
-
-Track which model/role combinations work best:
-
-```
-nexus.performance.scores()           — All model/role scores
-nexus.performance.best(role="coder") — Best model for a role
-```
-
-Score = 40% success rate + 30% speed + 30% cost efficiency.
-
-### Git Worktree Per Agent
-
-Each agent works in its own isolated git worktree:
-
-```
-nexus.worktree.enable()   — Enable isolation
-nexus.worktree.list()     — List active worktrees
-nexus.worktree.disable()  — Clean up all
-```
+| Tool | Description | Input |
+|------|-------------|-------|
+| `nexus.spawn` | Spawn a sub-agent | `{ role, task, model?, wait?, timeout? }` |
+| `nexus.delegate` | Spawn + wait + result | `{ role, task, model?, timeout? }` |
+| `nexus.sessions` | List active sessions | `{}` |
+| `nexus.background` | Move agents to background | `{}` |
+| `nexus.result` | Get agent result | `{ sessionID }` |
+| `nexus.status` | Orchestrator status | `{ detailed? }` |
+| `nexus.costs` | Cost report & budget | `{}` |
+| `nexus.forecast` | Predict costs | `{ tasks }` |
+| `nexus.model.costs` | Show/set model pricing | `{ model?, setInput?, setOutput? }` |
+| `nexus.preset` | Apply preset config | `{ name }` |
+| `nexus.config.save` | Save config to disk | `{ level: 'project' \| 'global' }` |
+| `nexus.config.init` | Initialize config files | `{ level }` |
+| `nexus.dashboard.start` | Start web dashboard | `{ port?, host? }` |
+| `nexus.dashboard.stop` | Stop web dashboard | `{}` |
+| `nexus.todo.add` | Add a todo item | `{ description, assignedTo? }` |
+| `nexus.todo.list` | List all todos | `{}` |
+| `nexus.todo.complete` | Complete a todo | `{ id }` |
+| `nexus.todo.stats` | Todo statistics | `{}` |
+| `nexus.goal.set` | Set a goal | `{ description, autoContinue? }` |
+| `nexus.goal.status` | Current goal status | `{}` |
+| `nexus.goal.complete` | Complete goal | `{}` |
+| `nexus.goal.list` | List all goals | `{}` |
+| `nexus.team.create` | Create a team | `{ name, leadRole }` |
+| `nexus.team.addMember` | Add team member | `{ teamId, role, model }` |
+| `nexus.team.status` | Team status | `{ teamId? }` |
+| `nexus.team.activate` | Start team | `{ teamId }` |
+| `nexus.performance.scores` | Performance scores | `{}` |
+| `nexus.performance.best` | Best model for role | `{ role }` |
+| `nexus.history.list` | Execution history | `{ count? }` |
+| `nexus.history.stats` | Execution statistics | `{}` |
+| `nexus.astgrep.search` | Search AST patterns | `{ pattern, language, directory }` |
+| `nexus.astgrep.status` | Check ast-grep install | `{}` |
+| `nexus.security.scan` | Scan for security issues | `{ content, filename? }` |
+| `nexus.clarify` | Ask clarifying question | `{ question, options?, assumption? }` |
+| `nexus.worktree.enable` | Enable worktree isolation | `{ repoRoot? }` |
+| `nexus.worktree.list` | List worktrees | `{}` |
+| `nexus.worktree.disable` | Disable worktrees | `{}` |
 
 ---
 
@@ -346,100 +306,59 @@ nexus.worktree.disable()  — Clean up all
 
 | Command | Alias | Description |
 |---------|-------|-------------|
-| `/nexus` | — | Open full configuration dialog |
+| `/nexus` | `Ctrl+N` | Open full configuration dialog |
+| `/nexus web` | `/nw` | Start web dashboard |
+| `/nexus review` | `/nr` | Quick code review |
+| `/nexus fix` | `/nf` | Quick fix for last error |
+| `/nexus explain` | `/ne` | Explain last change |
 | `/nexus config` | `/nc` | Configure models & budget |
-| `/nexus dashboard` | `/nd` | Show dashboard with models, budget, commands |
 | `/nexus model` | `/nm` | Select model for a role |
 | `/nexus status` | `/ns` | Show config summary |
 | `/nexus reset` | — | Reset all settings to defaults |
-
-**Keyboard shortcut:** `Ctrl+N` opens the main configuration dialog.
-
----
-
-## Tools
-
-Register these tools in your agent prompts:
-
-| Tool | Description | Input |
-|------|-------------|-------|
-| `nexus.status` | Orchestrator status | `{ detailed?: boolean }` |
-| `nexus.agents` | List spawned agents | `{ filter?: string }` |
-| `nexus.costs` | Cost report & budget | `{}` |
-| `nexus.dashboard` | Full state for dashboard | `{}` |
-| `nexus.spawn` | Spawn a sub-agent | `{ role: string, task: string, model?: string }` |
-| `nexus.queue` | Show task queue with priorities | `{}` |
-| `nexus.config.save` | Save config to disk | `{ level: 'project' \| 'global' }` |
-| `nexus.config.init` | Initialize config files | `{ level: 'project' \| 'global' \| 'both' }` |
-| `nexus.dashboard.start` | Start web dashboard | `{ port?: number, host?: string }` |
-| `nexus.dashboard.stop` | Stop web dashboard | `{}` |
-| `nexus.preset` | Apply preset config | `{ name: string }` |
-| `nexus.template` | List/instantiate templates | `{ name?: string, baseDir?: string }` |
-| `nexus.model.costs` | Show/set model pricing | `{ model?: string, setInput?: number, setOutput?: number }` |
-| `nexus.security.scan` | Scan code for security issues | `{ content: string, filename?: string }` |
-| `nexus.roles.list` | List custom agent roles | `{}` |
-| `nexus.roles.add` | Add a custom role | `{ name, displayName, prompt, emoji?, model? }` |
-| `nexus.history.list` | List execution history | `{ count?: number }` |
-| `nexus.history.stats` | Execution statistics | `{}` |
-| `nexus.forecast` | Predict costs before execution | `{ tasks: string }` |
-| `nexus.performance.scores` | Model/role performance scores | `{}` |
-| `nexus.performance.best` | Best model for a role | `{ role: string }` |
-| `nexus.worktree.enable` | Enable git worktree isolation | `{ repoRoot?: string }` |
-| `nexus.worktree.list` | List active worktrees | `{}` |
-| `nexus.worktree.disable` | Disable and clean up | `{}` |
-
-### Tool Examples
-
-```
-# Spawn a coder agent with complexity analysis
-Use nexus.spawn with role="coder" and task="Implement JWT auth middleware"
-# → 💻 Coder — anthropic/claude-sonnet-4-6
-# → 📊 Complexity: 45/100 (low risk)
-
-# Check status
-Use nexus.status with detailed=true
-
-# Apply a preset
-Use nexus.preset with name="balanced"
-
-# Initialize config
-Use nexus.config.init with level="project"
-
-# Start web dashboard
-Use nexus.dashboard.start with port=4747
-```
 
 ---
 
 ## Configuration
 
-### Agent Models (TUI)
+### Agent Models
 
 Configure via `/nexus` or `Ctrl+N`:
 
 ```
-🏗️ Architect: anthropic/claude-sonnet-4-6
-💻 Coder:     anthropic/claude-sonnet-4-6
-🔍 Reviewer:  openai/gpt-5-mini
-🧪 Tester:    anthropic/claude-haiku-4-5
-🔬 Explorer:  google/gemini-2.5-flash
-📝 Documenter: anthropic/claude-haiku-4-5
+🏗️ Architect: opencode/muse-spark-1.3-contributor-free
+💻 Coder:     opencode/mimo-v2.6-flash-free
+🔍 Reviewer:  opencode/muse-spark-1.2-contributor-free
+🧪 Tester:    opencode-go/mimo-v2.5
+🔬 Explorer:  opencode/big-pickle
+📝 Documenter: opencode/big-pickle
 ```
 
-### Budget
+### Custom Roles
+
+Define your own agent roles:
+
+```jsonc
+{
+  "customRoles": [
+    {
+      "name": "security-auditor",
+      "displayName": "Security Auditor",
+      "emoji": "🔐",
+      "prompt": "You are a security auditor...",
+      "model": "anthropic/claude-sonnet-4-6"
+    }
+  ]
+}
+```
+
+### Task Templates
 
 ```
-💰 Max Total: $10.00
-   Max Per Task: $1.00
-   Alert Threshold: 20%
-```
-
-### Self-Healing
-
-```
-🛡️ Enabled: ✅
-   Max Retries: 3
-   Context Transfer: ✅
+nexus.template(name="list")      — Show available templates
+nexus.template(name="feature")   — Full feature pipeline
+nexus.template(name="bugfix")    — Bug investigation and fix
+nexus.template(name="refactor")  — Code refactoring pipeline
+nexus.template(name="documentation") — Documentation update
 ```
 
 ---
@@ -447,67 +366,49 @@ Configure via `/nexus` or `Ctrl+N`:
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        NEXUS PLUGIN                              │
-│                                                                 │
-│  ┌──────────────────────────────────────────────────┐          │
-│  │              SERVER PLUGIN (index.ts)              │          │
-│  │  • 12 tool registrations (spawn, status, costs,   │          │
-│  │    dashboard, config, preset, template, queue)    │          │
-│  │  • Session hook for /nexus commands               │          │
-│  │  • State persistence to storage                   │          │
-│  └──────────────────────────────────────────────────┘          │
-│                                                                 │
-│  ┌──────────────────────────────────────────────────┐          │
-│  │            ORCHESTRATOR (orchestrator.ts)          │          │
-│  │  • Real OpenCode session creation                  │          │
-│  │  • DAG-based task execution with priority          │          │
-│  │  • Cost-aware model routing (scored selection)     │          │
-│  │  • Self-healing with escalation policies           │          │
-│  │  • Context transfer to respawned agents            │          │
-│  │  • Cycle detection for deadlock prevention         │          │
-│  │  • Performance: lazy init, debounce, cleanup       │          │
-│  └──────────────────────────────────────────────────┘          │
-│                                                                 │
-│  ┌──────────────────────────────────────────────────┐          │
-│  │              MODULES                               │          │
-│  │  ┌────────────┐ ┌──────────┐ ┌────────────────┐  │          │
-│  │  │ Health     │ │ Learning │ │ Message Store  │  │          │
-│  │  │ Monitor    │ │ Module   │ │ (JSONL+SQLite) │  │          │
-│  │  └────────────┘ └──────────┘ └────────────────┘  │          │
-│  │  ┌────────────┐ ┌──────────┐ ┌────────────────┐  │          │
-│  │  │ Persistent │ │ Fan-Out  │ │ Notifications  │  │          │
-│  │  │ Memory     │ │ Router   │ │ (OS native)    │  │          │
-│  │  └────────────┘ └──────────┘ └────────────────┘  │          │
-│  │  ┌────────────┐ ┌──────────┐                      │          │
-│  │  │ State      │ │ Module   │                      │          │
-│  │  │ Broadcaster│ │ Registry │                      │          │
-│  │  └────────────┘ └──────────┘                      │          │
-│  └──────────────────────────────────────────────────┘          │
-│                                                                 │
-│  ┌──────────────────────────────────────────────────┐          │
-│  │              WEB DASHBOARD                         │          │
-│  │  • Bun.serve() HTTP + WebSocket (port 4747)       │          │
-│  │  • REST: /api/state, /api/config, /api/agents     │          │
-│  │  • WebSocket: /ws/events (real-time updates)      │          │
-│  │  • SPA: Agent grid, DAG viz, cost tracker         │          │
-│  └──────────────────────────────────────────────────┘          │
-│                                                                 │
-│  ┌──────────────────────────────────────────────────┐          │
-│  │              CONFIG                                │          │
-│  │  • JSONC file loading (project + global)           │          │
-│  │  • Config creation and initialization              │          │
-│  │  • Preset configurations (4 presets)               │          │
-│  │  • Task templates (feature, bugfix, refactor)      │          │
-│  └──────────────────────────────────────────────────┘          │
-│                                                                 │
-│  ┌──────────────────────────────────────────────────┐          │
-│  │              TUI PLUGIN (tui.tsx)                  │          │
-│  │  • /nexus slash commands                           │          │
-│  │  • Configuration dialogs (model selection)         │          │
-│  │  • Keyboard shortcut (Ctrl+N)                      │          │
-│  └──────────────────────────────────────────────────┘          │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                      NEXUS PLUGIN                            │
+│                                                              │
+│  ┌────────────────────────────────────────────────────┐     │
+│  │              SERVER PLUGIN (index.ts)                │     │
+│  │  • 40+ tool registrations                            │     │
+│  │  • Auto-creates agents and enables LSP              │     │
+│  │  • Config file loading and creation                 │     │
+│  └────────────────────────────────────────────────────┘     │
+│                                                              │
+│  ┌────────────────────────────────────────────────────┐     │
+│  │            ORCHESTRATOR (orchestrator.ts)            │     │
+│  │  • Real OpenCode session creation                    │     │
+│  │  • DAG execution with priority queuing               │     │
+│  │  • Cost-aware model routing (scored selection)       │     │
+│  │  • Self-healing with 4-step escalation               │     │
+│  │  • Context transfer to respawned agents              │     │
+│  │  • Deadlock detection (cycle finding)                │     │
+│  │  • Todo/Goal tracking                                │     │
+│  │  • Team management                                   │     │
+│  └────────────────────────────────────────────────────┘     │
+│                                                              │
+│  ┌────────────────────────────────────────────────────┐     │
+│  │                    MODULES                          │     │
+│  │  Health Monitor │ Learning │ Message Store (SQLite) │     │
+│  │  Persistent Mem │ Fan-Out  │ Notifications (OS)     │     │
+│  │  State Broadcaster │ Module Registry │ Security     │     │
+│  │  Cost Forecaster │ Performance Tracker │ AST-Grep   │     │
+│  └────────────────────────────────────────────────────┘     │
+│                                                              │
+│  ┌────────────────────────────────────────────────────┐     │
+│  │              WEB DASHBOARD                          │     │
+│  │  • Bun.serve() HTTP + WebSocket (port 4747)         │     │
+│  │  • DAG viz, cost chart, config editor, auto-refresh │     │
+│  └────────────────────────────────────────────────────┘     │
+│                                                              │
+│  ┌────────────────────────────────────────────────────┐     │
+│  │              AGENTS (auto-created)                   │     │
+│  │  nexus-orchestrator (primary)                       │     │
+│  │  nexus-architect, nexus-coder, nexus-reviewer        │     │
+│  │  nexus-tester, nexus-explorer, nexus-documenter      │     │
+│  └────────────────────────────────────────────────────┘     │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ---
