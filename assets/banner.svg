@@ -161,5 +161,5 @@
   
   <!-- Bottom bar -->
   <rect x="0" y="380" width="1200" height="20" fill="#0f0f23" opacity="0.8"/>
-  <text x="600" y="395" text-anchor="middle" fill="#6366f1" font-family="monospace" font-size="12" font-weight="500">@serkanalgur/opencode-nexus • v1.0.0 • MIT License</text>
+  <text x="600" y="395" text-anchor="middle" fill="#6366f1" font-family="monospace" font-size="12" font-weight="500">@serkanalgur/opencode-nexus • MIT License</text>
 </svg>
