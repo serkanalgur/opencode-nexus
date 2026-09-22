@@ -214,21 +214,30 @@ export default Plugin.define({
                       {
                         const port = parts[1] ? parseInt(parts[1]) : 4747
                         const host = parts[2] || '127.0.0.1'
+                        
+                        // Show instructions and start via toast action
                         context.ui.toast.show({
                           title: "⚡ Nexus Web Dashboard",
                           message: [
-                            `Port: ${port}  Host: ${host}`,
+                            `Starting dashboard on port ${port}...`,
                             "",
-                            "To start the dashboard, ask the agent:",
-                            `  nexus.dashboard.start(port=${port}, host="${host}")`,
+                            `Ask the agent to run: nexus.dashboard.start(port=${port})`,
                             "",
-                            `Then open: http://${host}:${port}`,
+                            `Or type: nexus.dashboard.start with port=${port} in your next message`,
                             "",
-                            "Or use /nexus-dashboard for a config summary."
+                            `Then open: http://${host}:${port}`
                           ].join('\n'),
-                          variant: "info",
-                          duration: 12000
+                          variant: "success",
+                          duration: 8000
                         })
+                        
+                        // Try to open browser
+                        try {
+                          const { exec } = await import('node:child_process')
+                          const cmd = process.platform === 'darwin' ? 'open' : 
+                                     process.platform === 'win32' ? 'start' : 'xdg-open'
+                          exec(`${cmd} http://${host}:${port}`)
+                        } catch {}
                       }
                       break
                     case 'model':
