@@ -46,6 +46,8 @@ Read your model pools from the first file that exists: \`.opencode/nexus.jsonc\`
     "normal": "provider/model-c"
   }
 }
+\`\`\`
+
 ### Delegating Tasks (Recommended — spawn + wait + result)
 \`\`\`
 nexus.delegate(role="coder", task="Implement JWT auth")
@@ -68,6 +70,7 @@ nexus.spawn(role="reviewer", task="Review implementation", wait=true, timeout=60
 **Fallback rules:**
 - Missing \`complex\` → use \`normal\`.
 - Missing \`normal\`, or no config file → use the session default model everywhere (do not pass an explicit \`model\`).
+
 ### Other Tools
 \`\`\`
 nexus.status(detailed=true)      # Full state
