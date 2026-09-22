@@ -336,6 +336,41 @@ export default Plugin.define({
       })
 
       editor.add({
+        name: "performance.scores",
+        description: "Show agent performance scores by model and role",
+        input: {
+          type: "object",
+          properties: {},
+          additionalProperties: false
+        },
+        execute: async () => {
+          const scores = orchestrator.performanceTracker.getScores()
+          if (scores.length === 0) return { content: "No performance data yet. Scores build up as tasks are executed." }
+          const lines = scores.map(s => `${s.role}/${s.model}: score=${s.overallScore.toFixed(1)} success=${(s.successRate*100).toFixed(0)}% avg=$${s.avgCost.toFixed(4)} (${s.totalTasks} tasks)`)
+          return { content: lines.join('\n') }
+        }
+      })
+
+      editor.add({
+        name: "performance.best",
+        description: "Get best model for a specific role",
+        input: {
+          type: "object",
+          properties: {
+            role: { type: "string", description: "Agent role to find best model for" }
+          },
+          required: ["role"],
+          additionalProperties: false
+        },
+        execute: async (input: unknown) => {
+          const { role } = input as { role: string }
+          const best = orchestrator.performanceTracker.getBestModel(role)
+          if (!best) return { content: `No performance data for role '${role}' yet.` }
+          return { content: `Best for ${role}: ${best.model} (score: ${best.overallScore.toFixed(1)}, success: ${(best.successRate*100).toFixed(0)}%, avg cost: $${best.avgCost.toFixed(4)})` }
+        }
+      })
+
+      editor.add({
         name: "security.scan",
         description: "Scan content for security issues",
         input: {
@@ -393,3 +428,5 @@ export { ModuleRegistry } from "./modules"
 export type { NexusModule, ModuleContext, ModuleTool, ModuleHook } from "./modules"
 export { SecurityScanner } from "./security"
 export type { SecurityIssue, SecurityScanResult, SecurityConfig } from "./security"
+export { PerformanceTracker } from "./performance"
+export type { PerformanceEntry, PerformanceScore } from "./performance"

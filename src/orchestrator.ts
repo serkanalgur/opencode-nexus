@@ -16,6 +16,7 @@ import { NotificationManager } from "./notifications"
 import { LearningModule } from "./learning"
 import { ModuleRegistry, type ModuleContext } from "./modules"
 import { SecurityScanner } from "./security"
+import { PerformanceTracker } from "./performance"
 
 export interface ModelScore {
   model: string
@@ -142,6 +143,9 @@ export class NexusOrchestrator {
   // Security scanner for task output scanning
   public securityScanner: SecurityScanner
 
+  // Performance tracker for model/role scoring
+  public performanceTracker: PerformanceTracker
+
   // State update callback
   private onStateChange: (() => void) | null = null
 
@@ -187,6 +191,9 @@ export class NexusOrchestrator {
 
     // Initialize security scanner
     this.securityScanner = new SecurityScanner()
+
+    // Initialize performance tracker
+    this.performanceTracker = new PerformanceTracker()
   }
 
   /**
@@ -698,6 +705,16 @@ export class NexusOrchestrator {
       this.costByAgent.set(agent.id, (this.costByAgent.get(agent.id) || 0) + result.cost)
       this.checkBudget()
 
+      // Record performance metrics
+      this.performanceTracker.record({
+        model: agent.model.model,
+        role: node.task.requiredRole,
+        success: result.success,
+        duration: result.duration,
+        cost: result.cost,
+        tokensUsed: result.tokensUsed
+      })
+
       // Notify on task completion
       if (this.notifications?.isEnabled()) {
         this.notifications.notify({ title: 'Nexus: Task Complete', body: `${node.task.name} completed successfully` })
@@ -734,6 +751,16 @@ export class NexusOrchestrator {
 
       this.dag!.markFailed(node.id, new Error(result.error!))
       agent.metrics.tasksFailed++
+
+      // Record performance metrics for failed task
+      this.performanceTracker.record({
+        model: agent.model.model,
+        role: node.task.requiredRole,
+        success: result.success,
+        duration: result.duration,
+        cost: result.cost,
+        tokensUsed: result.tokensUsed
+      })
 
       // Self-healing: retry or respawn
       if (this.config.selfHealing.enabled) {
