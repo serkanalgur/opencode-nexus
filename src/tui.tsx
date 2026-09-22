@@ -8,6 +8,9 @@ export default Plugin.define({
     const configManager = new NexusConfigManager()
 
     // Model selection handler
+    // Persistent save scope for the config session
+    let configSaveScope: 'project' | 'global' = 'global'
+
     const handleModelSelect = async (role: string) => {
       if (!configManager.getRoles().includes(role)) {
         context.ui.toast.show({
@@ -43,32 +46,16 @@ export default Plugin.define({
 
       if (selected !== null && selected !== undefined) {
         configManager.setModel(role, selected)
+        persistConfig()
+      }
+    }
 
-        // Ask where to save
-        const saveTarget = await context.ui.dialog.select({
-          title: "Save to where?",
-          options: [
-            { title: "📁 Project (.opencode/)", value: "project", description: "This project only" },
-            { title: "🌍 Global (~/.config/opencode/)", value: "global", description: "All projects" }
-          ]
-        })
-
-        if (saveTarget === 'project') {
-          const basePath = process.cwd()
-          configManager.saveProjectConfig(basePath)
-          context.ui.toast.show({
-            title: "Nexus",
-            message: `${role} → ${selected || 'default'} (saved to .opencode/)`,
-            variant: "success"
-          })
-        } else {
-          configManager.saveGlobalConfig()
-          context.ui.toast.show({
-            title: "Nexus",
-            message: `${role} → ${selected || 'default'} (saved to ~/.config/opencode/)`,
-            variant: "success"
-          })
-        }
+    // Persist config to the selected scope
+    const persistConfig = () => {
+      if (configSaveScope === 'project') {
+        configManager.saveProjectConfig(process.cwd())
+      } else {
+        configManager.saveGlobalConfig()
       }
     }
 
@@ -85,23 +72,7 @@ export default Plugin.define({
           configManager.updateStorageConfig({
             budget: { ...config.budget, maxTotalCost: budget }
           })
-
-          // Ask where to save
-          const saveTarget = await context.ui.dialog.select({
-            title: "Save budget to where?",
-            options: [
-              { title: "📁 Project (.opencode/)", value: "project", description: "This project only" },
-              { title: "🌍 Global (~/.config/opencode/)", value: "global", description: "All projects" }
-            ]
-          })
-
-          if (saveTarget === 'project') {
-            const basePath = process.cwd()
-            configManager.saveProjectConfig(basePath)
-          } else {
-            configManager.saveGlobalConfig()
-          }
-
+          persistConfig()
           context.ui.toast.show({
             title: "Nexus",
             message: `Budget updated: $${budget}`,
@@ -113,13 +84,23 @@ export default Plugin.define({
 
     // All-in-one config handler
     const handleFullConfig = async () => {
+      // Ask scope once at the beginning
+      const scope = await context.ui.dialog.select({
+        title: "Where to save config?",
+        options: [
+          { title: "📁 Project (.opencode/)", value: "project", description: "This project only" },
+          { title: "🌍 Global (~/.config/opencode/)", value: "global", description: "All projects" }
+        ]
+      })
+      configSaveScope = (scope === 'project' ? 'project' : 'global') as 'project' | 'global'
+
       for (const role of configManager.getRoles()) {
         await handleModelSelect(role)
       }
       await handleConfigDialog()
       context.ui.toast.show({
         title: "Nexus",
-        message: "Configuration complete!",
+        message: `Configuration complete! (saved to ${configSaveScope === 'project' ? '.opencode/' : '~/.config/opencode/'})`,
         variant: "success"
       })
     }
