@@ -7,6 +7,7 @@ import type {
 import { NexusConfigManager } from "./config"
 import { StateBroadcaster } from "./broadcast"
 import { DashboardModule } from "./dashboard"
+import { HealthMonitor } from "./health"
 
 export interface ModelScore {
   model: string
@@ -83,6 +84,9 @@ export class NexusOrchestrator {
   // Dashboard server
   public dashboard: DashboardModule | null = null
 
+  // Health monitor
+  public healthMonitor: HealthMonitor | null = null
+
   // State update callback
   private onStateChange: (() => void) | null = null
 
@@ -101,6 +105,11 @@ export class NexusOrchestrator {
 
     // Load project/global config files from disk
     this.configManager.loadFromPath(process.cwd())
+
+    // Initialize health monitor
+    this.healthMonitor = new HealthMonitor({
+      checkInterval: this.config.agents.healthCheckInterval
+    })
   }
 
   /**
@@ -617,6 +626,11 @@ export class NexusOrchestrator {
     this.emit('agent:spawned', agent)
     this.notifyStateChange()
 
+    // Start health monitoring if not already running
+    if (this.healthMonitor && !this.healthMonitor.isActive()) {
+      this.healthMonitor.start(() => Array.from(this.agents.values()))
+    }
+
     return agent
   }
 
@@ -627,6 +641,11 @@ export class NexusOrchestrator {
       this.agents.delete(agentId)
       this.emit('agent:terminated', agent)
       this.notifyStateChange()
+
+      // Stop health monitoring if no more agents
+      if (this.healthMonitor && this.agents.size === 0) {
+        this.healthMonitor.stop()
+      }
     }
   }
 
@@ -905,6 +924,7 @@ export class NexusOrchestrator {
   }
 
   shutdown(): void {
+    this.healthMonitor?.stop()
     this.stopDashboard()
     this.agents.forEach((agent) => {
       agent.status = 'terminated'
