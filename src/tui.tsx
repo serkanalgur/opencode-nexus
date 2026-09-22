@@ -43,13 +43,32 @@ export default Plugin.define({
 
       if (selected !== null && selected !== undefined) {
         configManager.setModel(role, selected)
-        // Persist to disk immediately so selections survive restart
-        configManager.saveGlobalConfig()
-        context.ui.toast.show({
-          title: "Nexus",
-          message: `${role} → ${selected || 'default'}`,
-          variant: "success"
+
+        // Ask where to save
+        const saveTarget = await context.ui.dialog.select({
+          title: "Save to where?",
+          options: [
+            { title: "📁 Project (.opencode/)", value: "project", description: "This project only" },
+            { title: "🌍 Global (~/.config/opencode/)", value: "global", description: "All projects" }
+          ]
         })
+
+        if (saveTarget === 'project') {
+          const basePath = process.cwd()
+          configManager.saveProjectConfig(basePath)
+          context.ui.toast.show({
+            title: "Nexus",
+            message: `${role} → ${selected || 'default'} (saved to .opencode/)`,
+            variant: "success"
+          })
+        } else {
+          configManager.saveGlobalConfig()
+          context.ui.toast.show({
+            title: "Nexus",
+            message: `${role} → ${selected || 'default'} (saved to ~/.config/opencode/)`,
+            variant: "success"
+          })
+        }
       }
     }
 
@@ -66,8 +85,23 @@ export default Plugin.define({
           configManager.updateStorageConfig({
             budget: { ...config.budget, maxTotalCost: budget }
           })
-          // Persist to disk immediately
-          configManager.saveGlobalConfig()
+
+          // Ask where to save
+          const saveTarget = await context.ui.dialog.select({
+            title: "Save budget to where?",
+            options: [
+              { title: "📁 Project (.opencode/)", value: "project", description: "This project only" },
+              { title: "🌍 Global (~/.config/opencode/)", value: "global", description: "All projects" }
+            ]
+          })
+
+          if (saveTarget === 'project') {
+            const basePath = process.cwd()
+            configManager.saveProjectConfig(basePath)
+          } else {
+            configManager.saveGlobalConfig()
+          }
+
           context.ui.toast.show({
             title: "Nexus",
             message: `Budget updated: $${budget}`,
