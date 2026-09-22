@@ -12,6 +12,7 @@ import { MessageStore, type MessageStoreConfig } from "./message-store"
 import { PersistentMemoryStore, type MemoryStoreConfig } from "./memory-store"
 import { HealthMonitor } from "./health"
 import { MessageRouter } from "./fanout"
+import { LearningModule } from "./learning"
 
 export interface ModelScore {
   model: string
@@ -123,6 +124,9 @@ export class NexusOrchestrator {
   // Health monitor
   public healthMonitor: HealthMonitor | null = null
 
+  // Learning module for pattern recognition
+  public learning: LearningModule
+
   // Escalation policy for self-healing
   private escalationPolicy: EscalationPolicy
 
@@ -147,6 +151,9 @@ export class NexusOrchestrator {
       retryDelay: this.config.selfHealing.retryDelay,
       enableRespawn: this.config.selfHealing.contextTransfer
     }
+
+    // Initialize learning module with config min confidence
+    this.learning = new LearningModule(this.config.learning.minConfidence)
   }
 
   /**
@@ -572,6 +579,12 @@ export class NexusOrchestrator {
       this.costByAgent.set(agent.id, (this.costByAgent.get(agent.id) || 0) + result.cost)
       this.checkBudget()
 
+      // Record learning success if there was a prior failure pattern for this task
+      const priorPattern = this.learning.findSolutions(`task ${node.id} failed`)
+      if (priorPattern.length > 0) {
+        this.learning.recordSuccess(priorPattern[0].entry.id)
+      }
+
     } catch (error: any) {
       const duration = Date.now() - startTime
       const result: TaskResult = {
@@ -655,6 +668,12 @@ export class NexusOrchestrator {
   private async handleFailure(agent: Agent, node: DAGNode, error: Error): Promise<void> {
     const policy = this.escalationPolicy
     const retryCount = this.nodeRetryCounts.get(node.id) || 0
+
+    // Record the failure pattern for learning
+    const pattern = error.message || 'Unknown error'
+    const solution = `Retry (attempt ${retryCount + 1}/${policy.maxRetries})`
+    const context = `during ${node.task.requiredRole} task "${node.task.name}"`
+    this.learning.recordFailure(pattern, solution, context, [node.task.requiredRole])
 
     // Step 1: Retry with exponential backoff
     if (retryCount < policy.maxRetries) {
