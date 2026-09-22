@@ -12,6 +12,7 @@ import { MessageStore, type MessageStoreConfig } from "./message-store"
 import { PersistentMemoryStore, type MemoryStoreConfig } from "./memory-store"
 import { HealthMonitor } from "./health"
 import { MessageRouter } from "./fanout"
+import { NotificationManager } from "./notifications"
 
 export interface ModelScore {
   model: string
@@ -132,6 +133,9 @@ export class NexusOrchestrator {
   // State update callback
   private onStateChange: (() => void) | null = null
 
+  // OS notification manager
+  public notifications: NotificationManager | null = null
+
   constructor(config?: Partial<NexusConfig>, messageStoreConfig?: Partial<MessageStoreConfig>, memoryStoreConfig?: Partial<MemoryStoreConfig>) {
     this.config = this.mergeConfig(config)
     this.budget = this.config.budget
@@ -163,6 +167,9 @@ export class NexusOrchestrator {
     this.healthMonitor = new HealthMonitor({
       checkInterval: this.config.agents.healthCheckInterval
     })
+
+    // Initialize notification manager
+    this.notifications = new NotificationManager(true)
   }
 
   /**
@@ -572,6 +579,11 @@ export class NexusOrchestrator {
       this.costByAgent.set(agent.id, (this.costByAgent.get(agent.id) || 0) + result.cost)
       this.checkBudget()
 
+      // Notify on task completion
+      if (this.notifications?.isEnabled()) {
+        this.notifications.notify({ title: 'Nexus: Task Complete', body: `${node.task.name} completed successfully` })
+      }
+
     } catch (error: any) {
       const duration = Date.now() - startTime
       const result: TaskResult = {
@@ -702,6 +714,10 @@ export class NexusOrchestrator {
     // Step 4: Alert and mark as failed
     if (policy.alertOnFailure) {
       this.emit('agent:escalation', { agentId: agent.id, taskId: node.id, error: error.message })
+      // Notify on final failure
+      if (this.notifications?.isEnabled()) {
+        this.notifications.notify({ title: 'Nexus: Task Failed', body: `${node.task.name} failed: ${error.message}`, sound: true })
+      }
     }
 
     node.status = 'failed'
@@ -969,6 +985,10 @@ export class NexusOrchestrator {
 
     if (remainingPercent <= this.config.budget.alertThreshold) {
       this.emit('budget:alert', { remaining, remainingPercent })
+      // Notify on budget alert
+      if (this.notifications?.isEnabled()) {
+        this.notifications.notify({ title: 'Nexus: Budget Alert', body: `Budget low: $${remaining.toFixed(2)} remaining (${(remainingPercent * 100).toFixed(1)}%)`, sound: true })
+      }
     }
 
     if (this.budget.hardLimit && remaining <= 0 && !this.budgetExceeded) {
