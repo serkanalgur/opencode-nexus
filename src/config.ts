@@ -2,9 +2,9 @@
 // Supports project-level and global configuration with precedence
 
 import type { NexusConfig } from "./types"
-import { readFileSync } from "node:fs"
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { join, dirname } from "node:path"
 
 export interface NexusModelConfig {
   architect?: string
@@ -257,6 +257,103 @@ export class NexusConfigManager {
   // Import config from storage
   importConfig(config: NexusFullConfig): void {
     this.storageConfig = { ...config }
+  }
+
+  /**
+   * Write a partial config to a JSONC file on disk.
+   * Creates parent directories recursively if needed.
+   */
+  writeJsoncFile(filePath: string, config: Partial<NexusFullConfig>): void {
+    const dir = dirname(filePath)
+    mkdirSync(dir, { recursive: true })
+
+    const jsonc = [
+      '// Nexus Configuration — https://github.com/serkanalgur/opencode-nexus',
+      '// Precedence: this file > global config > TUI settings > defaults',
+      '',
+      JSON.stringify(config, null, 2)
+    ].join('\n')
+
+    writeFileSync(filePath, jsonc + '\n', 'utf-8')
+  }
+
+  /**
+   * Save project-level config to disk.
+   * Writes to `{basePath}/.opencode/nexus.jsonc` with only non-default values.
+   */
+  saveProjectConfig(basePath: string): void {
+    const projectPath = join(basePath, '.opencode', 'nexus.jsonc')
+    const config = this.getNonDefaultConfig()
+    this.writeJsoncFile(projectPath, config)
+  }
+
+  /**
+   * Save global-level config to disk.
+   * Writes to `~/.config/opencode/nexus.jsonc` with only non-default values.
+   */
+  saveGlobalConfig(): void {
+    const globalPath = join(homedir(), '.config', 'opencode', 'nexus.jsonc')
+    const config = this.getNonDefaultConfig()
+    this.writeJsoncFile(globalPath, config)
+  }
+
+  /**
+   * Save config at the specified level.
+   * @param level - 'project' or 'global'
+   * @param basePath - Project root directory (required for project level)
+   */
+  saveConfig(level: 'project' | 'global', basePath?: string): void {
+    if (level === 'project') {
+      this.saveProjectConfig(basePath || process.cwd())
+    } else {
+      this.saveGlobalConfig()
+    }
+  }
+
+  /**
+   * Extract only values that differ from defaults.
+   * Produces a clean config file without redundant default values.
+   */
+  private getNonDefaultConfig(): Partial<NexusFullConfig> {
+    const current = this.getConfig()
+    const result: Partial<NexusFullConfig> = {}
+
+    // Models — include only if at least one role differs
+    const models: Partial<NexusModelConfig> = {}
+    for (const role of this.getRoles()) {
+      if (current.models[role] !== DEFAULT_CONFIG.models[role]) {
+        models[role] = current.models[role]
+      }
+    }
+    if (Object.keys(models).length > 0) {
+      result.models = models as NexusModelConfig
+    }
+
+    // Budget — include only changed fields
+    const budget: Partial<NexusFullConfig['budget']> = {}
+    const budgetKeys = ['maxTotalCost', 'maxCostPerTask', 'maxCostPerAgent', 'alertThreshold'] as const
+    for (const key of budgetKeys) {
+      if (current.budget[key] !== DEFAULT_CONFIG.budget[key]) {
+        budget[key] = current.budget[key]
+      }
+    }
+    if (Object.keys(budget).length > 0) {
+      result.budget = budget as NexusFullConfig['budget']
+    }
+
+    // Self-healing — include only changed fields
+    const selfHealing: Partial<NexusFullConfig['selfHealing']> = {}
+    const shKeys = ['enabled', 'maxRetries', 'contextTransfer'] as const
+    for (const key of shKeys) {
+      if (current.selfHealing[key] !== DEFAULT_CONFIG.selfHealing[key]) {
+        selfHealing[key] = current.selfHealing[key]
+      }
+    }
+    if (Object.keys(selfHealing).length > 0) {
+      result.selfHealing = selfHealing as NexusFullConfig['selfHealing']
+    }
+
+    return result
   }
 
   // Reset to defaults
