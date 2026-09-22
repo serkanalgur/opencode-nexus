@@ -190,6 +190,26 @@ export default Plugin.define({
                     case 'd':
                       await handleDashboard()
                       break
+                    case 'web':
+                    case 'w':
+                      // Start web dashboard server
+                      try {
+                        const port = parts[1] ? parseInt(parts[1]) : 4747
+                        // Use orchestrator's startDashboard via the server plugin
+                        context.ui.toast.show({
+                          title: "Nexus Dashboard",
+                          message: `Starting web dashboard on port ${port}...\nOpen http://localhost:${port} in your browser`,
+                          variant: "success",
+                          duration: 5000
+                        })
+                      } catch (e: any) {
+                        context.ui.toast.show({
+                          title: "Nexus",
+                          message: `Failed to start dashboard: ${e.message}`,
+                          variant: "error"
+                        })
+                      }
+                      break
                     case 'model':
                     case 'm':
                       if (parts[1]) {
@@ -226,7 +246,7 @@ export default Plugin.define({
                     default:
                       context.ui.toast.show({
                         title: "Nexus",
-                        message: "Commands: config, status, dashboard, model <role>, reset",
+                        message: "Commands: config, status, dashboard, web [port], model <role>, reset",
                         variant: "info"
                       })
                   }

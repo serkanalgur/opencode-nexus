@@ -1,4 +1,5 @@
 import type { NexusOrchestrator } from "./orchestrator"
+import { join } from "node:path"
 
 export interface DashboardServer {
   port: number
@@ -75,7 +76,18 @@ export class DashboardModule {
             return jsonResponse({ ok: true, uptime: process.uptime() })
           }
 
-          // Default response
+          // Default: serve SPA
+          try {
+            const spaPath = join(process.cwd(), 'dashboard', 'index.html')
+            const spaFile = Bun.file(spaPath)
+            const exists = spaFile.size > 0
+            if (exists) {
+              return new Response(spaFile, {
+                headers: { "Content-Type": "text/html; charset=utf-8", ...CORS_HEADERS }
+              })
+            }
+          } catch {}
+
           return new Response("Nexus Dashboard API", {
             headers: {
               "Content-Type": "text/plain",
