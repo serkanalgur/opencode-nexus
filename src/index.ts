@@ -1,5 +1,6 @@
 import { Plugin } from "@opencode/plugin"
 import { NexusOrchestrator } from "./orchestrator"
+import { PRESETS } from "./config"
 
 export default Plugin.define({
   id: "nexus",
@@ -153,6 +154,28 @@ export default Plugin.define({
       })
 
       editor.add({
+        name: "preset",
+        description: "Apply a preset configuration",
+        input: {
+          type: "object",
+          properties: {
+            name: { type: "string", description: "Preset name (minimal, balanced, enterprise, cost-optimized)" }
+          },
+          required: ["name"],
+          additionalProperties: false
+        },
+        execute: async (input: unknown) => {
+          const { name } = input as { name: string }
+          try {
+            orchestrator.configManager.applyPreset(name)
+            return { content: `Applied preset: ${PRESETS[name]?.name || name}` }
+          } catch (error: any) {
+            return { content: `Error: ${error.message}` }
+          }
+        }
+      })
+
+      editor.add({
         name: "dashboard.start",
         description: "Start the web dashboard server",
         input: {
@@ -259,11 +282,11 @@ export default Plugin.define({
 
 export { NexusOrchestrator } from "./orchestrator"
 export { StateBroadcaster } from "./broadcast"
-export { NexusConfigManager, DEFAULT_CONFIG } from "./config"
+export { NexusConfigManager, DEFAULT_CONFIG, PRESETS } from "./config"
+export type { NexusModelConfig, NexusFullConfig, NexusPreset } from "./config"
 export { detectCycles } from "./dag"
 export { MessageStore } from "./message-store"
 export type { MessageStoreConfig } from "./message-store"
 export { HealthMonitor } from "./health"
 export type { HealthCheck, HealthConfig } from "./health"
-export type { NexusModelConfig, NexusFullConfig } from "./config"
 export type { Agent, Task, DAG, ExecutionRequest, ExecutionResult } from "./types"
