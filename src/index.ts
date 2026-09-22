@@ -48,12 +48,14 @@ nexus.result(sessionID="ses_xxx")  # Get output from completed agent
 
 ### Other Tools
 \`\`\`
-nexus.status(detailed=true)    # Full state
-nexus.costs()                  # Cost report
-nexus.forecast(tasks='[...]')  # Predict costs
-nexus.performance.scores()     # Performance data
-nexus.history.list(count=10)   # Execution history
-nexus.security.scan(content="...", filename="app.ts")  # Security scan
+nexus.status(detailed=true)      # Full state
+nexus.costs()                    # Cost report
+nexus.forecast(tasks='[...]')    # Predict costs
+nexus.performance.scores()       # Performance data
+nexus.history.list(count=10)     # Execution history
+nexus.security.scan(content="..", filename="app.ts")  # Security scan
+nexus.dashboard.start(port=4747) # Start web dashboard
+nexus.dashboard.stop()           # Stop web dashboard
 \`\`\`
 
 ## Task Decomposition Strategy
@@ -67,6 +69,19 @@ When given a development request:
 6. **Monitor** — nexus.sessions() to track progress
 7. **Review** — nexus.spawn(role="reviewer", wait=true)
 8. **Report** — Summarize outcomes
+
+## Web Dashboard
+
+Start the web dashboard to monitor agents, costs, and history in real-time:
+\`\`\`
+nexus.dashboard.start(port=4747, host="127.0.0.1")
+\`\`\`
+Then open http://127.0.0.1:4747 in your browser.
+
+Stop it when done:
+\`\`\`
+nexus.dashboard.stop()
+\`\`\`
 
 ## Quality Gates
 
