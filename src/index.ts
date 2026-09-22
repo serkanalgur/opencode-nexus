@@ -109,7 +109,13 @@ export default Plugin.define({
               text: task
             })
             await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(orchestrator.getState())))
-            return { content: `Spawned ${role} agent (${agent.id}) on session ${agent.sessionID}. Task sent.` }
+            const taskPreview = task.length > 80 ? task.substring(0, 77) + '...' : task
+            const output = [
+              `${agent.name}`,
+              `📋 Task: ${taskPreview}`,
+              `📎 Session: ${agent.sessionID}`
+            ].join('\n')
+            return { content: output }
           } catch (error: any) {
             return { content: `Failed to spawn agent: ${error.message}` }
           }

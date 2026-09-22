@@ -503,42 +503,27 @@ export class NexusOrchestrator {
     }
 
     const agentId = `agent-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
-    const displayName = `${config.role}-${agentId.slice(0, 8)}`
 
-    // Create a real OpenCode session
+    // Resolve model: override > config > default
+    const modelConfig = config.model || this.configManager.getModelForRole(config.role)
+    const slashIndex = modelConfig.indexOf('/')
+    const provider = slashIndex > -1 ? modelConfig.slice(0, slashIndex) : modelConfig
+    const modelName = slashIndex > -1 ? modelConfig.slice(slashIndex + 1) : modelConfig
+
+    // Build descriptive session title for TUI display
+    const roleEmoji = this.configManager.getRoleEmoji(config.role)
+    const title = `${roleEmoji} ${this.configManager.getRoleDisplayName(config.role)} — ${modelConfig}`
+
+    // Create session with agent and model params directly (most reliable method)
     const session = await this.ctx.session.create({
-      title: `[Nexus] ${displayName}`
+      title,
+      agent: 'build',
+      model: modelName ? { providerID: provider, id: modelName } : undefined,
     })
-
-    const modelConfig = this.configManager.getModelForRole(config.role)
-    const [provider, ...modelParts] = modelConfig.split('/')
-    const modelName = modelParts.join('/')
-
-    // Switch to the appropriate agent for this session
-    try {
-      await this.ctx.session.switchAgent({
-        sessionID: session.id,
-        agent: config.role === 'architect' ? 'build' : config.role === 'reviewer' ? 'build' : 'build'
-      })
-    } catch {
-      // Fallback to default agent if role-specific agent doesn't exist
-    }
-
-    // Switch model if configured
-    if (modelName) {
-      try {
-        await this.ctx.session.switchModel({
-          sessionID: session.id,
-          model: { providerID: provider, id: modelName }
-        })
-      } catch {
-        // Fallback to default model
-      }
-    }
 
     const agent: Agent = {
       id: agentId,
-      name: displayName,
+      name: title,
       role: config.role,
       status: 'idle',
       model: {
