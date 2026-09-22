@@ -5,6 +5,7 @@ import type {
   SpawnConfig, RecoveryAction, HealthStatus, NexusConfig, TaskResult
 } from "./types"
 import { NexusConfigManager } from "./config"
+import { StateBroadcaster } from "./broadcast"
 
 export interface OrchestratorState {
   running: boolean
@@ -65,6 +66,9 @@ export class NexusOrchestrator {
   // OpenCode context (set during initialization)
   public ctx: any = null
 
+  // WebSocket broadcaster (set via initBroadcaster)
+  public broadcaster: StateBroadcaster | null = null
+
   // State update callback
   private onStateChange: (() => void) | null = null
 
@@ -83,6 +87,20 @@ export class NexusOrchestrator {
 
     // Load project/global config files from disk
     this.configManager.loadFromPath(process.cwd())
+  }
+
+  /**
+   * Wire up the StateBroadcaster so that every notifyStateChange() call
+   * also triggers a throttled broadcast to WebSocket clients.
+   */
+  initBroadcaster(opts?: { throttleMs?: number }): void {
+    this.broadcaster = new StateBroadcaster(this, opts)
+    // Chain into the existing onStateChange callback
+    const previousOnStateChange = this.onStateChange
+    this.onStateChange = () => {
+      previousOnStateChange?.()
+      this.broadcaster?.broadcastState()
+    }
   }
 
   /**
