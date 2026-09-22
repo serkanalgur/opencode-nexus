@@ -10,6 +10,7 @@ export interface Agent {
   lastActivity: Date
   metrics: AgentMetrics
   sessionID?: string
+  complexity?: ComplexityScore
 }
 
 export type AgentRole = 

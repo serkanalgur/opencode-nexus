@@ -574,7 +574,7 @@ export class NexusOrchestrator {
 
   // === Complexity Analysis ===
 
-  private analyzeComplexity(task: Task): ComplexityScore {
+  analyzeComplexity(task: Task): ComplexityScore {
     const fileCount = task.files.include.length
     const codeLines = task.files.include.length * 50
     const dependencyDepth = task.dependencies.length
@@ -612,7 +612,7 @@ export class NexusOrchestrator {
 
   // === Model Selection ===
 
-  private selectModel(role: AgentRole, complexity: ComplexityScore): ModelSelection {
+  selectModel(role: AgentRole, complexity: ComplexityScore): ModelSelection {
     const configModel = this.configManager.getModelForRole(role)
     const [provider, ...modelParts] = configModel.split('/')
     const model = modelParts.join('/')
