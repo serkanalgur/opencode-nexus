@@ -189,7 +189,7 @@ export class NexusOrchestrator {
     this.cleanupInterval = setInterval(() => this.cleanupStaleData(), 300000)
 
     // Initialize health monitor
-    this.healthMonitor = new HealthMonitor({
+    this._healthMonitor = new HealthMonitor({
       checkInterval: this.config.agents.healthCheckInterval
     })
 
