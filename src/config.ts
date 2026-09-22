@@ -283,7 +283,7 @@ export class NexusConfigManager {
    */
   saveProjectConfig(basePath: string): void {
     const projectPath = join(basePath, '.opencode', 'nexus.jsonc')
-    const config = this.getNonDefaultConfig()
+    const config = this.getSaveableConfig()
     this.writeJsoncFile(projectPath, config)
   }
 
@@ -293,7 +293,7 @@ export class NexusConfigManager {
    */
   saveGlobalConfig(): void {
     const globalPath = join(homedir(), '.config', 'opencode', 'nexus.jsonc')
-    const config = this.getNonDefaultConfig()
+    const config = this.getSaveableConfig()
     this.writeJsoncFile(globalPath, config)
   }
 
@@ -329,47 +329,22 @@ export class NexusConfigManager {
   }
 
   /**
-   * Extract only values that differ from defaults.
-   * Produces a clean config file without redundant default values.
+   * Extract current config for saving.
+   * Always writes all model selections (not just non-defaults)
+   * so user choices are preserved across restarts.
    */
-  private getNonDefaultConfig(): Partial<NexusFullConfig> {
+  private getSaveableConfig(): Partial<NexusFullConfig> {
     const current = this.getConfig()
     const result: Partial<NexusFullConfig> = {}
 
-    // Models — include only if at least one role differs
-    const models: Partial<NexusModelConfig> = {}
-    for (const role of this.getRoles()) {
-      if (current.models[role] !== DEFAULT_CONFIG.models[role]) {
-        models[role] = current.models[role]
-      }
-    }
-    if (Object.keys(models).length > 0) {
-      result.models = models as NexusModelConfig
-    }
+    // Models — always include all roles so user selections are preserved
+    result.models = { ...current.models }
 
-    // Budget — include only changed fields
-    const budget: Partial<NexusFullConfig['budget']> = {}
-    const budgetKeys = ['maxTotalCost', 'maxCostPerTask', 'maxCostPerAgent', 'alertThreshold'] as const
-    for (const key of budgetKeys) {
-      if (current.budget[key] !== DEFAULT_CONFIG.budget[key]) {
-        budget[key] = current.budget[key]
-      }
-    }
-    if (Object.keys(budget).length > 0) {
-      result.budget = budget as NexusFullConfig['budget']
-    }
+    // Budget — include all fields
+    result.budget = { ...current.budget }
 
-    // Self-healing — include only changed fields
-    const selfHealing: Partial<NexusFullConfig['selfHealing']> = {}
-    const shKeys = ['enabled', 'maxRetries', 'contextTransfer'] as const
-    for (const key of shKeys) {
-      if (current.selfHealing[key] !== DEFAULT_CONFIG.selfHealing[key]) {
-        ;(selfHealing as any)[key] = current.selfHealing[key]
-      }
-    }
-    if (Object.keys(selfHealing).length > 0) {
-      result.selfHealing = selfHealing as NexusFullConfig['selfHealing']
-    }
+    // Self-healing — include all fields
+    result.selfHealing = { ...current.selfHealing }
 
     return result
   }
