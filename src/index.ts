@@ -1234,7 +1234,30 @@ You are a technical writer who creates documentation that developers actually wa
           const { tasks } = input as { tasks: string }
           const taskList = JSON.parse(tasks)
           const remaining = orchestrator.budget.maxTotalCost - orchestrator.totalSpent
-          const result = orchestrator.forecaster.forecastAll(taskList, remaining)
+
+          // Support both formats: full Task objects or simple {role, model, complexity}
+          const normalizedTasks = taskList.map((t: any) => ({
+            task: t.task || {
+              id: `forecast-${Date.now()}`,
+              name: t.name || `${t.role} task`,
+              description: t.description || '',
+              files: { include: [] },
+              dependencies: [],
+              requiredRole: t.role,
+              complexity: typeof t.complexity === 'number'
+                ? { overall: t.complexity, factors: { fileCount: 0, codeLines: 0, dependencyDepth: 0, domainKnowledge: 0, riskLevel: 'low' as const } }
+                : { overall: 50, factors: { fileCount: 0, codeLines: 0, dependencyDepth: 0, domainKnowledge: 0, riskLevel: 'low' as const } },
+              priority: 'normal' as const,
+              status: 'pending' as const
+            },
+            role: t.role,
+            model: t.model,
+            complexity: typeof t.complexity === 'number'
+              ? { overall: t.complexity, factors: { fileCount: 0, codeLines: 0, dependencyDepth: 0, domainKnowledge: 0, riskLevel: 'low' as const } }
+              : t.complexity || { overall: 50, factors: { fileCount: 0, codeLines: 0, dependencyDepth: 0, domainKnowledge: 0, riskLevel: 'low' as const } }
+          }))
+
+          const result = orchestrator.forecaster.forecastAll(normalizedTasks, remaining)
           const lines = result.estimates.map(e => `${e.taskName}: ~$${e.estimatedCost.toFixed(4)} (${e.model})`)
           lines.push(`\nTotal: ~$${result.totalEstimatedCost.toFixed(4)}`)
           lines.push(`Budget remaining: $${remaining.toFixed(2)}`)
