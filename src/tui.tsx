@@ -419,8 +419,7 @@ export default Plugin.define({
     })
 
     // === Sidebar Agent Status ===
-    // Durable storage: persists to disk, syncs with server-side storage
-    // where the orchestrator writes agent state via ctx.storage.set
+    // Durable storage for sidebar state (TUI's own state, not shared with server)
     const [sidebarState, setSidebarState] = context.storage.store<SidebarState>("nexus-sidebar-state", {
       initial: {
         agents: [],
@@ -428,6 +427,82 @@ export default Plugin.define({
         budgetRemaining: 10.00
       }
     })
+
+    // Poll for child sessions of the current session AND orchestrator state
+    let lastPollTime = 0
+    const pollChildSessions = () => {
+      const now = Date.now()
+      if (now - lastPollTime < 2000) return // throttle to 2s
+      lastPollTime = now
+
+      // Build agent list from current session's family
+      const currentRoute = context.ui.router.current()
+      if (currentRoute.type !== "session") return
+
+      const currentSessionID = currentRoute.sessionID
+      const family = context.data.session.family(currentSessionID)
+
+      // Collect child session IDs (both from family and from data)
+      const childIDs = family.filter(id => id !== currentSessionID)
+
+      // Also check all sessions — find any that might be orchestrator-spawned
+      // (have nexusRole metadata) even if family link is missing
+      const allSessions = context.data.session.list()
+      for (const s of allSessions) {
+        const meta = (s as any).metadata
+        if (meta?.nexusRole && !childIDs.includes(s.id) && s.id !== currentSessionID) {
+          childIDs.push(s.id)
+        }
+      }
+
+      if (childIDs.length === 0) {
+        // No children — clear working agents but keep completed/failed
+        setSidebarState((draft) => {
+          draft.agents = draft.agents.filter(a => a.status === 'completed' || a.status === 'failed')
+        })
+        return
+      }
+
+      // Build agent list from child sessions
+      const newAgents = childIDs.map(id => {
+        const session = context.data.session.get(id)
+        if (!session) return null
+        const meta = (session as any).metadata || {}
+        return {
+          id,
+          name: meta.nexusRole
+            ? `${meta.nexusRole.charAt(0).toUpperCase() + meta.nexusRole.slice(1)}`
+            : (session as any)?.title || id.slice(0, 12),
+          role: meta.nexusRole || 'agent',
+          status: context.data.session.status(id) === 'running' ? 'working' as const : 'completed' as const,
+          model: meta.nexusModel || '',
+          sessionID: id,
+          spawnedAt: new Date().toISOString(),
+          tasksCompleted: 0,
+          tasksFailed: 0
+        }
+      }).filter(Boolean) as SidebarState['agents']
+
+      if (newAgents.length > 0) {
+        setSidebarState((draft) => {
+          // Merge: keep existing agents, update/add new ones
+          for (const agent of newAgents) {
+            const existing = draft.agents.find(a => a.sessionID === agent.sessionID)
+            if (existing) {
+              existing.status = agent.status
+              existing.name = agent.name
+              existing.model = agent.model
+            } else {
+              draft.agents.push(agent)
+            }
+          }
+          // Remove agents that are no longer children and not completed/failed
+          draft.agents = draft.agents.filter(a =>
+            (a.sessionID && childIDs.includes(a.sessionID)) || a.status === 'completed' || a.status === 'failed'
+          )
+        })
+      }
+    }
 
     // Subscribe to session execution events to track agent lifecycle
     const unsubSessionSucceeded = context.data.on("session.execution.succeeded", (event) => {
@@ -453,42 +528,18 @@ export default Plugin.define({
     })
 
     // Track child sessions created in the current session (via nexus.spawn)
-    // This catches sessions spawned through the orchestrator and adds them to sidebar
     const unsubSessionCreated = context.data.on("session.created", (event) => {
-      const newSession = event.data
-      const newSessionID = newSession.sessionID as string
-      const currentRoute = context.ui.router.current()
-      const currentSessionID = currentRoute.type === "session" ? currentRoute.sessionID : null
-      if (!currentSessionID || !newSessionID) return
-
-      // Check if the new session is a child of the current session
-      const family = context.data.session.family(newSessionID)
-      if (family.includes(currentSessionID) && newSessionID !== currentSessionID) {
-        // This is a child session — add to sidebar if not already tracked
-        const meta = (newSession.metadata || {}) as Record<string, string>
-        setSidebarState((draft) => {
-          const exists = draft.agents.some(a => a.sessionID === newSessionID)
-          if (!exists) {
-            draft.agents.push({
-              id: newSessionID,
-              name: (newSession.title as string) || newSessionID.slice(0, 12),
-              role: meta.nexusRole || 'agent',
-              status: 'working',
-              model: meta.nexusModel || '',
-              sessionID: newSessionID,
-              spawnedAt: new Date().toISOString(),
-              tasksCompleted: 0,
-              tasksFailed: 0
-            })
-          }
-        })
-      }
+      // Trigger a poll on next tick to pick up the new session
+      setTimeout(pollChildSessions, 100)
     })
 
     // Register sidebar content slot
     const unsubSidebar = context.ui.slot({
       append: "sidebar.content",
       render: (props) => {
+        // Trigger poll on each render to catch new sessions
+        pollChildSessions()
+
         // Safe access: guard against undefined sessionID and empty agents
         const agents = sidebarState.agents
         if (!agents || agents.length === 0) {
