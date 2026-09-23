@@ -643,16 +643,18 @@ export default Plugin.define({
               )}
             </div>
           )
-        } catch {
-          // String fallback when JSX rendering fails
-          const active = agents.filter(a => a.status === 'working').length
-          const failed = agents.filter(a => a.status === 'failed').length
-          const completed = agents.filter(a => a.status === 'completed').length
-          const parts = [`${agents.length} agents`]
-          if (active > 0) parts.push(`${active} active`)
-          if (completed > 0) parts.push(`${completed} done`)
-          if (failed > 0) parts.push(`${failed} failed`)
-          return `🤖 ${parts.join(', ')}`
+        } catch (err) {
+          // Log the real error so we can diagnose why JSX failed
+          console.error("[nexus] sidebar render error:", err)
+          try {
+            context.ui.toast.show({
+              title: "Nexus Sidebar Error",
+              message: err instanceof Error ? err.message : String(err),
+              variant: "error",
+              duration: 5000
+            })
+          } catch {}
+          return null
         }
       }
     })
