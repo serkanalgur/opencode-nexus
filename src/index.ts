@@ -530,6 +530,7 @@ You are a technical writer who creates documentation that developers actually wa
           },
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async (input: unknown) => {
           const { detailed } = input as { detailed?: boolean }
           const status = orchestrator.getStatus(detailed)
@@ -549,6 +550,7 @@ You are a technical writer who creates documentation that developers actually wa
           },
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async (input: unknown) => {
           const { filter } = input as { filter?: string }
           return { content: orchestrator.listAgents(filter) }
@@ -563,6 +565,7 @@ You are a technical writer who creates documentation that developers actually wa
           properties: {},
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async () => {
           return { content: orchestrator.getCostReport() }
         }
@@ -576,6 +579,7 @@ You are a technical writer who creates documentation that developers actually wa
           properties: {},
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async () => {
           const state = orchestrator.getState()
           await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(state)))
@@ -591,6 +595,7 @@ You are a technical writer who creates documentation that developers actually wa
           properties: {},
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async () => {
           const state = orchestrator.getState()
           const tasks = state.tasks || []
@@ -610,6 +615,7 @@ You are a technical writer who creates documentation that developers actually wa
           required: ["level"],
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async (input: unknown) => {
           const { level, basePath } = input as { level: 'project' | 'global'; basePath?: string }
           orchestrator.configManager.saveConfig(level, basePath || process.cwd())
@@ -632,6 +638,7 @@ You are a technical writer who creates documentation that developers actually wa
           required: ["level"],
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async (input: unknown) => {
           const { level, basePath } = input as { level: 'project' | 'global' | 'both'; basePath?: string }
           const path = basePath || process.cwd()
@@ -659,6 +666,7 @@ You are a technical writer who creates documentation that developers actually wa
           required: ["name"],
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async (input: unknown) => {
           const { name } = input as { name: string }
           try {
@@ -681,6 +689,7 @@ You are a technical writer who creates documentation that developers actually wa
           },
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async (input: unknown) => {
           const { port, host } = input as { port?: number; host?: string }
           orchestrator.startDashboard(port, host)
@@ -696,6 +705,7 @@ You are a technical writer who creates documentation that developers actually wa
           properties: {},
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async () => {
           orchestrator.stopDashboard()
           return { content: "Dashboard stopped" }
@@ -714,6 +724,7 @@ You are a technical writer who creates documentation that developers actually wa
           },
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async (input: unknown) => {
           const { model, setInput, setOutput } = input as { model?: string; setInput?: number; setOutput?: number }
 
@@ -761,6 +772,7 @@ You are a technical writer who creates documentation that developers actually wa
           required: ["role", "task"],
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async (input: unknown) => {
           const { role, task, model, wait, timeout } = input as { role: string; task: string; model?: string; wait?: boolean; timeout?: number }
           try {
@@ -918,6 +930,7 @@ You are a technical writer who creates documentation that developers actually wa
           required: ["role", "task"],
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async (input: unknown) => {
           const { role, task, model, timeout } = input as { role: string; task: string; model?: string; timeout?: number }
           try {
@@ -988,6 +1001,7 @@ You are a technical writer who creates documentation that developers actually wa
           },
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async (input: unknown) => {
           const { name, baseDir } = input as { name?: string; baseDir?: string }
           if (!name || name === 'list') {
@@ -1011,6 +1025,7 @@ You are a technical writer who creates documentation that developers actually wa
           properties: {},
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async () => {
           const scores = orchestrator.performanceTracker.getScores()
           if (scores.length === 0) return { content: "No performance data yet. Scores build up as tasks are executed." }
@@ -1030,6 +1045,7 @@ You are a technical writer who creates documentation that developers actually wa
           required: ["role"],
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async (input: unknown) => {
           const { role } = input as { role: string }
           const best = orchestrator.performanceTracker.getBestModel(role)
@@ -1050,6 +1066,7 @@ You are a technical writer who creates documentation that developers actually wa
           required: ["content"],
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async (input: unknown) => {
           const { content, filename } = input as { content: string; filename?: string }
           const issues = orchestrator.securityScanner.scanContent(content, filename || 'unknown')
@@ -1068,6 +1085,7 @@ You are a technical writer who creates documentation that developers actually wa
           },
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async (input: unknown) => {
           const { count } = input as { count?: number }
           const records = count ? orchestrator.executionHistory.getRecent(count) : orchestrator.executionHistory.getAll()
@@ -1085,6 +1103,7 @@ You are a technical writer who creates documentation that developers actually wa
           properties: {},
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async () => {
           const stats = orchestrator.executionHistory.getStats()
           return { content: `Total: ${stats.total} | Success: ${(stats.successRate * 100).toFixed(1)}% | Cost: $${stats.totalCost.toFixed(4)} | Avg: ${stats.avgDuration.toFixed(0)}ms\nBy role: ${JSON.stringify(stats.byRole)}` }
@@ -1099,6 +1118,7 @@ You are a technical writer who creates documentation that developers actually wa
           properties: {},
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async () => {
           const roles = orchestrator.customRoles.list()
           if (roles.length === 0) return { content: "No custom roles defined. Add them in .opencode/nexus.jsonc under 'customRoles'." }
@@ -1121,6 +1141,7 @@ You are a technical writer who creates documentation that developers actually wa
           },
           required: ["name", "displayName", "prompt"]
         },
+        options: { codemode: true },
         execute: async (input: unknown) => {
           const { name, displayName, emoji, prompt, model } = input as any
           orchestrator.customRoles.register({ name, displayName, emoji: emoji || '🤖', prompt, model })
@@ -1138,6 +1159,7 @@ You are a technical writer who creates documentation that developers actually wa
           },
           required: ["tasks"]
         },
+        options: { codemode: true },
         execute: async (input: unknown) => {
           const { tasks } = input as { tasks: string }
           const taskList = JSON.parse(tasks)
@@ -1178,6 +1200,7 @@ You are a technical writer who creates documentation that developers actually wa
         name: "worktree.enable",
         description: "Enable git worktree isolation for agents",
         input: { type: "object", properties: { repoRoot: { type: "string", description: "Repository root (defaults to cwd)" } } },
+        options: { codemode: true },
         execute: async (input: unknown) => {
           const { repoRoot } = input as { repoRoot?: string }
           orchestrator.enableWorktrees(repoRoot || process.cwd())
@@ -1189,6 +1212,7 @@ You are a technical writer who creates documentation that developers actually wa
         name: "worktree.list",
         description: "List active agent worktrees",
         input: { type: "object", properties: {}, additionalProperties: false },
+        options: { codemode: true },
         execute: async () => {
           if (!orchestrator.worktreeManager) return { content: "Worktree isolation not enabled." }
           const wts = orchestrator.worktreeManager.list()
@@ -1201,6 +1225,7 @@ You are a technical writer who creates documentation that developers actually wa
         name: "worktree.disable",
         description: "Disable worktree isolation and clean up",
         input: { type: "object", properties: {}, additionalProperties: false },
+        options: { codemode: true },
         execute: async () => {
           if (orchestrator.worktreeManager) {
             orchestrator.worktreeManager.cleanupAll()
@@ -1214,6 +1239,7 @@ You are a technical writer who creates documentation that developers actually wa
         name: "sessions",
         description: "List all active Nexus agent sessions",
         input: { type: "object", properties: {}, additionalProperties: false },
+        options: { codemode: true },
         execute: async () => {
           const agents = orchestrator.getState().agents
           if (agents.length === 0) return { content: "No active agent sessions." }
@@ -1229,6 +1255,7 @@ You are a technical writer who creates documentation that developers actually wa
         name: "background",
         description: "Move running agents to background (detach from current session)",
         input: { type: "object", properties: {}, additionalProperties: false },
+        options: { codemode: true },
         execute: async () => {
           // Get all running agents and detach their sessions
           const agents = orchestrator.getState().agents.filter((a: any) => a.status === 'working' || a.status === 'idle')
@@ -1255,6 +1282,7 @@ You are a technical writer who creates documentation that developers actually wa
           },
           required: ["sessionID"]
         },
+        options: { codemode: true },
         execute: async (input: unknown) => {
           const { sessionID } = input as { sessionID: string }
           try {
@@ -1283,6 +1311,7 @@ You are a technical writer who creates documentation that developers actually wa
           required: ["question"],
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async (input: unknown) => {
           const { question, options, assumption } = input as { question: string; options?: string; assumption?: string }
           const optionList = options ? options.split(',').map(o => o.trim()) : []
@@ -1311,6 +1340,7 @@ You are a technical writer who creates documentation that developers actually wa
           required: ["description"],
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async (input: unknown) => {
           const { description, assignedTo } = input as { description: string; assignedTo?: string }
           const item = orchestrator.todoEnforcer.add(description, assignedTo)
@@ -1326,6 +1356,7 @@ You are a technical writer who creates documentation that developers actually wa
           properties: {},
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async () => {
           return { content: orchestrator.todoEnforcer.formatAll() }
         }
@@ -1342,6 +1373,7 @@ You are a technical writer who creates documentation that developers actually wa
           required: ["id"],
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async (input: unknown) => {
           const { id } = input as { id: string }
           const item = orchestrator.todoEnforcer.get(id)
@@ -1359,6 +1391,7 @@ You are a technical writer who creates documentation that developers actually wa
           properties: {},
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async () => {
           const stats = orchestrator.todoEnforcer.getStats()
           return {
@@ -1380,6 +1413,7 @@ You are a technical writer who creates documentation that developers actually wa
           required: ["description"],
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async (input: unknown) => {
           const { description, autoContinue } = input as { description: string; autoContinue?: boolean }
           const goal = goalManager.set(description, autoContinue ?? true)
@@ -1391,6 +1425,7 @@ You are a technical writer who creates documentation that developers actually wa
         name: "goal.status",
         description: "Show current goal status",
         input: { type: "object", properties: {}, additionalProperties: false },
+        options: { codemode: true },
         execute: async () => {
           const goal = goalManager.getActive()
           if (!goal) return { content: "No active goal. Use nexus.goal.set() to create one." }
@@ -1402,6 +1437,7 @@ You are a technical writer who creates documentation that developers actually wa
         name: "goal.complete",
         description: "Complete current goal",
         input: { type: "object", properties: {}, additionalProperties: false },
+        options: { codemode: true },
         execute: async () => {
           const goal = goalManager.getActive()
           if (!goal) return { content: "No active goal." }
@@ -1414,6 +1450,7 @@ You are a technical writer who creates documentation that developers actually wa
         name: "goal.list",
         description: "List all goals",
         input: { type: "object", properties: {}, additionalProperties: false },
+        options: { codemode: true },
         execute: async () => {
           const goals = goalManager.getAll()
           if (goals.length === 0) return { content: "No goals yet." }
@@ -1430,6 +1467,7 @@ You are a technical writer who creates documentation that developers actually wa
           properties: {},
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async () => {
           const active = goalManager.getActive()
           if (!active) return { content: "No active goal. Use nexus.goal.set() to set one." }
@@ -1455,6 +1493,7 @@ You are a technical writer who creates documentation that developers actually wa
           properties: {},
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async () => {
           const active = goalManager.getActive()
           if (!active) return { content: "No active goal to complete." }
@@ -1478,6 +1517,7 @@ You are a technical writer who creates documentation that developers actually wa
           properties: {},
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async () => {
           const goals = goalManager.getAll()
           if (goals.length === 0) return { content: "No goals set yet. Use nexus.goal.set() to create one." }
@@ -1505,6 +1545,7 @@ You are a technical writer who creates documentation that developers actually wa
         required: ["name", "leadRole"],
         additionalProperties: false
       },
+      options: { codemode: true },
       execute: async (input: unknown) => {
         const { name, leadRole } = input as { name: string; leadRole: string }
         const team = teamManager.create(name, leadRole)
@@ -1525,6 +1566,7 @@ You are a technical writer who creates documentation that developers actually wa
         required: ["teamId", "role", "model"],
         additionalProperties: false
       },
+      options: { codemode: true },
       execute: async (input: unknown) => {
         const { teamId, role, model } = input as { teamId: string; role: string; model: string }
         const member = teamManager.addMember(teamId, role, model)
@@ -1546,6 +1588,7 @@ You are a technical writer who creates documentation that developers actually wa
         },
         additionalProperties: false
       },
+      options: { codemode: true },
       execute: async (input: unknown) => {
         const { teamId } = input as { teamId?: string }
         
@@ -1578,6 +1621,7 @@ You are a technical writer who creates documentation that developers actually wa
         required: ["teamId"],
         additionalProperties: false
       },
+      options: { codemode: true },
       execute: async (input: unknown) => {
         const { teamId } = input as { teamId: string }
         const team = teamManager.get(teamId)
@@ -1606,6 +1650,7 @@ You are a technical writer who creates documentation that developers actually wa
           required: ["pattern", "language", "directory"],
           additionalProperties: false
         },
+        options: { codemode: true },
         execute: async (input: unknown) => {
           const { pattern, language, directory } = input as { pattern: string; language: string; directory: string }
           const results = astGrep.search(pattern, language, directory)
@@ -1619,6 +1664,7 @@ You are a technical writer who creates documentation that developers actually wa
         name: "astgrep.status",
         description: "Check if ast-grep is installed",
         input: { type: "object", properties: {}, additionalProperties: false },
+        options: { codemode: true },
         execute: async () => {
           const available = astGrep.isAvailable()
           return { content: available ? "✅ ast-grep is installed" : "❌ ast-grep is not installed. Install with: cargo install ast-grep" }
