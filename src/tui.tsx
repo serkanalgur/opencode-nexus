@@ -428,24 +428,42 @@ export default Plugin.define({
       }
     })
 
-    // Poll for child sessions of the current session
-    // This is the primary mechanism for sidebar updates
+    // Poll for child sessions of the current session AND orchestrator state
     let lastPollTime = 0
     const pollChildSessions = () => {
       const now = Date.now()
       if (now - lastPollTime < 2000) return // throttle to 2s
       lastPollTime = now
 
+      // Build agent list from current session's family
       const currentRoute = context.ui.router.current()
       if (currentRoute.type !== "session") return
 
       const currentSessionID = currentRoute.sessionID
       const family = context.data.session.family(currentSessionID)
 
-      if (family.length <= 1) return // no children
+      // Collect child session IDs (both from family and from data)
+      const childIDs = family.filter(id => id !== currentSessionID)
+
+      // Also check all sessions — find any that might be orchestrator-spawned
+      // (have nexusRole metadata) even if family link is missing
+      const allSessions = context.data.session.list()
+      for (const s of allSessions) {
+        const meta = (s as any).metadata
+        if (meta?.nexusRole && !childIDs.includes(s.id) && s.id !== currentSessionID) {
+          childIDs.push(s.id)
+        }
+      }
+
+      if (childIDs.length === 0) {
+        // No children — clear working agents but keep completed/failed
+        setSidebarState((draft) => {
+          draft.agents = draft.agents.filter(a => a.status === 'completed' || a.status === 'failed')
+        })
+        return
+      }
 
       // Build agent list from child sessions
-      const childIDs = family.filter(id => id !== currentSessionID)
       const newAgents = childIDs.map(id => {
         const session = context.data.session.get(id)
         if (!session) return null
@@ -478,8 +496,8 @@ export default Plugin.define({
               draft.agents.push(agent)
             }
           }
-          // Remove agents that are no longer children
-          draft.agents = draft.agents.filter(a => 
+          // Remove agents that are no longer children and not completed/failed
+          draft.agents = draft.agents.filter(a =>
             (a.sessionID && childIDs.includes(a.sessionID)) || a.status === 'completed' || a.status === 'failed'
           )
         })
