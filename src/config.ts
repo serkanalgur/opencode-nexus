@@ -187,9 +187,15 @@ export class NexusConfigManager {
   }
 
   // Get model for a specific role
+  // Returns "providerID/modelID" format. Falls back to coder role, then defaults.
   getModelForRole(role: string): string {
     const config = this.getConfig()
-    return config.models[role] || config.models.coder || DEFAULT_CONFIG.models.coder!
+    const model = config.models[role] || config.models.coder || DEFAULT_CONFIG.models.coder!
+    // Safety: ensure model has provider/model format
+    if (!model.includes('/')) {
+      console.warn(`[nexus] Model "${model}" for role "${role}" is missing provider prefix. Expected "providerID/modelID" format.`)
+    }
+    return model
   }
 
   // Update storage config (from TUI dialog)
@@ -307,6 +313,13 @@ export class NexusConfigManager {
    */
   initProjectConfig(basePath: string): void {
     const projectPath = join(basePath, '.opencode', 'nexus.jsonc')
+    // Don't overwrite existing user config
+    try {
+      readFileSync(projectPath, 'utf-8')
+      return // File exists, skip to preserve user settings
+    } catch {
+      // File doesn't exist, initialize with defaults
+    }
     this.writeJsoncFile(projectPath, { ...DEFAULT_CONFIG })
   }
 
@@ -316,6 +329,13 @@ export class NexusConfigManager {
    */
   initGlobalConfig(): void {
     const globalPath = join(homedir(), '.config', 'opencode', 'nexus.jsonc')
+    // Don't overwrite existing user config
+    try {
+      readFileSync(globalPath, 'utf-8')
+      return // File exists, skip to preserve user settings
+    } catch {
+      // File doesn't exist, initialize with defaults
+    }
     this.writeJsoncFile(globalPath, { ...DEFAULT_CONFIG })
   }
 
