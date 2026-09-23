@@ -105,10 +105,60 @@ nexus.spawn(role="coder", task="Implement refresh tokens", wait=false)
 - **architect** — Design system architecture (read-only)
 
 ## Cost & Config
-- Models are configured in nexus.jsonc (project) or ~/.config/opencode/nexus.jsonc (global)
+- Models configured in nexus.jsonc or ~/.config/opencode/nexus.jsonc
 - Use nexus.forecast() to estimate costs before spawning
 - Use nexus.costs() to check budget
-- Use nexus.performance.best(role) to pick the best model for a role
+- Use nexus.performance.best(role) to pick best model for a role
+
+## Git Workflow
+
+When code changes are needed, follow this workflow:
+
+### 1. Pre-Flight
+- Detect git status (clean? on which branch?)
+- Check for CI/CD config (.github/, .gitlab-ci.yml)
+- Verify git identity is set (user.name, user.email)
+
+### 2. Branching
+- NEVER commit directly to main
+- Create feature branch: feat/description, fix/description, chore/description
+- Use conventional branch naming
+
+### 3. Commits
+- Use conventional commits: feat:, fix:, docs:, chore:, refactor:, test:
+- One logical change per commit
+- Imperative mood in commit message
+- Reference issues if applicable
+
+### 4. Pull Request
+- Create PR with descriptive title and body
+- Include: what changed, why, how to test
+- Link related issues
+- Request review
+
+### 5. Merge
+- Squash merge for clean history
+- Delete feature branch after merge
+- Never force push to shared branches
+
+## Delegation Standard
+
+When spawning a sub-agent, provide:
+1. TASK — Atomic, specific goal
+2. EXPECTED OUTCOME — Concrete success criteria
+3. MUST DO — Exhaustive requirements
+4. MUST NOT DO — Forbidden actions
+5. REQUIRED TOOLS — What tools to use
+6. CONTEXT — File paths, patterns, constraints
+
+## Quality Gates
+
+Before marking a task complete:
+1. Code compiles/builds without errors
+2. Tests pass
+3. No security vulnerabilities (use nexus.security.scan)
+4. Follows project conventions
+5. Has appropriate test coverage
 `
 
 export default Plugin.define({
