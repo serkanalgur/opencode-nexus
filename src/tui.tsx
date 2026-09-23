@@ -571,13 +571,13 @@ export default Plugin.define({
           const failedAgents = agents.filter(a => a.status === 'failed')
 
           return (
-            <div style={{
+            <box style={{
               padding: '8px',
               borderTop: '1px solid #333',
               marginTop: '8px'
             }}>
               {/* Header */}
-              <div style={{
+              <box style={{
                 fontSize: '11px',
                 color: '#888',
                 marginBottom: '4px',
@@ -585,15 +585,15 @@ export default Plugin.define({
                 justifyContent: 'space-between',
                 alignItems: 'center'
               }}>
-                <span>🤖 Nexus Agents</span>
-                <span style={{ color: '#666' }}>
+                <text>🤖 Nexus Agents</text>
+                <text style={{ color: '#666' }}>
                   {activeAgents.length} active
-                </span>
-              </div>
+                </text>
+              </box>
 
               {/* Active Agents */}
               {activeAgents.map(agent => (
-                <div
+                <box
                   key={agent.id}
                   style={{
                     fontSize: '10px',
@@ -601,47 +601,47 @@ export default Plugin.define({
                     color: agent.status === 'working' ? '#4ade80' : '#94a3b8'
                   }}
                 >
-                  <span>{agent.status === 'working' ? '🔄' : '⏸️'}</span>
+                  <text>{agent.status === 'working' ? '🔄' : '⏸️'}</text>
                   {' '}{agent.name}
                   {agent.model && (
-                    <span style={{ color: '#64748b' }}> — {agent.model.split('/').pop()}</span>
+                    <text style={{ color: '#64748b' }}> — {agent.model.split('/').pop()}</text>
                   )}
-                </div>
+                </box>
               ))}
 
               {/* Completed Agents */}
               {completedAgents.length > 0 && (
-                <div style={{
+                <box style={{
                   marginTop: '4px',
                   paddingTop: '4px',
                   borderTop: '1px solid #222'
                 }}>
-                  <div style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>
+                  <text style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>
                     ✅ {completedAgents.length} completed
-                  </div>
-                </div>
+                  </text>
+                </box>
               )}
 
               {/* Failed Agents */}
               {failedAgents.length > 0 && (
-                <div style={{ marginTop: '2px' }}>
-                  <div style={{ fontSize: '10px', color: '#ef4444', marginBottom: '2px' }}>
+                <box style={{ marginTop: '2px' }}>
+                  <text style={{ fontSize: '10px', color: '#ef4444', marginBottom: '2px' }}>
                     ❌ {failedAgents.length} failed
-                  </div>
-                </div>
+                  </text>
+                </box>
               )}
 
               {/* Cost Summary */}
               {sidebarState.totalCost > 0 && (
-                <div style={{
+                <box style={{
                   marginTop: '4px',
                   fontSize: '10px',
                   color: '#666'
                 }}>
-                  💰 ${sidebarState.totalCost.toFixed(4)} / ${sidebarState.budgetRemaining.toFixed(2)} remaining
-                </div>
+                  <text>💰 ${sidebarState.totalCost.toFixed(4)} / ${sidebarState.budgetRemaining.toFixed(2)} remaining</text>
+                </box>
               )}
-            </div>
+            </box>
           )
         } catch (err) {
           // Log the real error so we can diagnose why JSX failed
