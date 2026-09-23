@@ -428,119 +428,140 @@ export default Plugin.define({
       }
     })
 
-    // Poll for child sessions of the current session AND orchestrator state
+    // Poll for child sessions — wrapped in try/catch to prevent sidebar crash
     let lastPollTime = 0
     const pollChildSessions = () => {
-      const now = Date.now()
-      if (now - lastPollTime < 2000) return // throttle to 2s
-      lastPollTime = now
+      try {
+        const now = Date.now()
+        if (now - lastPollTime < 2000) return
+        lastPollTime = now
 
-      // Build agent list from current session's family
-      const currentRoute = context.ui.router.current()
-      if (currentRoute.type !== "session") return
+        const currentRoute = context.ui.router.current()
+        if (!currentRoute || currentRoute.type !== "session") return
 
-      const currentSessionID = currentRoute.sessionID
-      const family = context.data.session.family(currentSessionID)
+        const currentSessionID = currentRoute.sessionID
+        if (!currentSessionID) return
 
-      // Collect child session IDs (both from family and from data)
-      const childIDs = family.filter(id => id !== currentSessionID)
+        const family = context.data.session.family(currentSessionID)
+        if (!family || !Array.isArray(family)) return
 
-      // Also check all sessions — find any that might be orchestrator-spawned
-      // (have nexusRole metadata) even if family link is missing
-      const allSessions = context.data.session.list()
-      for (const s of allSessions) {
-        const meta = (s as any).metadata
-        if (meta?.nexusRole && !childIDs.includes(s.id) && s.id !== currentSessionID) {
-          childIDs.push(s.id)
-        }
-      }
+        const childIDs = family.filter(id => id !== currentSessionID)
 
-      if (childIDs.length === 0) {
-        // No children — clear working agents but keep completed/failed
-        setSidebarState((draft) => {
-          draft.agents = draft.agents.filter(a => a.status === 'completed' || a.status === 'failed')
-        })
-        return
-      }
-
-      // Build agent list from child sessions
-      const newAgents = childIDs.map(id => {
-        const session = context.data.session.get(id)
-        if (!session) return null
-        const meta = (session as any).metadata || {}
-        return {
-          id,
-          name: meta.nexusRole
-            ? `${meta.nexusRole.charAt(0).toUpperCase() + meta.nexusRole.slice(1)}`
-            : (session as any)?.title || id.slice(0, 12),
-          role: meta.nexusRole || 'agent',
-          status: context.data.session.status(id) === 'running' ? 'working' as const : 'completed' as const,
-          model: meta.nexusModel || '',
-          sessionID: id,
-          spawnedAt: new Date().toISOString(),
-          tasksCompleted: 0,
-          tasksFailed: 0
-        }
-      }).filter(Boolean) as SidebarState['agents']
-
-      if (newAgents.length > 0) {
-        setSidebarState((draft) => {
-          // Merge: keep existing agents, update/add new ones
-          for (const agent of newAgents) {
-            const existing = draft.agents.find(a => a.sessionID === agent.sessionID)
-            if (existing) {
-              existing.status = agent.status
-              existing.name = agent.name
-              existing.model = agent.model
-            } else {
-              draft.agents.push(agent)
+        // Also scan all sessions for nexusRole metadata
+        try {
+          const allSessions = context.data.session.list()
+          if (allSessions && Array.isArray(allSessions)) {
+            for (const s of allSessions) {
+              if (!s || !(s as any).id) continue
+              const meta = (s as any).metadata
+              if (meta?.nexusRole && !childIDs.includes((s as any).id) && (s as any).id !== currentSessionID) {
+                childIDs.push((s as any).id)
+              }
             }
           }
-          // Remove agents that are no longer children and not completed/failed
-          draft.agents = draft.agents.filter(a =>
-            (a.sessionID && childIDs.includes(a.sessionID)) || a.status === 'completed' || a.status === 'failed'
-          )
-        })
+        } catch {
+          // session.list() may not be available
+        }
+
+        if (childIDs.length === 0) {
+          setSidebarState((draft) => {
+            draft.agents = draft.agents.filter(a => a.status === 'completed' || a.status === 'failed')
+          })
+          return
+        }
+
+        const newAgents = childIDs.map(id => {
+          try {
+            const session = context.data.session.get(id)
+            if (!session) return null
+            const meta = (session as any).metadata || {}
+            let status: 'working' | 'completed' = 'completed'
+            try {
+              status = context.data.session.status(id) === 'running' ? 'working' : 'completed'
+            } catch {}
+            return {
+              id,
+              name: meta.nexusRole
+                ? `${meta.nexusRole.charAt(0).toUpperCase() + meta.nexusRole.slice(1)}`
+                : (session as any)?.title || id.slice(0, 12),
+              role: meta.nexusRole || 'agent',
+              status,
+              model: meta.nexusModel || '',
+              sessionID: id,
+              spawnedAt: new Date().toISOString(),
+              tasksCompleted: 0,
+              tasksFailed: 0
+            }
+          } catch {
+            return null
+          }
+        }).filter(Boolean) as SidebarState['agents']
+
+        if (newAgents.length > 0) {
+          setSidebarState((draft) => {
+            for (const agent of newAgents) {
+              const existing = draft.agents.find(a => a.sessionID === agent.sessionID)
+              if (existing) {
+                existing.status = agent.status
+                existing.name = agent.name
+                existing.model = agent.model
+              } else {
+                draft.agents.push(agent)
+              }
+            }
+            draft.agents = draft.agents.filter(a =>
+              (a.sessionID && childIDs.includes(a.sessionID)) || a.status === 'completed' || a.status === 'failed'
+            )
+          })
+        }
+      } catch {
+        // poll must never crash the sidebar
       }
     }
 
-    // Subscribe to session execution events to track agent lifecycle
+    // Subscribe to session execution events — wrapped in try/catch
     const unsubSessionSucceeded = context.data.on("session.execution.succeeded", (event) => {
-      const sessionId = event.data.sessionID
-      setSidebarState((draft) => {
-        const agent = draft.agents.find(a => a.sessionID === sessionId)
-        if (agent) {
-          agent.status = 'completed'
-          agent.tasksCompleted++
-        }
-      })
+      try {
+        const sessionId = event.data.sessionID
+        setSidebarState((draft) => {
+          const agent = draft.agents.find(a => a.sessionID === sessionId)
+          if (agent) {
+            agent.status = 'completed'
+            agent.tasksCompleted++
+          }
+        })
+      } catch {}
     })
 
     const unsubSessionFailed = context.data.on("session.execution.failed", (event) => {
-      const sessionId = event.data.sessionID
-      setSidebarState((draft) => {
-        const agent = draft.agents.find(a => a.sessionID === sessionId)
-        if (agent) {
-          agent.status = 'failed'
-          agent.tasksFailed++
-        }
-      })
+      try {
+        const sessionId = event.data.sessionID
+        setSidebarState((draft) => {
+          const agent = draft.agents.find(a => a.sessionID === sessionId)
+          if (agent) {
+            agent.status = 'failed'
+            agent.tasksFailed++
+          }
+        })
+      } catch {}
     })
 
-    // Track child sessions created in the current session (via nexus.spawn)
     const unsubSessionCreated = context.data.on("session.created", (event) => {
-      // Trigger a poll on next tick to pick up the new session
-      setTimeout(pollChildSessions, 100)
+      try {
+        setTimeout(pollChildSessions, 100)
+      } catch {}
     })
 
     // Register sidebar content slot
     const unsubSidebar = context.ui.slot({
       append: "sidebar.content",
       render: (props) => {
-        // Trigger poll on each render to catch new sessions
-        pollChildSessions()
+        try {
+          pollChildSessions()
+        } catch {
+          // poll must never crash the sidebar
+        }
 
-        // Safe access: guard against undefined sessionID and empty agents
         const agents = sidebarState.agents
         if (!agents || agents.length === 0) {
           return null
