@@ -1019,10 +1019,23 @@ export class NexusOrchestrator {
     const agentId = `agent-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
 
     // Resolve model: override > config > default
-    const modelConfig = config.model || this.configManager.getModelForRole(config.role)
+    let modelConfig = config.model || this.configManager.getModelForRole(config.role)
+
+    // Auto-complete model name if missing provider prefix
+    // e.g. "mimo-v2.5" → find "opencode-go/mimo-v2.5" in config
+    if (!modelConfig.includes('/')) {
+      const allModels = this.configManager.getConfig().models
+      const match = Object.values(allModels).find(m => m?.split('/')[1] === modelConfig)
+      if (match) {
+        modelConfig = match
+      } else {
+        throw new Error(`Invalid model "${config.model}". Use "providerID/modelID" format (e.g. "opencode-go/mimo-v2.5")`)
+      }
+    }
+
     const slashIndex = modelConfig.indexOf('/')
-    const provider = slashIndex > -1 ? modelConfig.slice(0, slashIndex) : modelConfig
-    const modelName = slashIndex > -1 ? modelConfig.slice(slashIndex + 1) : modelConfig
+    const provider = modelConfig.slice(0, slashIndex)
+    const modelName = modelConfig.slice(slashIndex + 1)
 
     // Build descriptive session title for TUI display
     const roleEmoji = this.configManager.getRoleEmoji(config.role)
