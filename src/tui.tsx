@@ -25,6 +25,15 @@ export default Plugin.define({
   id: "nexus.cli",
   setup(context) {
     const configManager = new NexusConfigManager()
+    // Load config from disk so TUI shows actual project/global config values
+    try {
+      const loc = context.location ?? context.data.location.default()
+      if (loc?.directory) {
+        configManager.loadFromPath(loc.directory)
+      }
+    } catch {
+      // If we can't determine project dir, continue with defaults
+    }
 
     // Model selection handler
     // Persistent save scope for the config session
