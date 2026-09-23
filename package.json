@@ -1,6 +1,6 @@
 {
   "name": "@serkanalgur/opencode-nexus",
-  "version": "1.8.2",
+  "version": "1.8.3",
   "description": "Adaptive Multi-Agent Orchestration with Cost Intelligence for OpenCode V2",
   "keywords": [
     "opencode",
@@ -40,7 +40,7 @@
   "scripts": {
     "build": "bun run build:server && bun run build:tui",
     "build:server": "bun build ./src/index.ts --outdir ./dist --target node",
-    "build:tui": "bun build ./src/tui.tsx --outdir ./dist --target node",
+    "build:tui": "bun build ./src/tui.tsx --outdir ./dist --target bun --external @opentui/solid --external solid-js --external @opentui/core",
     "dev": "bun run --watch src/index.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
