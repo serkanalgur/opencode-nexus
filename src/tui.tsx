@@ -563,87 +563,97 @@ export default Plugin.define({
         }
 
         const agents = sidebarState.agents
-        if (!agents || agents.length === 0) {
-          return null
-        }
+        if (!agents || agents.length === 0) return null
 
-        const activeAgents = agents.filter(a => a.status === 'working' || a.status === 'idle')
-        const completedAgents = agents.filter(a => a.status === 'completed')
-        const failedAgents = agents.filter(a => a.status === 'failed')
+        try {
+          const activeAgents = agents.filter(a => a.status === 'working' || a.status === 'idle')
+          const completedAgents = agents.filter(a => a.status === 'completed')
+          const failedAgents = agents.filter(a => a.status === 'failed')
 
-        return (
-          <div style={{
-            padding: '8px',
-            borderTop: '1px solid #333',
-            marginTop: '8px'
-          }}>
-            {/* Header */}
+          return (
             <div style={{
-              fontSize: '11px',
-              color: '#888',
-              marginBottom: '4px',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center'
+              padding: '8px',
+              borderTop: '1px solid #333',
+              marginTop: '8px'
             }}>
-              <span>🤖 Nexus Agents</span>
-              <span style={{ color: '#666' }}>
-                {activeAgents.length} active
-              </span>
-            </div>
+              {/* Header */}
+              <div style={{
+                fontSize: '11px',
+                color: '#888',
+                marginBottom: '4px',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center'
+              }}>
+                <span>🤖 Nexus Agents</span>
+                <span style={{ color: '#666' }}>
+                  {activeAgents.length} active
+                </span>
+              </div>
 
-            {/* Active Agents */}
-            {activeAgents.map(agent => (
-              <div
-                key={agent.id}
-                style={{
+              {/* Active Agents */}
+              {activeAgents.map(agent => (
+                <div
+                  key={agent.id}
+                  style={{
+                    fontSize: '10px',
+                    padding: '2px 0',
+                    color: agent.status === 'working' ? '#4ade80' : '#94a3b8'
+                  }}
+                >
+                  <span>{agent.status === 'working' ? '🔄' : '⏸️'}</span>
+                  {' '}{agent.name}
+                  {agent.model && (
+                    <span style={{ color: '#64748b' }}> — {agent.model.split('/').pop()}</span>
+                  )}
+                </div>
+              ))}
+
+              {/* Completed Agents */}
+              {completedAgents.length > 0 && (
+                <div style={{
+                  marginTop: '4px',
+                  paddingTop: '4px',
+                  borderTop: '1px solid #222'
+                }}>
+                  <div style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>
+                    ✅ {completedAgents.length} completed
+                  </div>
+                </div>
+              )}
+
+              {/* Failed Agents */}
+              {failedAgents.length > 0 && (
+                <div style={{ marginTop: '2px' }}>
+                  <div style={{ fontSize: '10px', color: '#ef4444', marginBottom: '2px' }}>
+                    ❌ {failedAgents.length} failed
+                  </div>
+                </div>
+              )}
+
+              {/* Cost Summary */}
+              {sidebarState.totalCost > 0 && (
+                <div style={{
+                  marginTop: '4px',
                   fontSize: '10px',
-                  padding: '2px 0',
-                  color: agent.status === 'working' ? '#4ade80' : '#94a3b8'
-                }}
-              >
-                <span>{agent.status === 'working' ? '🔄' : '⏸️'}</span>
-                {' '}{agent.name}
-                {agent.model && (
-                  <span style={{ color: '#64748b' }}> — {agent.model.split('/').pop()}</span>
-                )}
-              </div>
-            ))}
-
-            {/* Completed Agents */}
-            {completedAgents.length > 0 && (
-              <div style={{
-                marginTop: '4px',
-                paddingTop: '4px',
-                borderTop: '1px solid #222'
-              }}>
-                <div style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>
-                  ✅ {completedAgents.length} completed
+                  color: '#666'
+                }}>
+                  💰 ${sidebarState.totalCost.toFixed(4)} / ${sidebarState.budgetRemaining.toFixed(2)} remaining
                 </div>
-              </div>
-            )}
-
-            {/* Failed Agents */}
-            {failedAgents.length > 0 && (
-              <div style={{ marginTop: '2px' }}>
-                <div style={{ fontSize: '10px', color: '#ef4444', marginBottom: '2px' }}>
-                  ❌ {failedAgents.length} failed
-                </div>
-              </div>
-            )}
-
-            {/* Cost Summary */}
-            {sidebarState.totalCost > 0 && (
-              <div style={{
-                marginTop: '4px',
-                fontSize: '10px',
-                color: '#666'
-              }}>
-                💰 ${sidebarState.totalCost.toFixed(4)} / ${sidebarState.budgetRemaining.toFixed(2)} remaining
-              </div>
-            )}
-          </div>
-        )
+              )}
+            </div>
+          )
+        } catch {
+          // String fallback when JSX rendering fails
+          const active = agents.filter(a => a.status === 'working').length
+          const failed = agents.filter(a => a.status === 'failed').length
+          const completed = agents.filter(a => a.status === 'completed').length
+          const parts = [`${agents.length} agents`]
+          if (active > 0) parts.push(`${active} active`)
+          if (completed > 0) parts.push(`${completed} done`)
+          if (failed > 0) parts.push(`${failed} failed`)
+          return `🤖 ${parts.join(', ')}`
+        }
       }
     })
 
