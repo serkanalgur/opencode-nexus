@@ -571,74 +571,40 @@ export default Plugin.define({
           const failedAgents = agents.filter(a => a.status === 'failed')
 
           return (
-            <box style={{
-              padding: '8px',
-              borderTop: '1px solid #333',
-              marginTop: '8px'
-            }}>
+            <box padding={1} marginTop={1}>
               {/* Header */}
-              <box style={{
-                fontSize: '11px',
-                color: '#888',
-                marginBottom: '4px',
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center'
-              }}>
-                <text>🤖 Nexus Agents</text>
-                <text style={{ color: '#666' }}>
-                  {activeAgents.length} active
-                </text>
+              <box>
+                <text>🤖 Nexus Agents — {activeAgents.length} active</text>
               </box>
 
               {/* Active Agents */}
               {activeAgents.map(agent => (
-                <box
-                  key={agent.id}
-                  style={{
-                    fontSize: '10px',
-                    padding: '2px 0',
-                    color: agent.status === 'working' ? '#4ade80' : '#94a3b8'
-                  }}
-                >
-                  <text>{agent.status === 'working' ? '🔄' : '⏸️'}</text>
-                  {' '}{agent.name}
-                  {agent.model && (
-                    <text style={{ color: '#64748b' }}> — {agent.model.split('/').pop()}</text>
-                  )}
+                <box>
+                  <text fg={agent.status === 'working' ? '#4ade80' : '#94a3b8'}>
+                    {agent.status === 'working' ? '🔄' : '⏸️'} {agent.name}
+                    {agent.model ? ` — ${agent.model.split('/').pop()}` : ''}
+                  </text>
                 </box>
               ))}
 
               {/* Completed Agents */}
               {completedAgents.length > 0 && (
-                <box style={{
-                  marginTop: '4px',
-                  paddingTop: '4px',
-                  borderTop: '1px solid #222'
-                }}>
-                  <text style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>
-                    ✅ {completedAgents.length} completed
-                  </text>
+                <box marginTop={1}>
+                  <text fg="#666">✅ {completedAgents.length} completed</text>
                 </box>
               )}
 
               {/* Failed Agents */}
               {failedAgents.length > 0 && (
-                <box style={{ marginTop: '2px' }}>
-                  <text style={{ fontSize: '10px', color: '#ef4444', marginBottom: '2px' }}>
-                    ❌ {failedAgents.length} failed
-                  </text>
+                <box marginTop={1}>
+                  <text fg="#ef4444">❌ {failedAgents.length} failed</text>
                 </box>
               )}
 
               {/* Cost Summary */}
               {sidebarState.totalCost > 0 && (
-                <box style={{
-                  marginTop: '4px',
-                  fontSize: '10px',
-                  color: '#666'
-                }}>
-                  <text>💰 ${sidebarState.totalCost.toFixed(4)} / ${sidebarState.budgetRemaining.toFixed(2)} remaining</text>
+                <box marginTop={1}>
+                  <text fg="#666">💰 ${sidebarState.totalCost.toFixed(4)} / ${sidebarState.budgetRemaining.toFixed(2)} remaining</text>
                 </box>
               )}
             </box>
