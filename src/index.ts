@@ -12,6 +12,28 @@ import { homedir } from "node:os"
 const NEXUS_AGENT_CONTENT = `---
 description: Nexus multi-agent orchestrator — decomposes tasks and delegates to specialized sub-agents
 mode: primary
+permissions:
+  - action: subagent
+    resource: "nexus-*"
+    effect: allow
+  - action: subagent
+    resource: "nexus-architect"
+    effect: allow
+  - action: subagent
+    resource: "nexus-coder"
+    effect: allow
+  - action: subagent
+    resource: "nexus-reviewer"
+    effect: allow
+  - action: subagent
+    resource: "nexus-tester"
+    effect: allow
+  - action: subagent
+    resource: "nexus-explorer"
+    effect: allow
+  - action: subagent
+    resource: "nexus-documenter"
+    effect: allow
 ---
 
 # Nexus Orchestrator
@@ -181,8 +203,10 @@ mode: subagent
 permissions:
   - action: edit
     resource: "*"
+    effect: allow
   - action: shell
     resource: "*"
+    effect: allow
 ---
 
 # Nexus Architect Agent
@@ -224,8 +248,10 @@ mode: subagent
 permissions:
   - action: edit
     resource: "*"
+    effect: allow
   - action: shell
     resource: "*"
+    effect: allow
 ---
 
 # Nexus Coder Agent
@@ -313,8 +339,10 @@ mode: subagent
 permissions:
   - action: edit
     resource: "*"
+    effect: allow
   - action: shell
     resource: "*"
+    effect: allow
 ---
 
 # Nexus Tester Agent
@@ -414,8 +442,10 @@ mode: subagent
 permissions:
   - action: edit
     resource: "*"
+    effect: allow
   - action: shell
     resource: "*"
+    effect: allow
 ---
 
 # Nexus Documenter Agent
@@ -773,28 +803,35 @@ You are a technical writer who creates documentation that developers actually wa
           additionalProperties: false
         },
         options: { codemode: true },
-        execute: async (input: unknown) => {
+        execute: async (input: unknown, toolCtx: any) => {
           const { role, task, model, wait, timeout } = input as { role: string; task: string; model?: string; wait?: boolean; timeout?: number }
           try {
-            // Set parent session ID for OpenCode UI linking
-            // This will be populated by the context if available
-            if (!orchestrator.parentSessionID) {
-              try {
-                // Attempt to get current session ID from context
-                const currentSession = (ctx as any).session?.current?.()
-                if (currentSession?.id) {
-                  orchestrator.parentSessionID = currentSession.id
-                }
-              } catch {
-                // Context may not expose current session in all environments
-              }
-            }
+            // The parent session ID comes from this tool's own execution context.
+            // It is what OpenCode links the child session to (parentID) and is
+            // passed explicitly to spawnAgent (never latched on the
+            // orchestrator, which would let internal spawns reuse a foreign
+            // parent session).
+            const toolCtxSessionID: string = toolCtx?.sessionID || ''
 
-            const agent = await orchestrator.spawnAgent({ role, model })
-            await orchestrator.ctx.session.prompt({
-              sessionID: agent.sessionID!,
-              text: task
+            const agent = await orchestrator.spawnAgent({ role, model }, {
+              toolContext: {
+                sessionID: toolCtxSessionID,
+                agent: toolCtx?.agent,
+                messageID: toolCtx?.messageID,
+                callID: toolCtx?.id,
+                signal: toolCtx?.signal,
+              },
+              task,
             })
+
+            // The task is delivered by the subagent tool on the linked path.
+            // Only prompt manually when the spawn fell back to session.create.
+            if (agent.spawnPath !== 'subagent-tool') {
+              await orchestrator.ctx.session.prompt({
+                sessionID: agent.sessionID!,
+                text: task
+              })
+            }
 
             agent.status = 'working'
             orchestrator.notifyStateChange()
@@ -931,14 +968,32 @@ You are a technical writer who creates documentation that developers actually wa
           additionalProperties: false
         },
         options: { codemode: true },
-        execute: async (input: unknown) => {
+        execute: async (input: unknown, toolCtx: any) => {
           const { role, task, model, timeout } = input as { role: string; task: string; model?: string; timeout?: number }
           try {
-            const agent = await orchestrator.spawnAgent({ role, model })
-            await orchestrator.ctx.session.prompt({
-              sessionID: agent.sessionID!,
-              text: task
+            // The parent session comes from this tool's execution context and is
+            // passed explicitly (never latched on the orchestrator).
+            const toolCtxSessionID: string = toolCtx?.sessionID || ''
+
+            const agent = await orchestrator.spawnAgent({ role, model }, {
+              toolContext: {
+                sessionID: toolCtxSessionID,
+                agent: toolCtx?.agent,
+                messageID: toolCtx?.messageID,
+                callID: toolCtx?.id,
+                signal: toolCtx?.signal,
+              },
+              task,
             })
+
+            // On the linked path the task was already delivered by the subagent
+            // tool; only prompt manually on the session.create fallback.
+            if (agent.spawnPath !== 'subagent-tool') {
+              await orchestrator.ctx.session.prompt({
+                sessionID: agent.sessionID!,
+                text: task
+              })
+            }
 
             agent.status = 'working'
             orchestrator.notifyStateChange()
