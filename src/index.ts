@@ -1,5 +1,5 @@
 import { Plugin } from "@opencode/plugin"
-import { NexusOrchestrator } from "./orchestrator"
+import { NexusOrchestrator, lastAssistantText, type NexusPluginContext } from "./orchestrator"
 import { PRESETS } from "./config"
 import { TEMPLATES, instantiateTemplate, listTemplates } from "./templates"
 import { GoalManager } from "./goal"
@@ -186,6 +186,10 @@ Before marking a task complete:
 export default Plugin.define({
   id: "nexus",
   async setup(ctx) {
+    // The plugin context is structurally narrowed to what this plugin uses;
+    // `nexusCtx` is the same object the orchestrator was initialized with, held
+    // locally so the tool executors below do not re-assert nullability.
+    const nexusCtx: NexusPluginContext = ctx
     // Auto-create nexus-orchestrator agent if it doesn't exist
     try {
       const agentDir = join(homedir(), '.config', 'opencode', 'agents')
@@ -744,13 +748,13 @@ You are a technical writer who creates documentation that developers actually wa
 
       editor.add({
         name: "model.costs",
-        description: "Show real model pricing from OpenCode or set custom costs",
+        description: "Show real model pricing from OpenCode, or set custom costs. All prices are USD per 1K tokens.",
         input: {
           type: "object",
           properties: {
-            model: { type: "string", description: "Model ID to show cost for (optional, shows all if omitted)" },
-            setInput: { type: "number", description: "Set input cost per token for a model" },
-            setOutput: { type: "number", description: "Set output cost per token for a model" }
+            model: { type: "string", description: "Model to show cost for, as 'provider/id' or a bare 'id' (optional, shows all if omitted)" },
+            setInput: { type: "number", description: "Set input cost in USD per 1K tokens for a model (e.g. 0.003 for $3 per million tokens)" },
+            setOutput: { type: "number", description: "Set output cost in USD per 1K tokens for a model (e.g. 0.015 for $15 per million tokens)" }
           },
           additionalProperties: false
         },
@@ -758,17 +762,22 @@ You are a technical writer who creates documentation that developers actually wa
         execute: async (input: unknown) => {
           const { model, setInput, setOutput } = input as { model?: string; setInput?: number; setOutput?: number }
 
+          // `modelCosts` is keyed by "providerID/id" and valued in USD per 1K
+          // tokens, so `getModelCost` resolves either the qualified or the bare
+          // form a user is likely to type.
+          const per1k = (v: number) => `$${v}/1K tokens`
+
           if (model && setInput !== undefined && setOutput !== undefined) {
             // Set custom cost
             orchestrator.setModelCosts({ [model]: { input: setInput, output: setOutput } })
-            return { content: `Set ${model}: input=$${setInput}/token, output=$${setOutput}/token` }
+            return { content: `Set ${model}: input=${per1k(setInput)}, output=${per1k(setOutput)}` }
           }
 
           if (model) {
             // Show specific model cost
-            const cost = orchestrator.modelCosts.get(model)
+            const cost = orchestrator.getModelCost(model)
             if (cost) {
-              return { content: `${model}: input=$${cost.input}/token, output=$${cost.output}/token, cache_read=$${cost.cacheRead}/token, cache_write=$${cost.cacheWrite}/token` }
+              return { content: `${model}: input=${per1k(cost.input)}, output=${per1k(cost.output)}, cache_read=${per1k(cost.cacheRead)}, cache_write=${per1k(cost.cacheWrite)}` }
             }
             // Fallback to hardcoded estimate
             const estimate = orchestrator['estimateModelCost'](model)
@@ -777,9 +786,9 @@ You are a technical writer who creates documentation that developers actually wa
 
           // Show all loaded costs
           if (orchestrator.modelCosts.size > 0) {
-            const lines = ['📊 Model Pricing (from OpenCode):']
+            const lines = ['📊 Model Pricing (from OpenCode, per 1K tokens):']
             for (const [id, cost] of orchestrator.modelCosts) {
-              lines.push(`  ${id}: $${cost.input}/token in, $${cost.output}/token out`)
+              lines.push(`  ${id}: ${per1k(cost.input)} in, ${per1k(cost.output)} out`)
             }
             return { content: lines.join('\n') }
           }
@@ -827,7 +836,7 @@ You are a technical writer who creates documentation that developers actually wa
             // The task is delivered by the subagent tool on the linked path.
             // Only prompt manually when the spawn fell back to session.create.
             if (agent.spawnPath !== 'subagent-tool') {
-              await orchestrator.ctx.session.prompt({
+              await nexusCtx.session.prompt({
                 sessionID: agent.sessionID!,
                 text: task
               })
@@ -839,7 +848,7 @@ You are a technical writer who creates documentation that developers actually wa
             // If wait is requested, block until completion or timeout
             if (wait) {
               const waitTimeout = timeout || 120000
-              const waitPromise = orchestrator.ctx.session.wait({ sessionID: agent.sessionID! })
+              const waitPromise = nexusCtx.session.wait({ sessionID: agent.sessionID! })
               const timeoutPromise = new Promise((_, reject) =>
                 setTimeout(() => reject(new Error(`Timed out after ${waitTimeout}ms`)), waitTimeout)
               )
@@ -853,9 +862,9 @@ You are a technical writer who creates documentation that developers actually wa
 
                 // Try to get whatever results are available
                 try {
-                  const messages = await orchestrator.ctx.session.context({ sessionID: agent.sessionID! })
-                  const lastMsg = messages.filter((m: any) => m.role === 'assistant').pop()
-                  if (lastMsg) {
+                  const messages = await nexusCtx.session.context({ sessionID: agent.sessionID! })
+                  const partialText = lastAssistantText(messages)
+                  if (partialText) {
                     agent.status = 'completed'
                     await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(orchestrator.getState())))
                     const taskPreview = task.length > 80 ? task.substring(0, 77) + '...' : task
@@ -866,7 +875,7 @@ You are a technical writer who creates documentation that developers actually wa
                         `⏱️ Status: ${waitError.message || 'timeout'}`,
                         `📎 Session: ${agent.sessionID}`,
                         `\n--- Partial Result ---`,
-                        typeof lastMsg.content === 'string' ? lastMsg.content : JSON.stringify(lastMsg.content)
+                        partialText
                       ].join('\n')
                     }
                   }
@@ -887,9 +896,8 @@ You are a technical writer who creates documentation that developers actually wa
 
               // Wait completed — get final results
               try {
-                const messages = await orchestrator.ctx.session.context({ sessionID: agent.sessionID! })
-                const lastMsg = messages.filter((m: any) => m.role === 'assistant').pop()
-                const result = lastMsg?.content || 'Task completed (no output captured)'
+                const messages = await nexusCtx.session.context({ sessionID: agent.sessionID! })
+                const result = lastAssistantText(messages) || 'Task completed (no output captured)'
 
                 agent.status = 'completed'
                 await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(orchestrator.getState())))
@@ -989,7 +997,7 @@ You are a technical writer who creates documentation that developers actually wa
             // On the linked path the task was already delivered by the subagent
             // tool; only prompt manually on the session.create fallback.
             if (agent.spawnPath !== 'subagent-tool') {
-              await orchestrator.ctx.session.prompt({
+              await nexusCtx.session.prompt({
                 sessionID: agent.sessionID!,
                 text: task
               })
@@ -999,7 +1007,7 @@ You are a technical writer who creates documentation that developers actually wa
             orchestrator.notifyStateChange()
 
             const waitTimeout = timeout || 120000
-            const waitPromise = orchestrator.ctx.session.wait({ sessionID: agent.sessionID! })
+            const waitPromise = nexusCtx.session.wait({ sessionID: agent.sessionID! })
             const timeoutPromise = new Promise<'timeout'>((resolve) =>
               setTimeout(() => resolve('timeout'), waitTimeout)
             )
@@ -1008,9 +1016,8 @@ You are a technical writer who creates documentation that developers actually wa
 
             // Get the result regardless of outcome
             try {
-              const messages = await orchestrator.ctx.session.context({ sessionID: agent.sessionID! })
-              const lastMsg = messages.filter((m: any) => m.role === 'assistant').pop()
-              const resultContent = lastMsg?.content || (outcome === 'timeout' ? 'Timed out — agent may still be running' : 'Completed with no output')
+              const messages = await nexusCtx.session.context({ sessionID: agent.sessionID! })
+              const resultContent = lastAssistantText(messages) || (outcome === 'timeout' ? 'Timed out — agent may still be running' : 'Completed with no output')
 
               agent.status = outcome === 'timeout' ? 'working' : 'completed'
               orchestrator.notifyStateChange()
@@ -1312,18 +1319,32 @@ You are a technical writer who creates documentation that developers actually wa
         input: { type: "object", properties: {}, additionalProperties: false },
         options: { codemode: true },
         execute: async () => {
-          // Get all running agents and detach their sessions
+          // Nothing to do comes first: with no agents running, "No running
+          // agents" is the truthful answer even on a build that lacks
+          // `session.background`.
           const agents = orchestrator.getState().agents.filter((a: any) => a.status === 'working' || a.status === 'idle')
           if (agents.length === 0) return { content: "No running agents to move to background." }
 
+          // `background` exists on the underlying client `SessionApi` but the
+          // plugin context's `SessionDomain` is a `Pick` that omits it, so it
+          // cannot be typed directly and is feature-detected through a narrow
+          // structural lookup instead of assumed to be there.
+          const background = (nexusCtx.session as { background?: (input: { sessionID: string }) => Promise<void> }).background
+          if (!background) {
+            return { content: "This OpenCode version does not expose session.background on the plugin context — nothing was detached." }
+          }
+
+          let detached = 0
           for (const agent of agents) {
+            if (!agent.sessionID) continue
             try {
-              await orchestrator.ctx.session.background({ sessionID: agent.sessionID })
+              await background.call(nexusCtx.session, { sessionID: agent.sessionID })
+              detached++
             } catch {
               // Background may not be supported in all contexts
             }
           }
-          return { content: `${agents.length} agent(s) moved to background. You can continue working while they run.` }
+          return { content: `${detached} agent(s) moved to background. You can continue working while they run.` }
         }
       })
 
@@ -1341,10 +1362,10 @@ You are a technical writer who creates documentation that developers actually wa
         execute: async (input: unknown) => {
           const { sessionID } = input as { sessionID: string }
           try {
-            const messages = await orchestrator.ctx.session.context({ sessionID })
-            const lastMsg = messages.filter((m: any) => m.role === 'assistant').pop()
-            if (lastMsg) {
-              return { content: `Session ${sessionID} result:\n${lastMsg.content}` }
+            const messages = await nexusCtx.session.context({ sessionID })
+            const text = lastAssistantText(messages)
+            if (text) {
+              return { content: `Session ${sessionID} result:\n${text}` }
             }
             return { content: `Session ${sessionID} has no assistant messages yet.` }
           } catch (error: any) {

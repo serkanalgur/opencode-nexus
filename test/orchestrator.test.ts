@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, mock } from 'bun:test'
 import { NexusOrchestrator } from '../src/orchestrator'
 
-// Mock OpenCode context for session API
+// Mock OpenCode context for session API. `location` is a required member of
+// the real plugin context and `initialize` reads `location.directory`.
 const mockCtx = {
+  location: { directory: process.cwd() },
   session: {
     create: mock(() => Promise.resolve({ id: 'session-mock-123' })),
     switchAgent: mock(() => Promise.resolve()),
