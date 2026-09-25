@@ -355,8 +355,12 @@ describe('nexus.spawn executor — single task delivery', () => {
     const delegate = tools.get('delegate')
     expect(delegate).toBeDefined()
 
+    // Real V2 shape: session messages are discriminated by `type` and an
+    // assistant message's text lives in typed `content` parts. (The V1 fixture
+    // `{ role: 'assistant', content: 'done' }` encoded the bug where the
+    // plugin filtered on `role`, never matched, and reported a placeholder.)
     ctx.session.context = mock(() => Promise.resolve([
-      { role: 'assistant', content: 'done' },
+      { type: 'assistant', content: [{ type: 'text', text: 'done' }] },
     ]))
 
     const result = await delegate.execute(

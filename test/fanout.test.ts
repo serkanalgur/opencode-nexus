@@ -233,6 +233,8 @@ describe('MessageRouter integration with NexusOrchestrator', () => {
   let orchestrator: InstanceType<typeof NexusOrchestrator>
 
   const mockCtx = {
+    // `location` is required by the real plugin context (see initialize)
+    location: { directory: process.cwd() },
     session: {
       create: async () => ({ id: 'session-mock' }),
       prompt: async () => {},

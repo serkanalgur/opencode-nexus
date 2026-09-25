@@ -1,3 +1,4 @@
+import type { Plugin } from "@opencode/plugin"
 import type {
   Agent, Task, DAG, DAGNode, ExecutionRequest, ExecutionResult,
   AgentRole, ComplexityScore, ModelSelection, BudgetConstraint,
@@ -34,6 +35,97 @@ export interface SpawnToolContext {
   messageID?: string
   callID?: string
   signal?: AbortSignal
+}
+
+// === OpenCode plugin context ===
+//
+// This used to be typed `any`, which meant `tsc` could not catch a single wrong
+// API call — and the plugin carried several V1-era calls that are dead at
+// runtime against OpenCode V2. It is now the real plugin context, so a wrong
+// member or a wrong argument shape is a compile error.
+//
+// Only two things stay hand-written, both because `@opencode/plugin` erases
+// them to `any` / `unknown` at the type level:
+//   - the `subagent` tool's input schema (runtime-only), and
+//   - the `Tool.Context` we fabricate when invoking that tool.
+
+/** The OpenCode V2 plugin context (`@opencode/plugin` 2.0.12). */
+export type NexusPluginContext = Plugin.Context
+
+/** One entry of `ctx.session.context()`: a `SessionMessageInfo` union member. */
+export type NexusSessionMessage = Awaited<ReturnType<Plugin.Context["session"]["context"]>>[number]
+
+/** Real pricing for one model, in **USD per 1K tokens**. */
+export interface NexusModelCost {
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+}
+
+/**
+ * The `subagent` tool's input as this plugin invokes it. `ToolInfo["execute"]`'s
+ * input parameter is `any` (the tool's schema only exists at runtime), so the
+ * shape is declared here and checked at the call site.
+ */
+export interface SubagentToolInput {
+  agent: string
+  description: string
+  prompt: string
+  model: string
+  background?: boolean
+}
+
+/**
+ * The tool context `spawnAgent` fabricates to call the built-in `subagent`
+ * tool. Mirrors `Tool.Context` (sessionID, agent, messageID, id, progress)
+ * plus the `signal` the plugin's `ToolContext` adds. Narrowed from the real
+ * `ToolInfo`, whose `execute` input is `any`.
+ */
+export interface SubagentToolExecutionContext {
+  sessionID: string
+  agent: string
+  messageID: string
+  id: string
+  progress: (update: { sessionID: string; status: string }) => Promise<void>
+  signal: AbortSignal
+}
+
+/** The `subagent` tool narrowed to the input shape this plugin uses. */
+export interface SubagentTool {
+  id: string
+  execute(
+    input: SubagentToolInput,
+    context: SubagentToolExecutionContext
+  ): Promise<unknown>
+}
+
+/**
+ * Text of an assistant message. V2 assistant messages are discriminated by
+ * `type` and their text lives in typed `content` parts — there is no `role`
+ * field and `content` is an array, not a string.
+ */
+export function assistantMessageText(message: NexusSessionMessage): string {
+  if (message.type !== "assistant") return ""
+  return message.content
+    .filter(part => part.type === "text")
+    .map(part => part.text)
+    .join("")
+}
+
+/**
+ * Text of the most recent assistant message, or `""` when the session has
+ * produced none. Replaces the V1-era `messages.filter(m => m.role ===
+ * 'assistant')` read, which never matched and silently degraded every result
+ * to a placeholder string.
+ */
+export function lastAssistantText(messages: readonly NexusSessionMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].type !== "assistant") continue
+    const text = assistantMessageText(messages[i])
+    if (text) return text
+  }
+  return ""
 }
 
 export interface SpawnOptions {
@@ -153,7 +245,7 @@ export class NexusOrchestrator {
   public configManager: NexusConfigManager
 
   // OpenCode context (set during initialization)
-  public ctx: any = null
+  public ctx: NexusPluginContext | null = null
 
   // WebSocket broadcaster (set via initBroadcaster)
   public broadcaster: StateBroadcaster | null = null
@@ -217,8 +309,10 @@ export class NexusOrchestrator {
   // OS notification manager
   public notifications: NotificationManager | null = null
 
-  // Real model pricing from OpenCode (populated via loadModelCosts)
-  public modelCosts: Map<string, { input: number; output: number; cacheRead: number; cacheWrite: number }> = new Map()
+  // Real model pricing from OpenCode (populated via loadModelCosts).
+  // Keyed by "providerID/id" (bare ids are not unique across providers) and
+  // valued in **USD per 1K tokens** — the same unit as the hardcoded table.
+  public modelCosts: Map<string, NexusModelCost> = new Map()
 
   // Set when a spawn fell back to ctx.session.create() instead of the built-in
   // subagent tool (child session not parent-linked). null when the last spawn
@@ -264,13 +358,13 @@ export class NexusOrchestrator {
   /**
    * Initialize with OpenCode plugin context for session API access
    */
-  async initialize(ctx: any, onStateChange?: () => void) {
+  async initialize(ctx: NexusPluginContext, onStateChange?: () => void) {
     this.ctx = ctx
     this.onStateChange = onStateChange ?? null
 
     // Load project/global config files from disk
     // Use plugin location directory, not process.cwd() which may be wrong
-    const projectDir = ctx.location?.directory || process.cwd()
+    const projectDir = ctx.location.directory
     this.configManager.loadFromPath(projectDir)
 
     // Load real model pricing from OpenCode
@@ -299,48 +393,42 @@ export class NexusOrchestrator {
 
   /**
    * Load real model pricing from OpenCode's model list API.
-   * Falls back to hardcoded values if API is unavailable.
+   *
+   * `ctx.model.list()` returns `{ location, data }` where each `ModelInfo`
+   * carries a `cost` array (one entry per context tier). We read the first
+   * entry as the base tier. `cost` may be empty for free / locally served
+   * models, and the whole API may be absent — in both cases `modelCosts` is
+   * left untouched and the hardcoded pricing tables are used instead.
+   *
+   * Units: OpenCode reports `ModelCost` in **USD per MILLION tokens**
+   * (`Money.USDPerMillionTokens`). `modelCosts` stores **USD per 1K tokens**,
+   * which is the unit the hardcoded table and every consumer of `modelCosts`
+   * use. The conversion happens here, on write, so the rest of the plugin never
+   * has to think about it.
    */
   private async loadModelCosts(): Promise<void> {
     try {
-      if (!this.ctx) return
+      if (!this.ctx?.model) return
 
-      // Method 1: Try via plugin client SDK (server plugin context)
-      if (this.ctx.client?.model?.list) {
-        const result = await this.ctx.client.model.list()
-        const models = result?.data?.data ?? result?.data ?? []
-        if (Array.isArray(models)) {
-          for (const model of models) {
-            if (model.cost && Array.isArray(model.cost) && model.cost.length > 0) {
-              const baseCost = model.cost[0]
-              this.modelCosts.set(model.id, {
-                input: baseCost.input || 0,
-                output: baseCost.output || 0,
-                cacheRead: baseCost.cache?.read || 0,
-                cacheWrite: baseCost.cache?.write || 0,
-              })
-            }
-          }
-        }
-        return
-      }
+      const { data } = await this.ctx.model.list()
+      if (!Array.isArray(data) || data.length === 0) return
 
-      // Method 2: Try via TUI location context (if available)
-      const location = this.ctx.location ?? this.ctx.data?.location?.default()
-      if (location && this.ctx.data?.location?.model) {
-        await this.ctx.data.location.model.sync(location)
-        const models = this.ctx.data.location.model.list(location) ?? []
-        for (const model of models) {
-          if (model.cost && Array.isArray(model.cost) && model.cost.length > 0) {
-            const baseCost = model.cost[0]
-            this.modelCosts.set(model.id, {
-              input: baseCost.input || 0,
-              output: baseCost.output || 0,
-              cacheRead: baseCost.cache?.read || 0,
-              cacheWrite: baseCost.cache?.write || 0,
-            })
-          }
-        }
+      // per-million → per-1K
+      const per1k = (v: number | undefined): number => (v || 0) / 1000
+
+      for (const model of data) {
+        if (!model?.cost || !Array.isArray(model.cost) || model.cost.length === 0) continue
+        // `cost[0]` is the base context tier; a model's context window can
+        // price higher on later tiers, but the base tier is the representative
+        // figure for a single task.
+        const baseCost = model.cost[0]
+        // Keyed by "providerID/id": bare ids are not unique across providers.
+        this.modelCosts.set(`${model.providerID}/${model.id}`, {
+          input: per1k(baseCost.input),
+          output: per1k(baseCost.output),
+          cacheRead: per1k(baseCost.cache?.read),
+          cacheWrite: per1k(baseCost.cache?.write),
+        })
       }
     } catch {
       // Cost loading is best-effort — hardcoded fallbacks will be used
@@ -348,7 +436,9 @@ export class NexusOrchestrator {
   }
 
   /**
-   * Manually set model costs (e.g., from TUI model list)
+   * Manually set model costs (e.g., from TUI model list).
+   * Keys may be "providerID/id" or a bare "id". Values are USD per 1K tokens,
+   * matching the unit `loadModelCosts` normalises to.
    */
   setModelCosts(costs: Record<string, { input: number; output: number; cacheRead?: number; cacheWrite?: number }>): void {
     for (const [model, cost] of Object.entries(costs)) {
@@ -760,16 +850,18 @@ export class NexusOrchestrator {
 
       // Get the result context
       const messages = await this.ctx.session.context({ sessionID: agent.sessionID })
-      const lastAssistantMsg = messages.filter((m: any) => m.role === 'assistant').pop()
-      const output = lastAssistantMsg?.content || "Task completed"
+      // Aligned with the `nexus.spawn` / `nexus.delegate` tools: this string is
+      // persisted in `TaskResult.output` (execution history, dashboard), so it
+      // must say that no output was captured rather than look like a result.
+      const output = lastAssistantText(messages) || "Task completed (no output captured)"
 
       const duration = Date.now() - startTime
       const result: TaskResult = {
         success: true,
-        output: typeof output === 'string' ? output : JSON.stringify(output),
+        output,
         duration,
         tokensUsed: 0, // Would need to parse from session context
-        cost: this.estimateModelCost(agent.model.model)
+        cost: this.estimateModelCost(agent.model.model, agent.model.provider)
       }
 
       this.dag!.markComplete(node.id, result)
@@ -816,7 +908,7 @@ export class NexusOrchestrator {
       }
 
       // Scan task output for security issues
-      if (typeof output === 'string' && output.length > 0) {
+      if (output.length > 0) {
         const securityIssues = this.securityScanner.scanContent(output, node.task.name)
         if (securityIssues.length > 0) {
           this.emit('security:issues-found', {
@@ -1052,7 +1144,7 @@ export class NexusOrchestrator {
    * `progress` callback immediately after creating the session.
    */
   private async createChildSession(params: {
-    tool: any
+    tool: SubagentTool
     agent: string
     description: string
     prompt: string
@@ -1077,19 +1169,22 @@ export class NexusOrchestrator {
     // The subagent tool fires progress with the child session ID as soon as the
     // session exists, before the child finishes. That is our source of truth.
     let childSessionID: string | undefined
-    let reportProgress: ((p: { sessionID: string; status: string }) => void) | undefined
+    let resolveChildSession: ((id: string) => void) | null = null
     let watchdog: ReturnType<typeof setTimeout> | undefined
     const childSessionReady = new Promise<string>((resolve, reject) => {
-      reportProgress = async (p: { sessionID: string; status: string }) => {
-        if (p?.sessionID && !childSessionID) {
-          childSessionID = p.sessionID
-          resolve(p.sessionID)
-        }
-      }
+      resolveChildSession = resolve
       // Never hang spawn waiting on progress if the tool misbehaves.
       watchdog = setTimeout(() => reject(new Error(`subagent tool did not report a child session for ${agent}`)), 30_000)
     })
     childSessionReady.catch(() => {})
+
+    const reportProgress = (p: { sessionID: string; status: string }): Promise<void> => {
+      if (p?.sessionID && !childSessionID) {
+        childSessionID = p.sessionID
+        resolveChildSession?.(p.sessionID)
+      }
+      return Promise.resolve()
+    }
 
     const toolContext = {
       sessionID: parent.sessionID,
@@ -1100,10 +1195,10 @@ export class NexusOrchestrator {
       signal: parent.signal ?? new AbortController().signal,
     }
 
-    const subagentCall = tool.execute(
+    const subagentCall: Promise<unknown> = tool.execute(
       { agent, description, prompt, model, background: true },
       toolContext,
-    ) as Promise<unknown>
+    )
 
     let childSessionIDResolved: string
     try {
@@ -1112,7 +1207,10 @@ export class NexusOrchestrator {
         // Surface real tool failures (e.g. "Subagent denied") instead of timing out.
         subagentCall.then(
           () => { throw new Error(`subagent tool finished without reporting a child session for ${agent}`) },
-          (err: any) => { throw new Error(`subagent tool failed for ${agent}: ${err?.message || err}`) },
+          (err: unknown) => {
+            const message = err instanceof Error ? err.message : String(err)
+            throw new Error(`subagent tool failed for ${agent}: ${message}`)
+          },
         ),
       ])
     } finally {
@@ -1195,8 +1293,13 @@ export class NexusOrchestrator {
     const toolList = parent && typeof this.ctx.tool?.list === 'function'
       ? await this.ctx.tool.list()
       : undefined
-    const subagentTool = Array.isArray(toolList)
-      ? toolList.find(t => t?.id === 'subagent' && typeof t?.execute === 'function')
+    // A malformed (non-array) tool list is treated as "tool unavailable", i.e. a
+    // degraded spawn. `ToolInfo["execute"]`'s input is `any` (the schema is
+    // runtime-only), so the found tool is narrowed to `SubagentTool` — that is
+    // the one cast, and it is what makes the `subagent` invocation below
+    // type-checked instead of unchecked.
+    const subagentTool: SubagentTool | undefined = Array.isArray(toolList)
+      ? toolList.find(t => t?.id === 'subagent' && typeof t?.execute === 'function') as SubagentTool | undefined
       : undefined
 
     // Complete task text. On the subagent-tool path the tool's `prompt`
@@ -1365,16 +1468,53 @@ export class NexusOrchestrator {
     return this.selectBestModel(role, complexity)
   }
 
-  private estimateModelCost(model: string): number {
-    // Try real pricing data first
-    const realCost = this.modelCosts.get(model)
-    if (realCost) {
-      // Estimate cost per 1K tokens (input + output averaged)
-      // Real pricing is per-token, we estimate per 1K tokens for budget tracking
-      return (realCost.input * 1000 + realCost.output * 1000) / 2
+  /**
+   * Resolve real pricing for a model.
+   *
+   * `modelCosts` is keyed by "providerID/id", but callers hold either a
+   * provider-qualified ref or a bare model id, and users type either form into
+   * the `model.costs` tool. Resolution order:
+   *   1. the exact key as given (covers "provider/id" and manually set bare ids)
+   *   2. "provider/id" reconstructed from `provider` + `model`
+   *   3. a bare-id match across providers — the cheapest wins, so a provider
+   *      collision cannot silently shadow the cheaper price
+   */
+  getModelCost(model: string, provider?: string): NexusModelCost | undefined {
+    const exact = this.modelCosts.get(model)
+    if (exact) return exact
+
+    if (provider) {
+      const qualified = this.modelCosts.get(`${provider}/${model}`)
+      if (qualified) return qualified
     }
 
-    // Fallback to hardcoded estimates
+    const bare = model.includes('/') ? model.slice(model.indexOf('/') + 1) : model
+    let best: NexusModelCost | undefined
+    for (const [key, cost] of this.modelCosts) {
+      if (key.slice(key.indexOf('/') + 1) !== bare) continue
+      if (!best || cost.input < best.input) best = cost
+    }
+    return best
+  }
+
+  private estimateModelCost(model: string, provider?: string): number {
+    // Try real pricing data first. `modelCosts` is USD per 1K tokens, so the
+    // average of input and output is already the per-1K figure.
+    const realCost = this.getModelCost(model, provider)
+    if (realCost) {
+      return (realCost.input + realCost.output) / 2
+    }
+
+    // Fallback to hardcoded estimates.
+    //
+    // NOTE ON UNITS: this table is a hand-tuned rough *relative* scale on its
+    // own footing — its numbers are NOT USD per 1K tokens and are not derived
+    // from provider pricing (real per-1K for sonnet is ~0.009, not 0.15). It is
+    // only ever used to rank and to keep budgeting sane when OpenCode exposes
+    // no pricing, and `scoreModel`'s `maxCost` is calibrated to this table's
+    // scale. Do not "fix" one of the two to match the other: reconciling them
+    // means rescaling the table *and* `maxCost` together, which changes model
+    // selection. Real pricing is always preferred via `getModelCost` above.
     const costs: Record<string, number> = {
       'claude-sonnet-4-6': 0.15,
       'claude-opus-4-7': 15.00,
@@ -1417,9 +1557,9 @@ export class NexusOrchestrator {
     const [provider, ...parts] = modelId.split('/')
     const model = parts.join('/')
 
-    const cost = this.estimateModelCost(model)
+    const cost = this.estimateModelCost(model, provider)
     const quality = this.estimateModelQuality(model)
-    const maxCost = 15.00 // normalize against most expensive
+    const maxCost = 15.00 // normalize against the fallback table's most expensive entry
 
     const costScore = 1 - (cost / maxCost)
     const speedScore = this.estimateModelSpeed(model)
@@ -1463,7 +1603,7 @@ export class NexusOrchestrator {
     // Filter by budget
     const budgetRemaining = this.budget.maxTotalCost - this.totalSpent
     const affordable = scored.filter(s => {
-      const cost = this.estimateModelCost(s.model)
+      const cost = this.estimateModelCost(s.model, s.provider)
       return cost <= budgetRemaining || cost === 0
     })
 
@@ -1474,7 +1614,7 @@ export class NexusOrchestrator {
     return {
       provider: best.provider,
       model: best.model,
-      estimatedCost: this.estimateModelCost(best.model),
+      estimatedCost: this.estimateModelCost(best.model, best.provider),
       estimatedQuality: best.qualityScore,
       reasoning: best.reasoning
     }
