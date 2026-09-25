@@ -1157,9 +1157,6 @@ export class NexusOrchestrator {
     if (!parent.sessionID) {
       throw new Error("Cannot spawn agent without a parent session ID")
     }
-    if (!tool || typeof tool.execute !== 'function') {
-      throw new Error("OpenCode's built-in 'subagent' tool is unavailable — cannot create a child session")
-    }
     // The subagent executor resolves the caller's permission rules from
     // `agent`. Do not fabricate a most-permissive identity — fail loudly.
     if (!parent.agent) {
@@ -1309,7 +1306,9 @@ export class NexusOrchestrator {
     let spawnPath: SpawnPath = 'session-create'
     let childSessionID: string
 
-    if (subagentTool) {
+    // `subagentTool` is only ever found when `parent` is set (tool.list() is not
+    // consulted otherwise), so this is the linked path.
+    if (parent && subagentTool) {
       if (!taskText) {
         throw new Error("spawnAgent requires task text when using the subagent tool path")
       }
@@ -1320,7 +1319,7 @@ export class NexusOrchestrator {
         description: title,
         prompt: taskText,
         model: modelConfig,
-        parent: parent!,
+        parent,
         callID: agentId,
       })
     } else {
@@ -1488,7 +1487,8 @@ export class NexusOrchestrator {
       if (qualified) return qualified
     }
 
-    const bare = model.includes('/') ? model.slice(model.indexOf('/') + 1) : model
+    // `indexOf` is -1 when there is no "/", and slice(0) is the whole string.
+    const bare = model.slice(model.indexOf('/') + 1)
     let best: NexusModelCost | undefined
     for (const [key, cost] of this.modelCosts) {
       if (key.slice(key.indexOf('/') + 1) !== bare) continue

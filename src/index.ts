@@ -1,5 +1,5 @@
 import { Plugin } from "@opencode/plugin"
-import { NexusOrchestrator, lastAssistantText, type NexusPluginContext } from "./orchestrator"
+import { NexusOrchestrator, lastAssistantText, type SpawnedAgent } from "./orchestrator"
 import { PRESETS } from "./config"
 import { TEMPLATES, instantiateTemplate, listTemplates } from "./templates"
 import { GoalManager } from "./goal"
@@ -186,10 +186,6 @@ Before marking a task complete:
 export default Plugin.define({
   id: "nexus",
   async setup(ctx) {
-    // The plugin context is structurally narrowed to what this plugin uses;
-    // `nexusCtx` is the same object the orchestrator was initialized with, held
-    // locally so the tool executors below do not re-assert nullability.
-    const nexusCtx: NexusPluginContext = ctx
     // Auto-create nexus-orchestrator agent if it doesn't exist
     try {
       const agentDir = join(homedir(), '.config', 'opencode', 'agents')
@@ -547,6 +543,42 @@ You are a technical writer who creates documentation that developers actually wa
       budgetRemaining: initialState.budgetRemaining
     })))
 
+    /**
+     * Create a child session and make sure the task reaches it exactly once.
+     * Shared by the `spawn` and `delegate` tools.
+     *
+     * The parent session is taken from the calling tool's own execution context:
+     * it is what OpenCode links the child session to (parentID), and it is passed
+     * explicitly rather than latched on the orchestrator, which would let
+     * internal spawns reuse a foreign parent session. On the subagent-tool path
+     * the tool itself delivers the task, so the manual `session.prompt` below
+     * only runs on the `session.create` fallback.
+     */
+    const spawnAndDeliver = async (
+      opts: { role: string; task: string; model?: string },
+      toolCtx: any,
+    ): Promise<SpawnedAgent> => {
+      const agent = await orchestrator.spawnAgent({ role: opts.role, model: opts.model }, {
+        toolContext: {
+          sessionID: toolCtx?.sessionID || '',
+          agent: toolCtx?.agent,
+          messageID: toolCtx?.messageID,
+          callID: toolCtx?.id,
+          signal: toolCtx?.signal,
+        },
+        task: opts.task,
+      })
+
+      if (agent.spawnPath !== 'subagent-tool') {
+        await ctx.session.prompt({
+          sessionID: agent.sessionID!,
+          text: opts.task
+        })
+      }
+
+      return agent
+    }
+
     // Register tools
     await ctx.tool.transform((editor) => {
       editor.namespace({
@@ -762,9 +794,7 @@ You are a technical writer who creates documentation that developers actually wa
         execute: async (input: unknown) => {
           const { model, setInput, setOutput } = input as { model?: string; setInput?: number; setOutput?: number }
 
-          // `modelCosts` is keyed by "providerID/id" and valued in USD per 1K
-          // tokens, so `getModelCost` resolves either the qualified or the bare
-          // form a user is likely to type.
+          // Every price `modelCosts` holds is USD per 1K tokens.
           const per1k = (v: number) => `$${v}/1K tokens`
 
           if (model && setInput !== undefined && setOutput !== undefined) {
@@ -774,7 +804,9 @@ You are a technical writer who creates documentation that developers actually wa
           }
 
           if (model) {
-            // Show specific model cost
+            // Show specific model cost. `modelCosts` is keyed by
+            // "providerID/id" but users type either that or a bare id, so
+            // `getModelCost` resolves both.
             const cost = orchestrator.getModelCost(model)
             if (cost) {
               return { content: `${model}: input=${per1k(cost.input)}, output=${per1k(cost.output)}, cache_read=${per1k(cost.cacheRead)}, cache_write=${per1k(cost.cacheWrite)}` }
@@ -815,32 +847,7 @@ You are a technical writer who creates documentation that developers actually wa
         execute: async (input: unknown, toolCtx: any) => {
           const { role, task, model, wait, timeout } = input as { role: string; task: string; model?: string; wait?: boolean; timeout?: number }
           try {
-            // The parent session ID comes from this tool's own execution context.
-            // It is what OpenCode links the child session to (parentID) and is
-            // passed explicitly to spawnAgent (never latched on the
-            // orchestrator, which would let internal spawns reuse a foreign
-            // parent session).
-            const toolCtxSessionID: string = toolCtx?.sessionID || ''
-
-            const agent = await orchestrator.spawnAgent({ role, model }, {
-              toolContext: {
-                sessionID: toolCtxSessionID,
-                agent: toolCtx?.agent,
-                messageID: toolCtx?.messageID,
-                callID: toolCtx?.id,
-                signal: toolCtx?.signal,
-              },
-              task,
-            })
-
-            // The task is delivered by the subagent tool on the linked path.
-            // Only prompt manually when the spawn fell back to session.create.
-            if (agent.spawnPath !== 'subagent-tool') {
-              await nexusCtx.session.prompt({
-                sessionID: agent.sessionID!,
-                text: task
-              })
-            }
+            const agent = await spawnAndDeliver({ role, task, model }, toolCtx)
 
             agent.status = 'working'
             orchestrator.notifyStateChange()
@@ -848,7 +855,7 @@ You are a technical writer who creates documentation that developers actually wa
             // If wait is requested, block until completion or timeout
             if (wait) {
               const waitTimeout = timeout || 120000
-              const waitPromise = nexusCtx.session.wait({ sessionID: agent.sessionID! })
+              const waitPromise = ctx.session.wait({ sessionID: agent.sessionID! })
               const timeoutPromise = new Promise((_, reject) =>
                 setTimeout(() => reject(new Error(`Timed out after ${waitTimeout}ms`)), waitTimeout)
               )
@@ -862,7 +869,7 @@ You are a technical writer who creates documentation that developers actually wa
 
                 // Try to get whatever results are available
                 try {
-                  const messages = await nexusCtx.session.context({ sessionID: agent.sessionID! })
+                  const messages = await ctx.session.context({ sessionID: agent.sessionID! })
                   const partialText = lastAssistantText(messages)
                   if (partialText) {
                     agent.status = 'completed'
@@ -896,7 +903,7 @@ You are a technical writer who creates documentation that developers actually wa
 
               // Wait completed — get final results
               try {
-                const messages = await nexusCtx.session.context({ sessionID: agent.sessionID! })
+                const messages = await ctx.session.context({ sessionID: agent.sessionID! })
                 const result = lastAssistantText(messages) || 'Task completed (no output captured)'
 
                 agent.status = 'completed'
@@ -979,35 +986,13 @@ You are a technical writer who creates documentation that developers actually wa
         execute: async (input: unknown, toolCtx: any) => {
           const { role, task, model, timeout } = input as { role: string; task: string; model?: string; timeout?: number }
           try {
-            // The parent session comes from this tool's execution context and is
-            // passed explicitly (never latched on the orchestrator).
-            const toolCtxSessionID: string = toolCtx?.sessionID || ''
-
-            const agent = await orchestrator.spawnAgent({ role, model }, {
-              toolContext: {
-                sessionID: toolCtxSessionID,
-                agent: toolCtx?.agent,
-                messageID: toolCtx?.messageID,
-                callID: toolCtx?.id,
-                signal: toolCtx?.signal,
-              },
-              task,
-            })
-
-            // On the linked path the task was already delivered by the subagent
-            // tool; only prompt manually on the session.create fallback.
-            if (agent.spawnPath !== 'subagent-tool') {
-              await nexusCtx.session.prompt({
-                sessionID: agent.sessionID!,
-                text: task
-              })
-            }
+            const agent = await spawnAndDeliver({ role, task, model }, toolCtx)
 
             agent.status = 'working'
             orchestrator.notifyStateChange()
 
             const waitTimeout = timeout || 120000
-            const waitPromise = nexusCtx.session.wait({ sessionID: agent.sessionID! })
+            const waitPromise = ctx.session.wait({ sessionID: agent.sessionID! })
             const timeoutPromise = new Promise<'timeout'>((resolve) =>
               setTimeout(() => resolve('timeout'), waitTimeout)
             )
@@ -1016,7 +1001,7 @@ You are a technical writer who creates documentation that developers actually wa
 
             // Get the result regardless of outcome
             try {
-              const messages = await nexusCtx.session.context({ sessionID: agent.sessionID! })
+              const messages = await ctx.session.context({ sessionID: agent.sessionID! })
               const resultContent = lastAssistantText(messages) || (outcome === 'timeout' ? 'Timed out — agent may still be running' : 'Completed with no output')
 
               agent.status = outcome === 'timeout' ? 'working' : 'completed'
@@ -1329,7 +1314,7 @@ You are a technical writer who creates documentation that developers actually wa
           // plugin context's `SessionDomain` is a `Pick` that omits it, so it
           // cannot be typed directly and is feature-detected through a narrow
           // structural lookup instead of assumed to be there.
-          const background = (nexusCtx.session as { background?: (input: { sessionID: string }) => Promise<void> }).background
+          const background = (ctx.session as { background?: (input: { sessionID: string }) => Promise<void> }).background
           if (!background) {
             return { content: "This OpenCode version does not expose session.background on the plugin context — nothing was detached." }
           }
@@ -1338,7 +1323,7 @@ You are a technical writer who creates documentation that developers actually wa
           for (const agent of agents) {
             if (!agent.sessionID) continue
             try {
-              await background.call(nexusCtx.session, { sessionID: agent.sessionID })
+              await background.call(ctx.session, { sessionID: agent.sessionID })
               detached++
             } catch {
               // Background may not be supported in all contexts
@@ -1362,7 +1347,7 @@ You are a technical writer who creates documentation that developers actually wa
         execute: async (input: unknown) => {
           const { sessionID } = input as { sessionID: string }
           try {
-            const messages = await nexusCtx.session.context({ sessionID })
+            const messages = await ctx.session.context({ sessionID })
             const text = lastAssistantText(messages)
             if (text) {
               return { content: `Session ${sessionID} result:\n${text}` }
