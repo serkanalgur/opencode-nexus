@@ -666,6 +666,9 @@ export class NexusOrchestrator {
         agentsUsed: this.agents.size
       }
     } catch (error) {
+      // Surface the cause: this returns success:false with no tasks, so
+      // swallowing the error here left callers with no explanation.
+      console.error('[nexus] DAG execution failed:', error)
       return {
         success: false,
         tasks: [],
@@ -768,7 +771,32 @@ export class NexusOrchestrator {
       const spawnPromises: Promise<void>[] = []
       for (const node of readyNodes) {
         if (this.agents.size < this.config.maxConcurrency) {
-          spawnPromises.push(this.spawnAndExecute(node))
+          // Contain per node: `spawnAndExecute` can throw before any agent
+          // exists (malformed model selection, budget exceeded, session-create
+          // failure). Unguarded, one rejection fails the whole `Promise.all`
+          // and discards every sibling node's result.
+          spawnPromises.push(
+            this.spawnAndExecute(node).catch((error: unknown) => {
+              const err = error instanceof Error ? error : new Error(String(error))
+              node.status = 'failed'
+              node.task.status = 'failed'
+              node.result = { success: false, error: err.message, duration: 0, tokensUsed: 0, cost: 0 }
+              // `markFailed` only sets node.status; node.result above is what
+              // `collectResults` reads, so both are required for the failure to
+              // appear in the `ExecutionResult`.
+              this.dag!.markFailed(node.id, err)
+              this.notifyStateChange()
+              // No agent exists when the spawn itself failed, so agentId /
+              // model / sessionID are omitted rather than fabricated.
+              this.emit('task:failed', {
+                taskId: node.id,
+                taskName: node.task.name,
+                role: node.task.requiredRole,
+                error: err.message,
+                duration: 0
+              })
+            })
+          )
         }
       }
 
@@ -784,11 +812,28 @@ export class NexusOrchestrator {
     const complexity = this.analyzeComplexity(node.task)
     const model = this.selectModel(node.task.requiredRole, complexity)
 
+    // `ModelSelection.model` is the bare id (`scoreModel` splits the candidate
+    // on "/"), but `spawnAgent` needs the qualified "providerID/modelID" form.
+    // A role's configured model is user-supplied and may lack a provider prefix;
+    // `scoreModel` then yields the whole value as `provider` and `model: ""`,
+    // and `spawnAgent` resolves that empty id to 'default' — a silent wrong-model
+    // spawn.
+    if (!model.provider || !model.model) {
+      const missing = !model.provider && !model.model ? 'provider and model'
+        : !model.provider ? 'provider' : 'model'
+      throw new Error(
+        `Model selection for role "${node.task.requiredRole}" is missing its ${missing}: ` +
+        `got { provider: ${JSON.stringify(model.provider)}, model: ${JSON.stringify(model.model)} }. ` +
+        `Cannot build a "providerID/modelID" reference.`
+      )
+    }
+    const qualifiedModel = `${model.provider}/${model.model}`
+
     // Spawn agent with real session
     const agent = await this.spawnAgent({
       role: node.task.requiredRole,
       task: node.task,
-      model: model.model
+      model: qualifiedModel
     })
 
     node.spawnedAgent = agent
@@ -1256,7 +1301,11 @@ export class NexusOrchestrator {
       if (match) {
         modelConfig = match
       } else {
-        throw new Error(`Invalid model "${config.model}". Use "providerID/modelID" format (e.g. "opencode-go/mimo-v2.5")`)
+        // Report `modelConfig` (the value that failed to resolve), not
+        // `config.model`, which is undefined when the value came from the role
+        // config rather than the caller.
+        const source = config.model ? 'requested' : 'configured for role'
+        throw new Error(`Invalid model "${modelConfig}" (${source} "${config.role}"). Use "providerID/modelID" format (e.g. "opencode-go/mimo-v2.5")`)
       }
     }
 
