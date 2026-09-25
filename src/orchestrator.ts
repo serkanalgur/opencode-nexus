@@ -23,6 +23,37 @@ import { CostForecaster } from "./forecast"
 import { WorktreeManager } from "./worktree"
 import { TodoEnforcer } from "./todo"
 
+/**
+ * Subset of OpenCode's `Tool.Context` that `spawnAgent` needs to fabricate a
+ * tool invocation for the built-in `subagent` tool. Passed in from the plugin's
+ * tool executor so the child session is linked to the real parent session.
+ */
+export interface SpawnToolContext {
+  sessionID: string
+  agent?: string
+  messageID?: string
+  callID?: string
+  signal?: AbortSignal
+}
+
+export interface SpawnOptions {
+  /**
+   * The tool context of the calling tool. When present (and carrying a
+   * `sessionID`), the child session is created through OpenCode's built-in
+   * `subagent` tool so OpenCode links it to the parent via `parentID`.
+   * When absent (internal scheduler / respawn call sites) a plain
+   * `ctx.session.create()` is used, as before.
+   */
+  toolContext?: SpawnToolContext
+  /** Full task text. Required for the subagent-tool path, which delivers it. */
+  task?: string
+}
+
+/** How a child session was created — lets callers know which path was taken. */
+export type SpawnPath = 'subagent-tool' | 'session-create'
+
+export type SpawnedAgent = Agent & { spawnPath?: SpawnPath }
+
 export interface ModelScore {
   model: string
   provider: string
@@ -189,8 +220,10 @@ export class NexusOrchestrator {
   // Real model pricing from OpenCode (populated via loadModelCosts)
   public modelCosts: Map<string, { input: number; output: number; cacheRead: number; cacheWrite: number }> = new Map()
 
-  // Parent session ID for linking child sessions
-  public parentSessionID: string | null = null
+  // Set when a spawn fell back to ctx.session.create() instead of the built-in
+  // subagent tool (child session not parent-linked). null when the last spawn
+  // used the subagent tool.
+  public lastDegradedSpawn: { agentId: string; role: string; reason: 'no-parent-context' | 'subagent-tool-unavailable' } | null = null
 
   constructor(config?: Partial<NexusConfig>, messageStoreConfig?: Partial<MessageStoreConfig>, memoryStoreConfig?: Partial<MemoryStoreConfig>) {
     this.config = this.mergeConfig(config)
@@ -976,6 +1009,10 @@ export class NexusOrchestrator {
         // Spawn with fallback model override
         node.status = 'pending'
         this.notifyStateChange()
+        // KNOWN PRE-EXISTING BUG (present at base commit a87e81e, not introduced
+        // here): this bare spawnAgent never prompts the new session, so the
+        // fallback agent receives no task. Out of scope for the subagent-tool
+        // dispatch change; do not mistake it for a regression from that work.
         await this.spawnAgent({ role: node.task.requiredRole, model: fallbackModel })
         return
       }
@@ -1004,9 +1041,104 @@ export class NexusOrchestrator {
   // === Agent Management ===
 
   /**
-   * Spawn a real OpenCode session for an agent
+   * Create a child session by invoking OpenCode's built-in `subagent` tool.
+   *
+   * The public session API (`ctx.session.create`) has no `parentID` field, so a
+   * plugin cannot link a child session to its parent that way. The built-in
+   * `subagent` tool does set `parentID` from the tool context's `sessionID`,
+   * so we call it directly with a fabricated tool context.
+   *
+   * Returns the child session ID, which the `subagent` tool reports through its
+   * `progress` callback immediately after creating the session.
    */
-  async spawnAgent(config: SpawnConfig): Promise<Agent> {
+  private async createChildSession(params: {
+    tool: any
+    agent: string
+    description: string
+    prompt: string
+    model: string
+    parent: SpawnToolContext
+    callID: string
+  }): Promise<string> {
+    const { tool, agent, description, prompt, model, parent, callID } = params
+
+    if (!parent.sessionID) {
+      throw new Error("Cannot spawn agent without a parent session ID")
+    }
+    if (!tool || typeof tool.execute !== 'function') {
+      throw new Error("OpenCode's built-in 'subagent' tool is unavailable — cannot create a child session")
+    }
+    // The subagent executor resolves the caller's permission rules from
+    // `agent`. Do not fabricate a most-permissive identity — fail loudly.
+    if (!parent.agent) {
+      throw new Error("Cannot spawn agent without the calling agent id (tool context has no 'agent')")
+    }
+
+    // The subagent tool fires progress with the child session ID as soon as the
+    // session exists, before the child finishes. That is our source of truth.
+    let childSessionID: string | undefined
+    let reportProgress: ((p: { sessionID: string; status: string }) => void) | undefined
+    let watchdog: ReturnType<typeof setTimeout> | undefined
+    const childSessionReady = new Promise<string>((resolve, reject) => {
+      reportProgress = async (p: { sessionID: string; status: string }) => {
+        if (p?.sessionID && !childSessionID) {
+          childSessionID = p.sessionID
+          resolve(p.sessionID)
+        }
+      }
+      // Never hang spawn waiting on progress if the tool misbehaves.
+      watchdog = setTimeout(() => reject(new Error(`subagent tool did not report a child session for ${agent}`)), 30_000)
+    })
+    childSessionReady.catch(() => {})
+
+    const toolContext = {
+      sessionID: parent.sessionID,
+      agent: parent.agent,
+      messageID: parent.messageID || `msg_${callID}`,
+      id: `call_${callID}`,
+      progress: reportProgress,
+      signal: parent.signal ?? new AbortController().signal,
+    }
+
+    const subagentCall = tool.execute(
+      { agent, description, prompt, model, background: true },
+      toolContext,
+    ) as Promise<unknown>
+
+    let childSessionIDResolved: string
+    try {
+      childSessionIDResolved = await Promise.race([
+        childSessionReady,
+        // Surface real tool failures (e.g. "Subagent denied") instead of timing out.
+        subagentCall.then(
+          () => { throw new Error(`subagent tool finished without reporting a child session for ${agent}`) },
+          (err: any) => { throw new Error(`subagent tool failed for ${agent}: ${err?.message || err}`) },
+        ),
+      ])
+    } finally {
+      if (watchdog) clearTimeout(watchdog)
+    }
+
+    // The child runs in the background; surface tool failures without rejecting
+    // the spawn once we already have a usable child session.
+    subagentCall.catch(() => {})
+
+    return childSessionIDResolved
+  }
+
+  /**
+   * Spawn a real OpenCode session for an agent
+   *
+   * @param options.toolContext Tool context of the calling tool. Only when this
+   *   is supplied (with a `sessionID`) is the built-in `subagent` tool used, so
+   *   OpenCode links the child to the real parent session. Internal call sites
+   *   (scheduler, model-fallback respawn) have no tool context and keep using
+   *   `ctx.session.create()`.
+   * @param options.task Full task text, delivered through the subagent tool's
+   *   `prompt` on the subagent-tool path. Callers on the create path must
+   *   deliver the task themselves via `ctx.session.prompt()`.
+   */
+  async spawnAgent(config: SpawnConfig, options?: SpawnOptions): Promise<SpawnedAgent> {
     if (!this.ctx) {
       throw new Error("Orchestrator not initialized")
     }
@@ -1041,33 +1173,93 @@ export class NexusOrchestrator {
     const roleEmoji = this.configManager.getRoleEmoji(config.role)
     const title = `${roleEmoji} ${this.configManager.getRoleDisplayName(config.role)} — ${modelConfig}`
 
-    // Map Nexus roles to OpenCode agent types
+    // Map Nexus roles to the plugin's own nexus-* agents (see the agent
+    // markdown files written in index.ts). These are non-primary, so the
+    // subagent executor accepts them.
     const agentTypeMap: Record<string, string> = {
-      architect: 'architect',
-      coder: 'build-orchestrator',
-      reviewer: 'code-reviewer',
-      tester: 'build-orchestrator',
-      explorer: 'explore',
-      documenter: 'doc-writer',
+      architect: 'nexus-architect',
+      coder: 'nexus-coder',
+      reviewer: 'nexus-reviewer',
+      tester: 'nexus-tester',
+      explorer: 'nexus-explorer',
+      documenter: 'nexus-documenter',
     }
-    const agentType = agentTypeMap[config.role] || 'build'
+    const agentType = agentTypeMap[config.role] || 'nexus-coder'
 
-    // Create session with agent and model params directly (most reliable method)
-    // Use parentID to link child session to parent in OpenCode UI
-    const session = await this.ctx.session.create({
-      title,
-      agent: agentType,
-      model: modelName ? { providerID: provider, id: modelName } : undefined,
-      parentID: this.parentSessionID || undefined,
-      metadata: {
-        nexusRole: config.role,
-        nexusTask: config.task?.name || 'direct-spawn',
-        nexusAgentId: agentId,
-        nexusModel: modelConfig,
-      },
-    })
+    // The subagent-tool path requires an explicitly supplied tool context: it
+    // must never borrow a parent session latched from an unrelated session.
+    const parent: SpawnToolContext | undefined = options?.toolContext?.sessionID
+      ? options.toolContext
+      : undefined
 
-    const agent: Agent = {
+    const toolList = parent && typeof this.ctx.tool?.list === 'function'
+      ? await this.ctx.tool.list()
+      : undefined
+    const subagentTool = Array.isArray(toolList)
+      ? toolList.find(t => t?.id === 'subagent' && typeof t?.execute === 'function')
+      : undefined
+
+    // Complete task text. On the subagent-tool path the tool's `prompt`
+    // delivers it — that is the single delivery point (no second prompt).
+    const taskText = options?.task || config.task?.description || config.task?.name || ''
+
+    let spawnPath: SpawnPath = 'session-create'
+    let childSessionID: string
+
+    if (subagentTool) {
+      if (!taskText) {
+        throw new Error("spawnAgent requires task text when using the subagent tool path")
+      }
+      spawnPath = 'subagent-tool'
+      childSessionID = await this.createChildSession({
+        tool: subagentTool,
+        agent: agentType,
+        description: title,
+        prompt: taskText,
+        model: modelConfig,
+        parent: parent!,
+        callID: agentId,
+      })
+    } else {
+      // No tool context (internal scheduler / respawn call sites) or the tool is
+      // unavailable. NOTE: there is deliberately no session-metadata write after
+      // this — SessionUpdateInput is exactly { sessionID, title?, permissions? },
+      // so `metadata` would be silently dropped. The equivalent data (role,
+      // model, sessionID) lives on the Agent record, which is persisted to
+      // ctx.storage as `orchestrator-state` / `nexus-sidebar-state`.
+      const created = await this.ctx.session.create({
+        title,
+        agent: agentType,
+        model: modelName ? { providerID: provider, id: modelName } : undefined,
+        metadata: {
+          nexusRole: config.role,
+          nexusTask: config.task?.name || 'direct-spawn',
+          nexusAgentId: agentId,
+          nexusModel: modelConfig,
+        },
+      })
+      childSessionID = created.id
+    }
+
+    if (spawnPath === 'session-create') {
+      // Make the degradation visible: a create-path child is NOT linked to a
+      // parent session in OpenCode, which is the defect this code fixes.
+      this.lastDegradedSpawn = {
+        agentId,
+        role: config.role,
+        // A parent context was supplied but the tool is missing; without any
+        // parent context tool.list() is never even consulted.
+        reason: parent ? 'subagent-tool-unavailable' : 'no-parent-context',
+      }
+      console.warn(
+        `[nexus] spawn degraded for ${config.role}: child session ${childSessionID} was created via ` +
+        `ctx.session.create (${this.lastDegradedSpawn.reason}) and is not linked to a parent session.`
+      )
+    } else {
+      this.lastDegradedSpawn = null
+    }
+
+    const agent: SpawnedAgent = {
       id: agentId,
       name: title,
       role: config.role,
@@ -1089,7 +1281,8 @@ export class NexusOrchestrator {
         averageResponseTime: 0,
         errorRate: 0
       },
-      sessionID: session.id
+      sessionID: childSessionID,
+      spawnPath
     }
 
     this.agents.set(agentId, agent)
