@@ -60,7 +60,7 @@ function entry(cost: number, usage: 'measured' | 'estimated') {
   }
 }
 
-function trackerWith(...costs: Array<[number, 'measured' | 'estimated']>): PerformanceTracker {
+function trackerWith(...costs: Array<[number, 'measured' | 'estimated']>): InstanceType<typeof PerformanceTracker> {
   const tracker = new PerformanceTracker()
   for (const [cost, usage] of costs) tracker.record(entry(cost, usage))
   return tracker
@@ -228,7 +228,7 @@ const TASK = {
 async function runExecute({ getThrows = false, price = false }: { getThrows?: boolean; price?: boolean } = {}) {
   const orchestrator = new NexusOrchestrator({
     schedulerInterval: 1,
-    selfHealing: { enabled: false },
+    selfHealing: { enabled: false, maxRetries: 3, retryDelay: 0, backoffMultiplier: 2, contextTransfer: false },
   })
   await orchestrator.initialize(makeCtx({ getThrows }) as never)
   // `price` installs real per-1K rates, so the pricing source resolves to

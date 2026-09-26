@@ -38,7 +38,7 @@ type Internals = {
   escalationPolicy: { fallbackModels: string[] }
 }
 
-function internals(orchestrator: NexusOrchestrator): Internals {
+function internals(orchestrator: InstanceType<typeof NexusOrchestrator>): Internals {
   return orchestrator as unknown as Internals
 }
 
@@ -131,26 +131,26 @@ type Ctx = ReturnType<typeof createCtx>
 function newOrchestrator() {
   return new NexusOrchestrator({
     schedulerInterval: 1,
-    selfHealing: { enabled: true, maxRetries: 0, retryDelay: 0, contextTransfer: false },
+    selfHealing: { enabled: true, maxRetries: 0, retryDelay: 0, backoffMultiplier: 2, contextTransfer: false },
     budget: { maxTotalCost: 10.00, maxCostPerTask: 1.00, maxCostPerAgent: 2.00, alertThreshold: 0.2, hardLimit: false }
   })
 }
 
-async function initialized(failLeadingPrompts = 0): Promise<{ orchestrator: NexusOrchestrator; h: Harness }> {
+async function initialized(failLeadingPrompts = 0): Promise<{ orchestrator: InstanceType<typeof NexusOrchestrator>; h: Harness }> {
   const orchestrator = newOrchestrator()
   const ctx = createCtx(failLeadingPrompts)
   await orchestrator.initialize(ctx as never)
   return { orchestrator, h: { prompts: ctx.prompts } }
 }
 
-function nodeOf(orchestrator: NexusOrchestrator, id: string): DAGNode {
+function nodeOf(orchestrator: InstanceType<typeof NexusOrchestrator>, id: string): DAGNode {
   const node = internals(orchestrator).dag?.nodes.get(id)
   if (!node) throw new Error(`no DAG node for ${id}`)
   return node
 }
 
 /** The agent the orchestrator reports for a given qualified model. */
-function agentFor(orchestrator: NexusOrchestrator, model: string) {
+function agentFor(orchestrator: InstanceType<typeof NexusOrchestrator>, model: string) {
   return orchestrator.getState().agents.find(a => a.model === model)
 }
 
@@ -397,6 +397,7 @@ describe('handleFailure step 3 — a throw in the fallback path is contained', (
     const spawnsPerTask = new Map<string, number>()
     const realSpawnAgent = orchestrator.spawnAgent.bind(orchestrator)
     orchestrator.spawnAgent = async (config) => {
+      if (!config.task) throw new Error('spawnAgent was called without a task')
       const taskId = config.task.id
       const seen = (spawnsPerTask.get(taskId) ?? 0) + 1
       spawnsPerTask.set(taskId, seen)

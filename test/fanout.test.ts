@@ -229,7 +229,7 @@ describe('MessageRouter', () => {
 })
 
 describe('MessageRouter integration with NexusOrchestrator', () => {
-  let { NexusOrchestrator } = require('../src/orchestrator')
+  const { NexusOrchestrator }: typeof import('../src/orchestrator') = require('../src/orchestrator')
   let orchestrator: InstanceType<typeof NexusOrchestrator>
 
   const mockCtx = {
@@ -251,7 +251,7 @@ describe('MessageRouter integration with NexusOrchestrator', () => {
     orchestrator = new NexusOrchestrator({
       budget: { maxTotalCost: 10.00, maxCostPerTask: 1.00, maxCostPerAgent: 2.00, alertThreshold: 0.2, hardLimit: false }
     })
-    orchestrator.initialize(mockCtx)
+    orchestrator.initialize(mockCtx as never)
   })
 
   it('should expose messageRouter property', () => {

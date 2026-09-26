@@ -287,9 +287,9 @@ describe('NexusOrchestrator', () => {
 
       // Store context manually to verify memory integration
       const context = orchestrator.collectContext(agent)
-      orchestrator.setMemory('agent', `context:${agent.id}`, context, agent.id)
+      orchestrator.setMemory('session', `context:${agent.id}`, context, agent.id)
 
-      const stored = orchestrator.getMemory('agent', `context:${agent.id}`)
+      const stored = orchestrator.getMemory('session', `context:${agent.id}`)
       expect(stored).toBeDefined()
       expect(stored?.value).toHaveProperty('previousAgentId')
       expect((stored?.value as any).previousAgentId).toBe(agent.id)

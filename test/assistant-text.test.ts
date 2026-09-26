@@ -3,6 +3,8 @@ import * as realOs from 'node:os'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { DAG, TaskResult } from '../src/types'
+import type { NexusSessionMessage } from '../src/orchestrator'
 
 const SANDBOX_HOME = mkdtempSync(join(tmpdir(), 'nexus-home-'))
 mock.module('node:os', () => ({ ...realOs, default: realOs, homedir: () => SANDBOX_HOME }))
@@ -20,11 +22,34 @@ const { NexusOrchestrator, lastAssistantText, assistantMessageText } = await imp
  */
 
 const user = { type: 'user', text: 'do the thing' } as const
-const assistant = (...text: string[]) => ({
+const assistant = (...text: string[]): NexusSessionMessage => ({
   type: 'assistant',
+  id: 'msg-assistant',
+  time: { created: 0 },
+  agent: 'coder',
+  model: { providerID: 'test', id: 'test' },
   content: text.map(t => ({ type: 'text', text: t })),
 })
 
+
+/**
+ * Minimal `DAG` double. These tests only exercise `markComplete`/`markFailed`,
+ * but `orchestrator.dag` is typed as the full `DAG` interface, so the
+ * remaining members have to be present. They are deliberately inert.
+ */
+function stubDAG(impl: Pick<DAG, 'markComplete' | 'markFailed'>): DAG {
+  return {
+    nodes: new Map(),
+    addNode() {},
+    addDependency() {},
+    removeNode() {},
+    getReadyNodes: () => [],
+    markComplete: impl.markComplete,
+    markFailed: impl.markFailed,
+    getParallelGroups: () => [],
+    isComplete: () => true,
+  }
+}
 describe('assistant text extraction from ctx.session.context()', () => {
   it('returns the joined text parts of an assistant message', () => {
     expect(assistantMessageText(assistant('part one ', 'part two'))).toBe('part one part two')
@@ -68,8 +93,8 @@ describe('assistant text extraction from ctx.session.context()', () => {
     }
     await orchestrator.initialize(ctx as never)
 
-    let recorded: { output: string; success: boolean } | undefined
-    orchestrator['dag'] = { markComplete: (_id: string, result: { output: string; success: boolean }) => { recorded = result } }
+    let recorded: TaskResult | undefined
+    orchestrator['dag'] = stubDAG({ markComplete: (_id: string, result: TaskResult) => { recorded = result }, markFailed: () => {} })
 
     const node = {
       id: 'node-1',
