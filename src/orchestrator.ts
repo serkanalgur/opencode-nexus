@@ -15,7 +15,7 @@ import { MessageStore, type MessageStoreConfig } from "./message-store"
 import { PersistentMemoryStore, type MemoryStoreConfig } from "./memory-store"
 import { HealthMonitor } from "./health"
 import { MessageRouter } from "./fanout"
-import { NotificationManager } from "./notifications"
+import { NotificationManager, type NotificationOptions } from "./notifications"
 import { LearningModule } from "./learning"
 import { ModuleRegistry, type ModuleContext } from "./modules"
 import { SecurityScanner } from "./security"
@@ -876,6 +876,44 @@ export class NexusOrchestrator {
   // OS notification manager
   public notifications: NotificationManager | null = null
 
+  /**
+   * The one gate every OS notification flows through.
+   *
+   * Every call site used to open-code `if (this.notifications?.isEnabled())`
+   * and then fire a floating `notify()` whose `false` nobody checked. That is
+   * five places to keep in sync and no way to tell, afterwards, whether
+   * notifications had worked — the actual complaint this replaces.
+   *
+   * The promise is deliberately NOT awaited by its callers. A notification is
+   * a courtesy; blocking a DAG node or an event handler on `osascript` would
+   * let a slow or wedged notifier add latency to every task. The notifier
+   * bounds that itself with a 3 s timeout, so a wedged process cannot pin a
+   * task open either.
+   *
+   * Floating is made safe by the `.catch()` below, NOT by an assumption about
+   * `notify()`. `notify()` swallows its own failures today, but it is `async`,
+   * so any future throw inside it becomes a REJECTION rather than a throw, and
+   * `engines.node >= 22` terminates the process on an unhandled rejection by
+   * default — a cosmetic feature able to kill the orchestrator. `emit`'s
+   * per-handler isolation does not help either: these five call sites are
+   * direct statements in the DAG and budget paths, not inside `emit` handlers.
+   * The handler makes "cannot fail a task" a property of THIS function rather
+   * than a property somebody has to keep re-establishing in `notify()`.
+   */
+  private sendNotification(options: NotificationOptions): void {
+    if (!this.notifications) return
+    // Belt and braces. This should never fire, and a rejection is already
+    // non-fatal by construction — but "should never fire" is exactly the claim
+    // that must not be the only thing standing between a notifier bug and a
+    // process exit, so the failure is logged and dropped here rather than
+    // escalated.
+    this.notifications.notify(options).catch((error: unknown) => {
+      console.error(
+        `[nexus] notification rejected: ${error instanceof Error ? error.message : String(error)}`
+      )
+    })
+  }
+
   // Real model pricing from OpenCode (populated via loadModelCosts).
   // Keyed by "providerID/id" (bare ids are not unique across providers) and
   // valued in **USD per 1K tokens** — the same unit as the hardcoded table.
@@ -889,7 +927,7 @@ export class NexusOrchestrator {
   constructor(config?: Partial<NexusConfig>, messageStoreConfig?: Partial<MessageStoreConfig>, memoryStoreConfig?: Partial<MemoryStoreConfig>) {
     this.config = this.mergeConfig(config)
     this.budget = this.config.budget
-    this.configManager = new NexusConfigManager(this.config.dashboard)
+    this.configManager = new NexusConfigManager(this.config.dashboard, this.config.notifications)
     this.moduleRegistry = new ModuleRegistry()
     this.messageStore = new MessageStore(messageStoreConfig)
     this.memoryStore = new PersistentMemoryStore(memoryStoreConfig)
@@ -952,8 +990,15 @@ export class NexusOrchestrator {
       checkInterval: this.config.agents.healthCheckInterval
     })
 
-    // Initialize notification manager
-    this.notifications = new NotificationManager(true)
+    // Initialize notification manager. `enabled` is driven by config rather
+    // than hardcoded: `new NotificationManager(true)` made `notifications.enabled`
+    // a dead knob, the same defect `config.dashboard.enabled` had until 2.7.0.
+    // Seeded from the merged config, which by now has consulted the project and
+    // global files (see the `loadFromPath` above), so `notifications: { enabled: false }`
+    // in `nexus.jsonc` is honoured from the first notification onward.
+    this.notifications = new NotificationManager(
+      this.configManager.getConfig().notifications.enabled
+    )
 
     // Set up all registered modules
     const moduleCtx: ModuleContext = {
@@ -1498,6 +1543,9 @@ export class NexusOrchestrator {
         port: 4747,
         host: '127.0.0.1'
       },
+      notifications: {
+        enabled: true
+      },
       security: {
         sastEnabled: true,
         secretsScanning: true,
@@ -1533,6 +1581,7 @@ export class NexusOrchestrator {
       communication: { ...defaults.communication, ...partial?.communication },
       memory: { ...defaults.memory, ...partial?.memory },
       dashboard: { ...defaults.dashboard, ...partial?.dashboard },
+      notifications: { ...defaults.notifications, ...partial?.notifications },
       security: { ...defaults.security, ...partial?.security },
       learning: { ...defaults.learning, ...partial?.learning },
       // Present only when the caller supplied it; see the note on
@@ -2008,9 +2057,7 @@ export class NexusOrchestrator {
       })
 
       // Notify on task completion
-      if (this.notifications?.isEnabled()) {
-        this.notifications.notify({ title: 'Nexus: Task Complete', body: `${node.task.name} completed successfully` })
-      }
+      this.sendNotification({ title: 'Nexus: Task Complete', body: `${node.task.name} completed successfully` })
 
       // Record learning success if there was a prior failure pattern for this task
       const priorPattern = this.learning.findSolutions(`task ${node.id} failed`)
@@ -2126,9 +2173,7 @@ export class NexusOrchestrator {
       }
 
       // Notify on task failure
-      if (this.notifications?.isEnabled()) {
-        this.notifications.notify({ title: 'Nexus: Task Failed', body: `${node.task.name} failed: ${errorMessage}`, sound: true })
-      }
+      this.sendNotification({ title: 'Nexus: Task Failed', body: `${node.task.name} failed: ${errorMessage}`, sound: true })
 
       // Self-healing: retry or respawn
       if (this.config.selfHealing.enabled) {
@@ -2830,9 +2875,7 @@ export class NexusOrchestrator {
     if (policy.alertOnFailure) {
       this.emit('agent:escalation', { agentId: agent.id, taskId: node.id, error: error.message })
       // Notify on final failure
-      if (this.notifications?.isEnabled()) {
-        this.notifications.notify({ title: 'Nexus: Task Failed', body: `${node.task.name} failed: ${error.message}`, sound: true })
-      }
+      this.sendNotification({ title: 'Nexus: Task Failed', body: `${node.task.name} failed: ${error.message}`, sound: true })
     }
 
     node.status = 'failed'
@@ -3600,18 +3643,44 @@ export class NexusOrchestrator {
     const remaining = this.budget.maxTotalCost - this.totalSpent
     const remainingPercent = remaining / this.budget.maxTotalCost
 
-    if (remainingPercent <= this.config.budget.alertThreshold) {
-      this.emit('budget:alert', { remaining, remainingPercent })
-      // Notify on budget alert
-      if (this.notifications?.isEnabled()) {
-        this.notifications.notify({ title: 'Nexus: Budget Alert', body: `Budget low: $${remaining.toFixed(2)} remaining (${(remainingPercent * 100).toFixed(1)}%)`, sound: true })
-      }
-    }
-
+    // The hard limit is TERMINAL, so it is decided first and exclusively, and
+    // the alert is then gated on `!this.budgetExceeded`.
+    //
+    // Ordering is load-bearing, and getting it wrong is a user-visible double
+    // notification. When the limit trips, `remaining <= 0`, so
+    // `remainingPercent` is <= 0 too — which trivially satisfies
+    // `remainingPercent <= alertThreshold` for any sane threshold. So with the
+    // alert tested first, one overage crossed BOTH conditions in the same
+    // invocation and the user got two notifications for one event, the first
+    // reading `Budget low: $-5.00 remaining (-100.0%)`.
+    //
+    // An `else` would not be the honest fix: "low budget" and "stopped" are
+    // genuinely different conditions, and the alert is still correct on its
+    // own (non-hard-limit configs rely on it, and a config that trips its limit
+    // while merely low should still have warned earlier). Latching
+    // `budgetExceeded` before the alert test is what makes the alert step
+    // aside for the terminal event, and it also makes it self-limiting: the
+    // alert had no repeat guard of its own, and now neither does it need one.
     if (this.budget.hardLimit && remaining <= 0 && !this.budgetExceeded) {
       this.budgetExceeded = true
       this.emit('budget:exceeded', { totalSpent: this.totalSpent })
+      // The hard limit tripping pauses the whole run. It was the single most
+      // notification-worthy event in the product and it emitted an event no
+      // notifier listened to, so the run just quietly stopped. `sound: true`
+      // because this one is worth interrupting for.
+      this.sendNotification({
+        title: 'Nexus: Budget Limit Reached',
+        body: `Hard limit hit at $${this.totalSpent.toFixed(2)}. Execution paused.`,
+        sound: true
+      })
       this.pause()
+      return
+    }
+
+    if (!this.budgetExceeded && remainingPercent <= this.config.budget.alertThreshold) {
+      this.emit('budget:alert', { remaining, remainingPercent })
+      // Notify on budget alert
+      this.sendNotification({ title: 'Nexus: Budget Alert', body: `Budget low: $${remaining.toFixed(2)} remaining (${(remainingPercent * 100).toFixed(1)}%)`, sound: true })
     }
   }
 
@@ -3699,7 +3768,12 @@ export class NexusOrchestrator {
     // their meaning and their keys; a reader who wants only those still gets
     // them, and a reader who acts on the number can see what it is made of.
     const spend = this.spendSplit()
-    if (detailed) return JSON.stringify({ ...state, ...spend, budgetExceeded: this.budgetExceeded, config }, null, 2)
+    // "I never see notifications" has to be answerable from here. `sent`,
+    // `failed` and `lastError` are what turn that from a hunch into a
+    // diagnosis: `failed > 0` with a reason, or `suppressed > 0` with
+    // `enabled: false`, are the two cases that used to look identical.
+    const notifications = this.notifications?.getStats() ?? null
+    if (detailed) return JSON.stringify({ ...state, ...spend, budgetExceeded: this.budgetExceeded, config, notifications }, null, 2)
     return JSON.stringify({
       running: state.running,
       paused: state.paused,
@@ -3709,6 +3783,7 @@ export class NexusOrchestrator {
       totalCost: state.totalSpent,
       ...spend,
       budgetRemaining: state.budgetRemaining,
+      notifications,
       config
     }, null, 2)
   }

@@ -419,6 +419,58 @@ export const DASHBOARD_STOP_DESCRIPTION =
   + "orchestrator, its agents and its sessions are unaffected and keep running."
 
 /**
+ * Description for `nexus.notifications.test`.
+ *
+ * Same reasoning as the dashboard descriptions: a model decides when to reach
+ * for this from the text and nothing else, and the text has to say that the
+ * point of the call is to VERIFY SETUP rather than to inform a user who did
+ * not ask. Exported so that wording is itself under test.
+ */
+export const NOTIFICATIONS_TEST_DESCRIPTION =
+  "Send a test OS notification and report whether the OS notifier accepted it, with the reason if it did not. "
+  + "Use this to verify notification setup when the user reports never seeing notifications: it "
+  + "distinguishes notifications being switched off in config, this platform having no notifier, and "
+  + "the notifier itself rejecting the notification. Reports the notifier's own result, never a canned "
+  + "success. Note that `delivered: true` means the OS took the notification, not that a human will see "
+  + "it: a muted app, Focus/Dnd, or missing notification permission all still exit 0."
+
+/** The notification probe's result, as the tool hands it back. */
+export interface NotificationsTestResult {
+  delivered: boolean
+  reason: string | null
+  enabled: boolean
+  platform: string
+  stats: unknown
+}
+
+/**
+ * Body of the `notifications.test` tool.
+ *
+ * Split out of the tool registration so the behaviour worth testing — that it
+ * reports the REAL boolean and a REAL reason, and never a hardcoded success —
+ * is reachable without standing up a plugin host.
+ */
+export async function runNotificationsTest(orchestrator: {
+  notifications: { test(): Promise<NotificationsTestResult> } | null
+}): Promise<string> {
+  // `orchestrator.notifications` is null until the orchestrator has
+  // initialised. Say so plainly rather than reporting a failure that reads
+  // like a broken notifier.
+  if (!orchestrator.notifications) {
+    return JSON.stringify(
+      {
+        delivered: false,
+        reason: "notification manager is not initialised yet",
+        stats: null
+      },
+      null,
+      2
+    )
+  }
+  return JSON.stringify(await orchestrator.notifications.test(), null, 2)
+}
+
+/**
  * Body of the `dashboard.start` tool. Returns the text the tool hands back.
  *
  * A bind failure is an ordinary outcome of asking for a port, so it is
@@ -1145,6 +1197,20 @@ You are a technical writer who creates documentation that developers actually wa
         options: { codemode: true },
         execute: async () => {
           return { content: orchestrator.getCostReport() }
+        }
+      })
+
+      editor.add({
+        name: "notifications.test",
+        description: NOTIFICATIONS_TEST_DESCRIPTION,
+        input: {
+          type: "object",
+          properties: {},
+          additionalProperties: false
+        },
+        options: { codemode: true },
+        execute: async () => {
+          return { content: await runNotificationsTest(orchestrator) }
         }
       })
 
