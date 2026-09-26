@@ -3,7 +3,8 @@ import type {
   Agent, Task, DAG, DAGNode, ExecutionRequest, ExecutionResult,
   AgentRole, ComplexityScore, ModelSelection, BudgetConstraint,
   CostReport, AgentMessage, MemoryEntry, MemoryScope,
-  SpawnConfig, RecoveryAction, HealthStatus, NexusConfig, TaskResult
+  SpawnConfig, RecoveryAction, HealthStatus, NexusConfig, TaskResult,
+  CostProvenance, SpendSplit
 } from "./types"
 import { NexusConfigManager, type NexusConfigLoadInfo, type NexusConfigReloadTrigger } from "./config"
 import { StateBroadcaster } from "./broadcast"
@@ -101,11 +102,12 @@ interface OpenCodeModelCost {
  * `TaskResult` and every `trackCost` entry so a predicted figure is never read
  * as a billed one: `usage` says whether the tokens were real, `pricing` says
  * whether the rate was real.
+ *
+ * DECLARED IN `types.ts` and re-exported here under its original name, so the
+ * public surface is unchanged while `PerformanceEntry`, `ExecutionRecord` and
+ * the tool layer can carry the same type without importing this module.
  */
-export interface CostProvenance {
-  usage: UsageSource
-  pricing: PricingSource
-}
+export type { CostProvenance } from "./types"
 
 /**
  * A `TaskResult` that says how its cost was arrived at. Lives here rather than
@@ -940,6 +942,12 @@ export class NexusOrchestrator {
         success: true,
         tasks: results,
         totalCost: this.totalSpent,
+        // Same window as `totalCost` (`this.totalSpent` is the orchestrator's
+        // lifetime total, not a per-run one), so the split always adds up to
+        // the headline. A caller reading `totalCost` alone cannot tell a fully
+        // billed run from one where every task fell back to estimates; these
+        // two say it.
+        ...this.spendSplit(),
         totalDuration,
         agentsUsed: this.agents.size
       }
@@ -951,6 +959,7 @@ export class NexusOrchestrator {
         success: false,
         tasks: [],
         totalCost: this.totalSpent,
+        ...this.spendSplit(),
         totalDuration: Date.now() - startTime,
         agentsUsed: this.agents.size
       }
@@ -1234,6 +1243,7 @@ export class NexusOrchestrator {
         success: result.success,
         duration: result.duration,
         cost: result.cost,
+        costProvenance: result.costProvenance,
         tokensUsed: result.tokensUsed
       })
 
@@ -1245,6 +1255,7 @@ export class NexusOrchestrator {
         model: agent.model.model,
         status: 'success',
         cost: result.cost,
+        costProvenance: result.costProvenance,
         duration: result.duration,
         tokensUsed: result.tokensUsed,
         startedAt: new Date(startTime),
@@ -1322,6 +1333,7 @@ export class NexusOrchestrator {
         success: result.success,
         duration: result.duration,
         cost: result.cost,
+        costProvenance: result.costProvenance,
         tokensUsed: result.tokensUsed
       })
 
@@ -1333,6 +1345,7 @@ export class NexusOrchestrator {
         model: agent.model.model,
         status: 'failed',
         cost: result.cost,
+        costProvenance: result.costProvenance,
         duration: result.duration,
         tokensUsed: result.tokensUsed,
         startedAt: new Date(startTime),
@@ -2145,6 +2158,20 @@ export class NexusOrchestrator {
   }
 
   /**
+   * Lifetime measured/estimated spend, over exactly the entries that make up
+   * `totalSpent` — `trackCost` records provenance for every charge, so the two
+   * halves always re-sum to the headline. Returned as the `SpendSplit` half of
+   * an `ExecutionResult` and of the cost report, from one place, so the two
+   * cannot drift apart.
+   */
+  private spendSplit(): SpendSplit {
+    return {
+      measuredSpend: sumBy(this.costProvenance, p => p.measuredSpend),
+      estimatedSpend: sumBy(this.costProvenance, p => p.estimatedSpend),
+    }
+  }
+
+  /**
    * `accountTaskCost` with its failures contained. Cost accounting must not be
    * able to fail the task it is accounting for: an unexpected throw here would
    * otherwise discard a completed task's real output, mark it failed, and let
@@ -2347,7 +2374,12 @@ export class NexusOrchestrator {
       global: loadInfo?.global ?? null,
       models: this.configManager.getResolvedModels()
     }
-    if (detailed) return JSON.stringify({ ...state, budgetExceeded: this.budgetExceeded, config }, null, 2)
+    // `totalSpent` is a lifetime total over mixed charges, so the split travels
+    // with it everywhere this is rendered. `totalCost` / `totalSpent` keep
+    // their meaning and their keys; a reader who wants only those still gets
+    // them, and a reader who acts on the number can see what it is made of.
+    const spend = this.spendSplit()
+    if (detailed) return JSON.stringify({ ...state, ...spend, budgetExceeded: this.budgetExceeded, config }, null, 2)
     return JSON.stringify({
       running: state.running,
       paused: state.paused,
@@ -2355,6 +2387,7 @@ export class NexusOrchestrator {
       agents: state.agents.length,
       tasks: state.tasks.length,
       totalCost: state.totalSpent,
+      ...spend,
       budgetRemaining: state.budgetRemaining,
       config
     }, null, 2)
@@ -2373,6 +2406,8 @@ export class NexusOrchestrator {
     return JSON.stringify({
       totalSpent: state.totalSpent,
       budgetRemaining: state.budgetRemaining,
+      // Headline split, so `totalSpent` is not read as fully billed on its own.
+      ...this.spendSplit(),
       byAgent: Object.fromEntries(this.costByAgent),
       byModel: Object.fromEntries(this.costByModel),
       tokensByModel: Object.fromEntries(this.tokensByModel),

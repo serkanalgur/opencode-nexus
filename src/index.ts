@@ -8,6 +8,33 @@ import { AstGrep } from "./astgrep"
 import { writeFileSync, readFileSync, mkdirSync, existsSync, statSync } from "node:fs"
 import { join, resolve, basename, dirname } from "node:path"
 import { homedir } from "node:os"
+import type { CostProvenance } from "./types"
+import type { PerformanceScore } from "./performance"
+
+/**
+ * Render one cost with the label that says whether it was measured or
+ * predicted. Every figure a tool hands to a user or an agent goes through
+ * here: a `$0.0123` and a `$0.0123` that is the forecaster's guess are the
+ * same string, and the guess is the one that gets acted on.
+ */
+function renderCost(cost: number, provenance: CostProvenance): string {
+  return provenance.usage === 'measured'
+    ? `$${cost.toFixed(4)} measured`
+    : `$${cost.toFixed(4)} estimated`
+}
+
+/**
+ * Render a performance score's cost coverage. `costBasis: 'none'` is stated in
+ * words rather than as a zero, because the cost third of that score is an
+ * absence of evidence and reads as a measurement if it is printed as a number.
+ */
+function renderCostBasis(score: PerformanceScore): string {
+  if (score.costBasis === 'none') {
+    return 'cost unscored: 0 measured tasks, 0% of score from cost'
+  }
+  return `avg=$${score.avgCost.toFixed(4)} (${score.measuredTasks}/${score.totalTasks} measured)`
+}
+
 
 /**
  * Filesystem watchers fire several times for a single editor save (write,
@@ -1432,7 +1459,7 @@ You are a technical writer who creates documentation that developers actually wa
         execute: async () => {
           const scores = orchestrator.performanceTracker.getScores()
           if (scores.length === 0) return { content: "No performance data yet. Scores build up as tasks are executed." }
-          const lines = scores.map(s => `${s.role}/${s.model}: score=${s.overallScore.toFixed(1)} success=${(s.successRate*100).toFixed(0)}% avg=$${s.avgCost.toFixed(4)} (${s.totalTasks} tasks)`)
+          const lines = scores.map(s => `${s.role}/${s.model}: score=${s.overallScore.toFixed(1)} success=${(s.successRate*100).toFixed(0)}% ${renderCostBasis(s)} (${s.totalTasks} tasks)`)
           return { content: lines.join('\n') }
         }
       })
@@ -1453,7 +1480,7 @@ You are a technical writer who creates documentation that developers actually wa
           const { role } = input as { role: string }
           const best = orchestrator.performanceTracker.getBestModel(role)
           if (!best) return { content: `No performance data for role '${role}' yet.` }
-          return { content: `Best for ${role}: ${best.model} (score: ${best.overallScore.toFixed(1)}, success: ${(best.successRate*100).toFixed(0)}%, avg cost: $${best.avgCost.toFixed(4)})` }
+          return { content: `Best for ${role}: ${best.model} (score: ${best.overallScore.toFixed(1)}, success: ${(best.successRate*100).toFixed(0)}%, ${renderCostBasis(best)})` }
         }
       })
 
@@ -1493,7 +1520,7 @@ You are a technical writer who creates documentation that developers actually wa
           const { count } = input as { count?: number }
           const records = count ? orchestrator.executionHistory.getRecent(count) : orchestrator.executionHistory.getAll()
           if (records.length === 0) return { content: "No execution history yet." }
-          const lines = records.map(r => `${r.status === 'success' ? '✅' : '❌'} ${r.taskName} (${r.role}) — $${r.cost.toFixed(4)} — ${r.duration}ms`)
+          const lines = records.map(r => `${r.status === 'success' ? '✅' : '❌'} ${r.taskName} (${r.role}) — ${renderCost(r.cost, r.costProvenance)} — ${r.duration}ms`)
           return { content: lines.join('\n') }
         }
       })
@@ -1509,7 +1536,9 @@ You are a technical writer who creates documentation that developers actually wa
         options: { codemode: true },
         execute: async () => {
           const stats = orchestrator.executionHistory.getStats()
-          return { content: `Total: ${stats.total} | Success: ${(stats.successRate * 100).toFixed(1)}% | Cost: $${stats.totalCost.toFixed(4)} | Avg: ${stats.avgDuration.toFixed(0)}ms\nBy role: ${JSON.stringify(stats.byRole)}` }
+          // `totalCost` sums measured and estimated charges, so it is reported
+          // with the split rather than on its own.
+          return { content: `Total: ${stats.total} | Success: ${(stats.successRate * 100).toFixed(1)}% | Cost: $${stats.totalCost.toFixed(4)} (measured $${stats.costSplit.measuredCost.toFixed(4)} over ${stats.costSplit.measuredEntries} tasks, estimated $${stats.costSplit.estimatedCost.toFixed(4)} over ${stats.costSplit.estimatedEntries} tasks) | Avg: ${stats.avgDuration.toFixed(0)}ms\nBy role: ${JSON.stringify(stats.byRole)}` }
         }
       })
 
