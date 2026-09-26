@@ -889,7 +889,7 @@ export class NexusOrchestrator {
   constructor(config?: Partial<NexusConfig>, messageStoreConfig?: Partial<MessageStoreConfig>, memoryStoreConfig?: Partial<MemoryStoreConfig>) {
     this.config = this.mergeConfig(config)
     this.budget = this.config.budget
-    this.configManager = new NexusConfigManager()
+    this.configManager = new NexusConfigManager(this.config.dashboard)
     this.moduleRegistry = new ModuleRegistry()
     this.messageStore = new MessageStore(messageStoreConfig)
     this.memoryStore = new PersistentMemoryStore(memoryStoreConfig)
@@ -1195,7 +1195,21 @@ export class NexusOrchestrator {
   }
 
   /**
-   * Start the web dashboard server
+   * Start the web dashboard server.
+   *
+   * THE GATE LIVES HERE, and that is a deliberate placement: this is the single
+   * choke point every start path goes through (the `dashboard.start` tool, and
+   * anything else added later), so honouring `dashboard.enabled` anywhere else
+   * would be a second copy of the rule. It was readable from nowhere before —
+   * the field defaulted to `true`, was documented as a switch, and no code in
+   * `src/` read it.
+   *
+   * `enabled`/`port`/`host` resolve from the CONFIG MANAGER, not from
+   * `this.config.dashboard`, so a `dashboard` block in `nexus.jsonc` reaches
+   * them. The manager is seeded with `this.config.dashboard` at construction,
+   * which is what keeps a programmatic `new NexusOrchestrator({dashboard:
+   * {...}})` working — it is the bottom precedence level, so either file still
+   * wins. Explicit arguments to this method still win over all of it.
    *
    * Registers NO event handlers, and that is the whole point. It used to wire
    * `agent:spawned`, `agent:terminated`, `budget:alert` and `budget:exceeded`
@@ -1210,12 +1224,31 @@ export class NexusOrchestrator {
    * client set and one message sequence rather than two competing paths.
    * `test/broadcast-event-coverage.test.ts` runs the dashboard and asserts one
    * delivery for all thirteen, so a second registration cannot creep back in.
+   *
+   * @throws if `dashboard.enabled` is false, or if the port cannot be bound.
+   *   Both messages name the reason; neither leaves a half-built module
+   *   reachable through `this.dashboard`.
    */
   startDashboard(port?: number, host?: string): void {
-    const dashPort = port || this.config.dashboard.port
-    const dashHost = host || this.config.dashboard.host
-    this.dashboard = new DashboardModule(this)
-    this.dashboard.start(dashPort, dashHost)
+    const dashboardConfig = this.configManager.getConfig().dashboard
+    if (!dashboardConfig.enabled) {
+      throw new Error(
+        'Dashboard is disabled by configuration (`dashboard.enabled: false` in .opencode/nexus.jsonc or '
+        + '~/.config/opencode/nexus.jsonc). Set it to true — or remove the block, which defaults to enabled — '
+        + 'to start the server.',
+      )
+    }
+
+    const dashPort = port || dashboardConfig.port
+    const dashHost = host || dashboardConfig.host
+    // Built into a local and published only on success. The previous
+    // `this.dashboard = new DashboardModule(this)` before `start()` left a
+    // module with a null server reachable through `this.dashboard` whenever the
+    // bind failed, so `stopDashboard()` had a phantom to act on and
+    // `dashboard.isRunning()` was answering about a server that never existed.
+    const dashboard = new DashboardModule(this)
+    dashboard.start(dashPort, dashHost)
+    this.dashboard = dashboard
   }
 
   /**

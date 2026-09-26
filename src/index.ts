@@ -387,8 +387,94 @@ export function watchConfigFiles(
   }
 }
 
-const NEXUS_AGENT_CONTENT = `---
-description: Nexus multi-agent orchestrator — decomposes tasks and delegates to specialized sub-agents
+// ── `dashboard.start` / `dashboard.stop` ────────────────────────────
+// Exported free functions rather than inline closures inside
+// `ctx.tool.transform`, for one reason: a tool's behaviour is a contract, and
+// an inline closure is only reachable by running a whole plugin host. These
+// two are the whole of the dashboard's tool surface, and the failure modes they
+// have to get right — a refused bind, a config-disabled start, a stop with
+// nothing running — are exactly the ones that cannot be observed by reading the
+// happy path.
+
+/**
+ * Descriptions are a control surface of their own: a model's decision to call
+ * `dashboard.start` instead of guessing at an address is made from this text
+ * and nothing else, so the facts a caller needs in order to choose correctly
+ * live here and are pinned by `test/dashboard-entrypoints.test.ts`.
+ */
+export const DASHBOARD_START_DESCRIPTION =
+  "Start the Nexus web dashboard: an HTTP + WebSocket server that serves the dashboard page and the "
+  + "orchestrator's live state, agents, tasks, sessions, costs and config. It is NOT started for you — "
+  + "nothing in nexus listens until this tool is called, and it serves nothing but the dashboard. "
+  + "The port must be FREE: the bind fails if another process holds it, and this tool reports that "
+  + "failure rather than replacing the other listener. Host defaults to 127.0.0.1 and port to 4747, "
+  + "or to the `dashboard` block in nexus.jsonc. If that block sets `enabled: false` the start is "
+  + "refused and the refusal names the config key. On success the URL is printed — give the user that "
+  + "exact URL; it is the only address the page is served on."
+
+export const DASHBOARD_STOP_DESCRIPTION =
+  "Stop the Nexus web dashboard started by `dashboard.start`, closing its HTTP and WebSocket "
+  + "connections. Takes no arguments. A no-op if no dashboard is running — it says so rather than "
+  + "reporting a stop that did not happen. Note that this only stops the dashboard server: the "
+  + "orchestrator, its agents and its sessions are unaffected and keep running."
+
+/**
+ * Body of the `dashboard.start` tool. Returns the text the tool hands back.
+ *
+ * A bind failure is an ordinary outcome of asking for a port, so it is
+ * REPORTED rather than thrown: an unhandled throw reaches the model as a tool
+ * error with none of the context needed to act on it, and the caller has no
+ * way to tell "the port was busy" from "the plugin is broken".
+ *
+ * The failure text is the important half. It must not contain a URL, and it
+ * must say no browser was opened — this tool does not open one, and the TUI's
+ * `nexus.web` command is what does. A "started at http://…" line after a failed
+ * bind is the exact false confirmation this path is written to be unable to
+ * give.
+ */
+export function runDashboardStart(
+  orchestrator: NexusOrchestrator,
+  port?: number,
+  host?: string
+): string {
+  try {
+    orchestrator.startDashboard(port, host)
+  } catch (error: unknown) {
+    const detail = error instanceof Error ? error.message : String(error)
+    return `Dashboard NOT started: ${detail}\n`
+      + `No server is listening and no browser was opened. `
+      + `If the port is in use, either stop whatever holds it or pass a different \`port\`. `
+      + `Call this tool again once the port is free — the dashboard does not retry on its own.`
+  }
+
+  // Read the bound address back off the merged config rather than echoing the
+  // arguments: the arguments are optional, and the answer that matters is the
+  // one the server actually bound to.
+  const dashboardConfig = orchestrator.configManager.getConfig().dashboard
+  const boundHost = host || dashboardConfig.host
+  const boundPort = port || dashboardConfig.port
+  return `Dashboard started at http://${boundHost}:${boundPort}\n`
+    + `Open that exact URL in a browser. The page connects to the same host and port for its live `
+    + `state over WebSocket (ws://${boundHost}:${boundPort}/ws/events), so it works only while this `
+    + `server runs. The TUI's \`/nexus-web\` command opens the browser once this tool has succeeded.\n`
+    + `Call \`nexus.dashboard.stop\` to shut it down.`
+}
+
+/**
+ * Body of the `dashboard.stop` tool. Reports whether there was anything to
+ * stop, because "Dashboard stopped" for a server that was never running is a
+ * confirmation of a change that did not happen.
+ */
+export function runDashboardStop(orchestrator: NexusOrchestrator): string {
+  const wasRunning = orchestrator.dashboard?.isRunning() ?? false
+  orchestrator.stopDashboard()
+  return wasRunning
+    ? "Dashboard stopped. The orchestrator, its agents and its sessions were not affected."
+    : "No dashboard was running, so nothing was stopped. The orchestrator, its agents and its "
+      + "sessions were not affected."
+}
+
+const NEXUS_AGENT_CONTENT = `---description: Nexus multi-agent orchestrator — decomposes tasks and delegates to specialized sub-agents
 mode: primary
 permissions:
   - action: subagent
@@ -908,7 +994,20 @@ You are a technical writer who creates documentation that developers actually wa
       // Agent creation is best-effort
     }
 
-    // Auto-enable LSP if not configured
+    // Ask OpenCode to turn its own LSP support on, by inserting `"lsp": true`
+    // into the user's global `opencode.jsonc`.
+    //
+    // This is the WHOLE of nexus's LSP involvement, and it is deliberately
+    // described as such at every level it surfaces: a one-line best-effort
+    // config edit, done once, to a file that already exists. There is no
+    // language list, no LSP state, and nothing for any nexus surface to
+    // display — which is why the capability table in `README.md` says this and
+    // not "auto-enabled for 30+ languages". A claim about a subsystem this
+    // package does not read is a promise about someone else's code.
+    //
+    // Best-effort throughout: no file, an unreadable file, a file that already
+    // mentions "lsp", or a rewrite that does not match the trailing-brace
+    // pattern all leave the file alone rather than risk damaging it.
     try {
       const configPath = join(homedir(), '.config', 'opencode', 'opencode.jsonc')
       if (existsSync(configPath)) {
@@ -1183,26 +1282,25 @@ You are a technical writer who creates documentation that developers actually wa
 
       editor.add({
         name: "dashboard.start",
-        description: "Start the web dashboard server",
+        description: DASHBOARD_START_DESCRIPTION,
         input: {
           type: "object",
           properties: {
-            port: { type: "number", description: "Port (default: 4747)" },
-            host: { type: "string", description: "Host (default: 127.0.0.1)" }
+            port: { type: "number", description: "Port to listen on (default: 4747, or `dashboard.port` from nexus.jsonc). Must be free." },
+            host: { type: "string", description: "Bind address (default: 127.0.0.1, or `dashboard.host` from nexus.jsonc)" }
           },
           additionalProperties: false
         },
         options: { codemode: true },
         execute: async (input: unknown) => {
           const { port, host } = input as { port?: number; host?: string }
-          orchestrator.startDashboard(port, host)
-          return { content: `Dashboard started at http://${host || '127.0.0.1'}:${port || 4747}` }
+          return { content: runDashboardStart(orchestrator, port, host) }
         }
       })
 
       editor.add({
         name: "dashboard.stop",
-        description: "Stop the web dashboard server",
+        description: DASHBOARD_STOP_DESCRIPTION,
         input: {
           type: "object",
           properties: {},
@@ -1210,8 +1308,7 @@ You are a technical writer who creates documentation that developers actually wa
         },
         options: { codemode: true },
         execute: async () => {
-          orchestrator.stopDashboard()
-          return { content: "Dashboard stopped" }
+          return { content: runDashboardStop(orchestrator) }
         }
       })
 

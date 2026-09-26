@@ -16,6 +16,31 @@ export interface NexusModelConfig {
   [key: string]: string | undefined
 }
 
+/**
+ * The dashboard's on/off switch and where it listens.
+ *
+ * FILE-SETTABLE, unlike the orchestrator's own `NexusConfig.dashboard` block
+ * (see `src/types.ts`): this level is one of the three the config manager
+ * actually merges, so `dashboard: { "enabled": false }` in `nexus.jsonc`
+ * reaches the one place that decides whether a server starts. It used to reach
+ * nothing at all — a knob that read as a control and was inert, which is worse
+ * than having no knob.
+ */
+export interface NexusDashboardConfig {
+  /**
+   * Whether the dashboard may be started at all.
+   *
+   * Honoured by `NexusOrchestrator.startDashboard()`, which refuses and says
+   * so. Honoured by the TUI's `nexus.web` command, which then explains the
+   * refusal instead of opening a browser at an address that will never answer.
+   */
+  enabled: boolean
+  /** Default port. An explicit `dashboard.start` port still wins. */
+  port: number
+  /** Default bind address. `127.0.0.1` — the server has no auth story. */
+  host: string
+}
+
 export interface NexusFullConfig {
   models: NexusModelConfig
   budget: {
@@ -29,6 +54,7 @@ export interface NexusFullConfig {
     maxRetries: number
     contextTransfer: boolean
   }
+  dashboard: NexusDashboardConfig
 }
 
 /**
@@ -257,19 +283,48 @@ const DEFAULT_CONFIG: NexusFullConfig = {
     enabled: true,
     maxRetries: 3,
     contextTransfer: true
+  },
+  // Kept identical to the orchestrator's own `NexusConfig.dashboard` defaults so
+  // the two agree when neither a config file nor a constructor says otherwise.
+  dashboard: {
+    enabled: true,
+    port: 4747,
+    host: "127.0.0.1"
   }
 }
 
 export class NexusConfigManager {
   private projectConfig: Partial<NexusFullConfig> | null = null
   private globalConfig: Partial<NexusFullConfig> | null = null
-  private storageConfig: NexusFullConfig | null = null
+  /**
+   * The session-scoped override level.
+   *
+   * `Partial` because `updateStorageConfig()` genuinely builds a partial — it
+   * fills in the three blocks a TUI dialog can edit and leaves the rest
+   * absent — and the type used to claim otherwise. That claim is load-bearing
+   * now: `getConfig()` reads `storageConfig?.dashboard.enabled`, which is a
+   * TypeError on a non-null `storageConfig` with no `dashboard` key.
+   */
+  private storageConfig: Partial<NexusFullConfig> | null = null
   private loadInfo: NexusConfigLoadInfo | null = null
+  /**
+   * Programmatic starting point for the `dashboard` block, beneath the file
+   * levels and above `DEFAULT_CONFIG`.
+   *
+   * Exists so `NexusConfig.dashboard` has exactly ONE consumer. The
+   * orchestrator seeds it from its own constructor config, and everything else
+   * — the start gate, the TUI command, the port and host defaults — reads the
+   * merged result from `getConfig()`. Without it the same setting would be
+   * readable from two places with no defined precedence between them, which is
+   * how `enabled` ended up readable from neither.
+   */
+  private dashboardBase: NexusDashboardConfig
 
-  constructor() {
+  constructor(dashboardBase?: Partial<NexusDashboardConfig>) {
     // Config files are loaded later via loadFromPath(basePath)
     this.projectConfig = null
     this.globalConfig = null
+    this.dashboardBase = { ...DEFAULT_CONFIG.dashboard, ...dashboardBase }
   }
 
   /**
@@ -382,6 +437,18 @@ export class NexusConfigManager {
         ...this.globalConfig?.selfHealing,
         ...this.projectConfig?.selfHealing,
         ...this.storageConfig?.selfHealing
+      },
+      // Same precedence as every other block — storage (session override) >
+      // project > global > the constructor seed — and spelled field by field
+      // rather than spread, because a level that sets only `enabled` must not
+      // blank out the port and host resolved beneath it.
+      dashboard: {
+        enabled: this.storageConfig?.dashboard?.enabled ?? this.projectConfig?.dashboard?.enabled
+          ?? this.globalConfig?.dashboard?.enabled ?? this.dashboardBase.enabled,
+        port: this.storageConfig?.dashboard?.port ?? this.projectConfig?.dashboard?.port
+          ?? this.globalConfig?.dashboard?.port ?? this.dashboardBase.port,
+        host: this.storageConfig?.dashboard?.host ?? this.projectConfig?.dashboard?.host
+          ?? this.globalConfig?.dashboard?.host ?? this.dashboardBase.host
       }
     }
   }
@@ -570,6 +637,15 @@ export class NexusConfigManager {
     // Self-healing — include all fields
     result.selfHealing = { ...current.selfHealing }
 
+    // Dashboard — include all fields.
+    //
+    // This block is written out unconditionally, like models and budget above,
+    // and for the same reason it must be listed at all: `saveProjectConfig()`
+    // writes the RETURNED object as the whole file, so a block left out here is
+    // a block deleted from the user's `nexus.jsonc` the first time they change
+    // a model in the TUI. `enabled: false` would silently turn back on.
+    result.dashboard = { ...current.dashboard }
+
     return result
   }
 
@@ -603,7 +679,7 @@ export class NexusConfigManager {
   applyPreset(name: string): void {
     const preset = PRESETS[name]
     if (!preset) throw new Error(`Unknown preset: ${name}. Available: ${Object.keys(PRESETS).join(', ')}`)
-    this.storageConfig = { ...this.storageConfig, ...preset.config } as NexusFullConfig
+    this.storageConfig = { ...this.storageConfig, ...preset.config }
   }
 
   // List available preset names
