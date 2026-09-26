@@ -6,6 +6,7 @@ import { GoalManager } from "./goal"
 import { TeamManager } from "./team"
 import { AstGrep } from "./astgrep"
 import { writeFileSync, readFileSync, mkdirSync, existsSync, statSync } from "node:fs"
+import { createHash } from "node:crypto"
 import { join, resolve, basename, dirname } from "node:path"
 import { homedir } from "node:os"
 import type { CostProvenance } from "./types"
@@ -44,7 +45,8 @@ function renderCostBasis(score: PerformanceScore): string {
 export const CONFIG_RELOAD_DEBOUNCE_MS = 150
 
 /**
- * How often the config files are stat-ed for changes.
+ * How often the config files are checked for changes — a `stat` of the two
+ * paths, plus a read of whichever of them exist.
  *
  * This is the *guaranteed* trigger. `filesystem.changed` is only a fast path:
  * OpenCode enumerates the specific paths it watches, and `nexus.jsonc` is
@@ -120,6 +122,19 @@ const clampInterval = (ms: number, fallback: number): number =>
   Number.isFinite(ms) && ms >= MIN_INTERVAL_MS ? ms : fallback
 
 /**
+ * The stable stamp for a path that is not an existing regular file. A missing
+ * path, a path that cannot be stat-ed at all, and a directory in the way all
+ * land here, so the poller can never spin on a path it cannot observe.
+ */
+const ABSENT = 'absent'
+
+/**
+ * The stable digest for a file that stats as a regular file but cannot be read
+ * (EACCES, or a read that fails for any other reason).
+ */
+const UNREADABLE = 'unreadable'
+
+/**
  * Reload the Nexus config whenever one of the files the config manager reads
  * changes, so a `nexus.jsonc` edit takes effect without restarting the service.
  *
@@ -130,11 +145,13 @@ const clampInterval = (ms: number, fallback: number): number =>
  *    (edited), `add` (created) and `unlink` (deleted, which falls back to the
  *    next level rather than keeping the deleted file's values), because a
  *    reload re-reads every level, so the deleted level stops contributing.
- *  - mtime/size polling — the guarantee. It stat-s exactly the two files the
+ *  - stat/content polling — the guarantee. It watches exactly the two files the
  *    loader reads, so unlike the event it needs no shape heuristics and cannot
  *    be scoped to (or missed because of) another project's config. Polling is
  *    installed unconditionally: it must not depend on the event stream, since
- *    the event is the trigger we cannot demonstrate.
+ *    the event is the trigger we cannot demonstrate. The signature is
+ *    `mtime:size` plus a SHA-1 of the bytes, so the guarantee does not depend on
+ *    the filesystem updating mtime — see `stampOf`.
  *
  * `config.init` writes these exact two files, so running it produces a second
  * load ~150ms later. That re-read is idempotent and harmless; the extra log
@@ -172,32 +189,87 @@ export function watchConfigFiles(
   }
 
   /**
-   * Cheap change signature for one path. Both mtime and size are compared so a
-   * same-tick edit that changes length is still caught. Any failure — missing
-   * file, permission denied, a directory in the way — reads as 'absent', which
-   * is stable, so an unreadable path can never spin the poller. A throw here
-   * would kill the interval and silently stop the guarantee.
+   * Content digest of one path: SHA-1 over the raw bytes.
    *
-   * Synchronous `statSync`, and it assumes a local filesystem: on a hung
-   * NFS/WSL/sshfs mount this blocks the event loop for the duration. That is
-   * accepted deliberately — a `stat` every 2s on a path that may be a network
-   * mount is the one cost of making reload guaranteed, and the alternative
-   * (an async stamp, and the interleaving that comes with it) is more moving
-   * parts than the risk justifies. A hung stat stalls the loop, it does not
-   * corrupt state, and `MAX_RELOAD_WAIT_MS` bounds the consequence.
+   * A digest rather than the bytes themselves, because the signature is
+   * retained per watched path and a fixed-size value keeps it that way no
+   * matter how large the file is. These two files are hundreds of bytes, so the
+   * hash is not the interesting cost — the `readFileSync` is, and it is the
+   * same read the config loader already performs on every load. This is change
+   * detection, not a trust boundary, so SHA-1's collision resistance is
+   * irrelevant; `createHash` is simply the stdlib option that needs no new
+   * dependency.
+   *
+   * Every failure collapses to UNREADABLE, on the same terms as the stat
+   * below: a throw here would kill the interval and silently void the
+   * guarantee, and a stable value means a path that cannot be read (EACCES)
+   * resolves to the same stamp forever instead of spinning the poller.
    */
-  const stampOf = (filePath: string): string => {
+  const digestOf = (filePath: string): string => {
     try {
-      const stats = statSync(filePath)
-      if (!stats.isFile()) return 'absent'
-      return `${stats.mtimeMs}:${stats.size}`
+      return createHash('sha1').update(readFileSync(filePath)).digest('hex')
     } catch {
-      return 'absent'
+      return UNREADABLE
     }
   }
 
+  /**
+   * Change signature for one path: `mtimeMs:size|digest`.
+   *
+   * mtime and size are both compared so a same-tick edit that changes length is
+   * caught, and the content digest is compared alongside them so an edit that
+   * changes *neither* is caught too. The digest is what closes the gap that
+   * made the poll's guarantee conditional on the filesystem: a network mount
+   * with attribute caching, or a coarse timestamp granularity where two edits
+   * land in the same tick at the same length, both leave mtime:size identical
+   * while the content differs. Without a content signal, a change could be
+   * invisible and the config silently stale again — the one failure this
+   * feature exists to prevent.
+   *
+   * The content read is the price, and it is paid on every tick that finds an
+   * existing regular file, because "unchanged mtime" and "changed under a
+   * broken mtime" are indistinguishable without looking at the bytes. That is
+   * irreducible: the read is the only way to know. It is cheap for the sizes
+   * involved (two files of hundreds of bytes, twice a second at the production
+   * interval, dominated by the syscall rather than the hash) and it is the
+   * same order of cost the config loader already pays on every reload. A
+   * pathologically enormous config would make each tick expensive rather than
+   * wrong, and such a file is already fully read on every reload, so capping
+   * the digest would buy nothing and reopen the hole. What the read *does*
+   * save: any path that is not an existing regular file — the default case
+   * for most installs, which have no project config at all — is a `stat` and
+   * nothing more, and never a read.
+   *
+   * Every failure collapses to a stable value, so no failure can spin the
+   * poller: a `stat` that throws or names a non-file gives ABSENT, and a read
+   * that throws leaves the stat half intact with UNREADABLE as the digest. A
+   * throw out of here would kill the interval and silently stop the guarantee.
+   *
+   * Synchronous, and it assumes a local filesystem: on a hung NFS/WSL/sshfs
+   * mount this blocks the event loop for the duration, the read now included.
+   * That is accepted deliberately for the same reason the `stat` was — it is
+   * the cost of making reload guaranteed, and the alternative (an async stamp,
+   * and the interleaving that comes with it) is more moving parts than the risk
+   * justifies. A hung read stalls the loop, it does not corrupt state, and
+   * `MAX_RELOAD_WAIT_MS` bounds the consequence.
+   */
+  const stampOf = (filePath: string): string => {
+    let stat: string
+    try {
+      const stats = statSync(filePath)
+      if (!stats.isFile()) return ABSENT
+      stat = `${stats.mtimeMs}:${stats.size}`
+    } catch {
+      return ABSENT
+    }
+    return `${stat}|${digestOf(filePath)}`
+  }
+
   // Record the starting state, so the first poll cannot fire a spurious reload
-  // for a file that has not moved since the last load.
+  // for a file that has not moved since the last load. The seed is a full
+  // signature — stat and digest alike — so the first tick compares like with
+  // like. A seed that carried only the cheap half would report a change on
+  // tick one for every file that exists, and a reload storm would follow.
   const lastSeen = new Map<string, string>(watchedPaths.map(p => [p, stampOf(p)]))
 
   /**
@@ -214,7 +286,9 @@ export function watchConfigFiles(
   const runReload = (trigger: NexusConfigReloadTrigger): void => {
     // Re-stamp BEFORE reloading. Stamping afterwards could miss an edit that
     // lands mid-reload, and a missed edit is the exact failure this feature
-    // exists to prevent; a redundant reload is merely wasteful.
+    // exists to prevent; a redundant reload is merely wasteful. The re-stamp is
+    // a full signature, so the post-reload baseline carries a digest and an
+    // edit that only changes content is still visible to the next tick.
     for (const filePath of watchedPaths) lastSeen.set(filePath, stampOf(filePath))
     try {
       orchestrator.reloadConfigFromDisk(trigger)
