@@ -10,7 +10,7 @@ const SANDBOX_HOME = mkdtempSync(join(tmpdir(), 'nexus-home-'))
 mock.module('node:os', () => ({ ...realOs, default: realOs, homedir: () => SANDBOX_HOME }))
 
 const { NexusOrchestrator } = await import('../src/orchestrator')
-const { CostForecaster, priceTokens, totalTokens } = await import('../src/forecast')
+const { CostForecaster, priceTokens, totalTokens, selectTier } = await import('../src/forecast')
 
 afterAll(() => {
   mock.module('node:os', () => realOs)
@@ -465,11 +465,29 @@ describe('budget filter compares estimated task cost against remaining budget', 
   })
 
   it('does not reject a model that fits when the budget is comfortable', async () => {
-    // Sonnet is the top-scoring candidate and its per-task estimate (~$0.02 at
-    // the fallback rate) is far inside a $10 budget, so the filter must not
-    // exclude it.
+    // Every candidate is comfortably inside a $10 budget, so the filter must
+    // not exclude anything and the winner is decided purely on score.
+    //
+    // MODEL SELECTION FLIPPED HERE, deliberately, and this is the test that
+    // pinned the old answer. The cost term is now the per-task USD estimate
+    // rather than a mean per-1K rate compared against a fixed $15/1K ceiling,
+    // so real relative prices finally carry weight. At complexity 50 with
+    // fallback prices the winner is `gemini-2.5-flash`, not sonnet:
+    //
+    //   per-task estimate = 1750/1K * input + 875/1K * output
+    //     sonnet   0.015 / 0.075 → $0.091875
+    //     gemini 0.000075/0.0003 → $0.000394   (233x cheaper)
+    //     free        0 / 0       → $0
+    //   score = quality*0.4 + (1 - estimate/maxEstimate)*0.6
+    //     sonnet  0.85*0.4 + 0.000*0.6 = 0.340
+    //     gemini  0.78*0.4 + 0.996*0.6 = 0.909   ← winner
+    //
+    // The old term divided by 15.00, a ceiling calibrated to the deleted
+    // relative table, under which every real price scored ≈1 and sonnet's
+    // quality decided it. Quality and speed inputs are untouched by this
+    // change, so the flip is caused by the cost term alone.
     const { selection, estimate, remaining } = await selectionFor(10, {})
-    expect(selection.model).toBe('claude-sonnet-4-6')
+    expect(selection.model).toBe('gemini-2.5-flash')
     expect(estimate).toBeLessThanOrEqual(remaining)
   })
 
@@ -526,11 +544,14 @@ describe('one price source — the forecaster and the orchestrator agree', () =>
       pricing: SONNET_PER_1K,
       source: 'model-costs',
     })
-    // Same object of truth, both sides of the plugin.
-    expect(orchestrator.forecaster.priceFor(MODEL).pricing).toEqual(orchestrator.getModelCost(MODEL))
+    // Same object of truth, both sides of the plugin — compared through the
+    // tier list, since a `modelCosts` entry is now a tiered price list and
+    // `priceFor` returns the base tier's rates.
+    expect(orchestrator.forecaster.priceFor(MODEL).pricing)
+      .toEqual(selectTier(orchestrator.getModelCost(MODEL)!.tiers, 0).rates)
 
     const usage: Tokens = { input: 2000, output: 4000, reasoning: 1000, cache: { read: 1000, write: 500 } }
-    const rates = orchestrator.getModelCost(MODEL)!
+    const rates = selectTier(orchestrator.getModelCost(MODEL)!.tiers, 0).rates
     const expected = (rates.input * 2000
       + rates.output * (4000 + 1000)
       + rates.cacheRead * 1000
@@ -603,7 +624,7 @@ describe('one price source — the forecaster and the orchestrator agree', () =>
   it('claims confidence only for a real measurement at a real price', async () => {
     const usage: Tokens = { input: 100, output: 100, reasoning: 0, cache: { read: 0, write: 0 } }
 
-    const real = new CostForecaster((model) => SONNET_PER_1K)
+    const real = new CostForecaster(() => ({ tiers: [{ rates: SONNET_PER_1K }] }))
     expect(real.measureCost(usage, MODEL)).toEqual({
       cost: 100 / 1000 * 0.003 + 100 / 1000 * 0.015,
       tokens: 200,

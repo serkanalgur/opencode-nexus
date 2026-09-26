@@ -203,14 +203,28 @@ describe('handleFailure step 3 — the fallback model actually runs the task', (
       return realSpawnAgent(config)
     }
 
-    await orchestrator.execute({ tasks: [makeTask('task-1', 'coder')] })
+    const task = makeTask('task-1', 'coder')
+    // What the first spawn must have used: the same analysis the real
+    // `selectQualifiedModel` runs for this node.
+    const chosen = orchestrator.selectModel('coder', orchestrator['analyzeComplexity'](task))
 
-    // The second spawn carries the fallback reference. The first is whatever
-    // `selectModel` chose for the role, which DEFAULT_CONFIG pins to a
-    // claude-sonnet entry — never one of the fallbacks.
+    await orchestrator.execute({ tasks: [task] })
+
+    // The second spawn carries the fallback reference; the first is whatever
+    // model selection chose.
+    //
+    // NOT asserted as "not a fallback", which is what this test used to say.
+    // That was never an invariant — it held only because the old cost term
+    // ranked on a fixed ceiling, so selection never picked an escalation
+    // fallback. The cost term is now a real per-task estimate, and at this
+    // complexity selection legitimately wins with `google/gemini-2.5-flash`,
+    // which IS the first fallback. So the ref can no longer distinguish the two
+    // spawns by value. What the test actually needs to pin is that the
+    // escalation used the POLICY's entry rather than repeating the selected
+    // model, so each spawn is compared against the thing it should equal.
     expect(spawned.length).toBe(2)
+    expect(spawned[0]).toBe(`${chosen.provider}/${chosen.model}`)
     expect(spawned[1]).toBe('google/gemini-2.5-flash')
-    expect(spawned[0]).not.toBe('google/gemini-2.5-flash')
   })
 })
 
@@ -283,11 +297,24 @@ describe('handleFailure step 3 — a throw in the fallback path is contained', (
     const { orchestrator } = await initialized(1)
 
     // Sibling nodes spawn concurrently, so a call *count* would be racy. Key
-    // the throw on the fallback reference instead — that identifies the step-3
-    // path exactly, since step 3 is the only caller passing a model override.
+    // the throw on "this task has already spawned once" instead — that
+    // identifies the step-3 path exactly and per node, because step 3 is the
+    // only caller that spawns a second agent for a task.
+    //
+    // The previous key was the fallback MODEL REF, on the grounds that step 3
+    // was the only caller passing a model override. That stopped being true:
+    // the cost term is now a real per-task estimate, so selection can itself
+    // pick an escalation fallback, and keying on the ref made the FIRST attempt
+    // throw too — failing the sibling as well and destroying the very
+    // containment this test exists to pin. A spawn-count key does not depend on
+    // which model selection happens to choose.
+    const spawnsPerTask = new Map<string, number>()
     const realSpawnAgent = orchestrator.spawnAgent.bind(orchestrator)
     orchestrator.spawnAgent = async (config) => {
-      if ((config.model ?? '') === 'google/gemini-2.5-flash') {
+      const taskId = config.task.id
+      const seen = (spawnsPerTask.get(taskId) ?? 0) + 1
+      spawnsPerTask.set(taskId, seen)
+      if (seen > 1) {
         throw new Error('fallback session create failed')
       }
       return realSpawnAgent(config)
