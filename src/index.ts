@@ -1,5 +1,5 @@
 import { Plugin } from "@opencode/plugin"
-import { NexusOrchestrator, lastAssistantText, type SpawnedAgent } from "./orchestrator"
+import { NexusOrchestrator, lastAssistantText, type NexusModelCost, type SpawnedAgent } from "./orchestrator"
 import { PRESETS, nexusProjectConfigPath, nexusGlobalConfigPath, type NexusConfigReloadTrigger } from "./config"
 import { TEMPLATES, instantiateTemplate, listTemplates } from "./templates"
 import { GoalManager } from "./goal"
@@ -1133,6 +1133,16 @@ You are a technical writer who creates documentation that developers actually wa
           // Every price `modelCosts` holds is USD per 1K tokens.
           const per1k = (v: number) => `$${v}/1K tokens`
 
+          // A tiered price list, rendered one line per row. `tiers` is ordered
+          // untiered-base-first by `loadModelCosts` / `setModelCosts`, and a
+          // context tier is labelled with the prompt size it applies ABOVE.
+          const renderTiers = (cost: NexusModelCost): string =>
+            cost.tiers
+              .map(t => (t.threshold === undefined
+                ? `base: in=${per1k(t.rates.input)}, out=${per1k(t.rates.output)}, cache_read=${per1k(t.rates.cacheRead)}, cache_write=${per1k(t.rates.cacheWrite)}`
+                : `over ${t.threshold} prompt tokens: in=${per1k(t.rates.input)}, out=${per1k(t.rates.output)}, cache_read=${per1k(t.rates.cacheRead)}, cache_write=${per1k(t.rates.cacheWrite)}`))
+              .join('\n            ')
+
           if (model && setInput !== undefined && setOutput !== undefined) {
             // Set custom cost
             orchestrator.setModelCosts({ [model]: { input: setInput, output: setOutput } })
@@ -1145,22 +1155,32 @@ You are a technical writer who creates documentation that developers actually wa
             // `getModelCost` resolves both.
             const cost = orchestrator.getModelCost(model)
             if (cost) {
-              return { content: `${model}: input=${per1k(cost.input)}, output=${per1k(cost.output)}, cache_read=${per1k(cost.cacheRead)}, cache_write=${per1k(cost.cacheWrite)}` }
+              return { content: `${model} (real pricing, from OpenCode):\n            ${renderTiers(cost)}` }
             }
-            // Fallback to hardcoded estimate
-            const estimate = orchestrator['estimateModelCost'](model)
-            return { content: `${model}: no real pricing data (estimated $${estimate}/1K tokens)` }
+            // No real pricing. Source this from the forecaster so the number
+            // carries the rate AND the table it came from: the old
+            // `estimateModelCost` printed a bare `estimated $X/1K tokens` whose
+            // X was not a price at all but the mean of a real rate and a
+            // hand-tuned relative table entry. A number with no unit and no
+            // provenance is the one output this tool must never produce.
+            const { pricing, source } = orchestrator.forecaster.priceFor(model)
+            const label = source === 'model-costs'
+              ? 'real pricing'
+              : source === 'fallback-table'
+                ? 'ESTIMATE (fallback table, not provider pricing)'
+                : 'ESTIMATE (unknown model — no table knows this rate)'
+            return { content: `${model}: no real pricing data.\n            ${label}: in=${per1k(pricing.input)}, out=${per1k(pricing.output)}, cache_read=${per1k(pricing.cacheRead)}, cache_write=${per1k(pricing.cacheWrite)}` }
           }
 
           // Show all loaded costs
           if (orchestrator.modelCosts.size > 0) {
             const lines = ['📊 Model Pricing (from OpenCode, per 1K tokens):']
             for (const [id, cost] of orchestrator.modelCosts) {
-              lines.push(`  ${id}: ${per1k(cost.input)} in, ${per1k(cost.output)} out`)
+              lines.push(`  ${id}: ${renderTiers(cost)}`)
             }
             return { content: lines.join('\n') }
           }
-          return { content: 'No real pricing data loaded. Using hardcoded estimates.' }
+          return { content: 'No real pricing data loaded. Using labelled fallback estimates.' }
         }
       })
 

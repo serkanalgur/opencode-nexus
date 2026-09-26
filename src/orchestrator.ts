@@ -23,7 +23,9 @@ import { CustomRoleManager } from "./custom-roles"
 import {
   CostForecaster,
   bareModelId,
+  selectTier,
   totalTokens,
+  type ModelPricingTiers,
   type PricingSource,
   type TokenUsage,
   type UsageSource,
@@ -62,12 +64,36 @@ export type NexusPluginContext = Plugin.Context
 /** One entry of `ctx.session.context()`: a `SessionMessageInfo` union member. */
 export type NexusSessionMessage = Awaited<ReturnType<Plugin.Context["session"]["context"]>>[number]
 
-/** Real pricing for one model, in **USD per 1K tokens**. */
-export interface NexusModelCost {
-  input: number
-  output: number
-  cacheRead: number
-  cacheWrite: number
+/**
+ * Real pricing for one model, in **USD per 1K tokens**, as a tiered price list.
+ *
+ * An alias, not a second definition: this is the same type the forecaster
+ * resolves, so the `modelCosts` map is handed to `PricingResolver` with no
+ * conversion and no possibility of the two sides drifting apart in shape.
+ *
+ * CHANGELOG NOTE: this is a breaking change to a public, mutable map. `tiers`
+ * replaces the flat `{input, output, cacheRead, cacheWrite}` entry, so any
+ * out-of-repo reader of `modelCosts` or `getModelCost()` must read
+ * `tiers[0].rates` (or `selectTier(...).rates` for a given prompt size).
+ */
+export type NexusModelCost = ModelPricingTiers
+
+/**
+ * One entry of OpenCode's `ModelInfo.cost`, in **USD per MILLION tokens**.
+ *
+ * Declared structurally rather than imported from `@opencode/plugin`, whose
+ * declaration brands every rate as a `Money.USDPerMillionTokens` literal.
+ * Those brands carry no information we use, they change the declared `tier`
+ * type to a single `"context"` tag, and every field is required — while the
+ * data genuinely arrives over a wire and genuinely does omit `cache` on some
+ * rows. So the shape is the permissive one and the `tier.type` check below is
+ * real at runtime even though the type makes it look redundant.
+ */
+interface OpenCodeModelCost {
+  readonly tier?: { readonly type: string; readonly size: number }
+  readonly input?: number
+  readonly output?: number
+  readonly cache?: { readonly read?: number; readonly write?: number }
 }
 
 /**
@@ -185,6 +211,16 @@ function sumBy<T>(records: Map<string, T>, select: (record: T) => number): numbe
   let total = 0
   for (const record of records.values()) total += select(record)
   return total
+}
+
+/**
+ * A model's base-tier input rate. `selectTier(tiers, 0)` rather than
+ * `tiers[0]`: a prompt size of 0 is below every real context threshold, so
+ * this is the untiered row by the same rule that prices real usage, instead of
+ * trusting an array position that `modelCosts` is public and mutable.
+ */
+function baseInputRate(cost: NexusModelCost): number {
+  return selectTier(cost.tiers, 0).rates.input
 }
 
 export interface SpawnOptions {
@@ -467,35 +503,50 @@ export class NexusOrchestrator {
    * Load real model pricing from OpenCode's model list API.
    *
    * `ctx.model.list()` returns `{ location, data }` where each `ModelInfo`
-   * carries a `cost` array (one entry per context tier). We read the first
-   * entry as the base tier. `cost` may be empty for free / locally served
-   * models, and the whole API may be absent — in both cases `modelCosts` is
-   * left untouched and the hardcoded pricing tables are used instead.
+   * carries a `cost` array — one entry per CONTEXT TIER. We keep every tier,
+   * because OpenCode bills each call at the tier its own prompt falls into and
+   * so must we. `cost` may be empty for free / locally served models, and the
+   * whole API may be absent — in both cases `modelCosts` is left untouched and
+   * the labelled fallback table in `forecast.ts` is used instead.
+   *
+   * DIVERGENCE FROM OPENCODE, deliberate: OpenCode's cost function returns a
+   * hard ZERO when a model has no `cost` array. Reproducing that would replace
+   * "we don't know this model's price" with a measured `$0` that no
+   * provenance label can un-ring — the exact regression the `PricingSource`
+   * discipline was introduced to prevent. An empty `cost` array is therefore
+   * skipped, and the model is priced by the labelled fallback table instead,
+   * which says out loud that it is a guess.
    *
    * Units: OpenCode reports `ModelCost` in **USD per MILLION tokens**
    * (`Money.USDPerMillionTokens`). `modelCosts` stores **USD per 1K tokens**,
-   * which is the unit the hardcoded table and every consumer of `modelCosts`
-   * use. The conversion happens here, on write, so the rest of the plugin never
-   * has to think about it.
+   * which is the unit the fallback table and every consumer of `modelCosts`
+   * use. The conversion happens here, on write, on EVERY tier, so the rest of
+   * the plugin never has to think about it.
    *
-   * KNOWN UNDER-COUNT (pre-existing, not changed here): we take the base tier,
-   * but OpenCode selects the tier per call by total prompt size
-   * (`input + cache.read + cache.write`) and applies that tier to the WHOLE
-   * call. A long-context, cache-heavy session — the 23M-token one, say — is
-   * therefore billed by OpenCode at the long-context premium while we bill it at
-   * the base rate, roughly 2× low for exactly the runs that dominate spend.
-   * Reproducing OpenCode's tier selection would mean storing every tier and
-   * re-deriving the same predicate; out of scope for this change, and recorded
-   * here so nobody reads our totals as authoritative billing.
+   * ORDER IS NORMALISED ON WRITE: untiered base first, then context tiers
+   * ascending by threshold. `selectTier` does not depend on array order, but a
+   * hand-edited or merged `modelCosts` should not be able to change which rate
+   * a display site shows for "the price of this model".
    *
-   * THE TIER IS NOT THE ONLY SOURCE OF UNDER-COUNT. Two more, both in the
-   * pricing rather than the projection:
+   * WHAT STILL UNDER-COUNTS, and why none of it is fixed here:
+   *   - R1, our unit of observation is coarser than OpenCode's. It selects a
+   *     tier per model CALL and accumulates; we are handed a session TOTAL and
+   *     make ONE selection for it. The SIGN of the resulting error is not
+   *     knowable at this granularity: with monotonically non-decreasing rates
+   *     (the common case) we over-report, but a provider publishing a
+   *     DISCOUNTED long-context tier — Gemini's long-context pricing is this
+   *     shape — inverts it, and several sub-threshold calls in one session sum
+   *     past the threshold and get billed at the cheaper rate. T5 in
+   *     `test/pricing-tiers.test.ts` is the worked counterexample. Either way
+   *     these figures do not tie exactly to `SessionInfo.cost`, which is why
+   *     `accountTaskCost` does not read it and why nothing here should be
+   *     described as matching the bill.
    *   - a model absent from `modelCosts` is priced by the forecaster's fallback
    *     table, whose cache rates are ESTIMATES derived from each row's own input
    *     rate (see `forecast.ts`), not provider-sourced figures. They reproduce
    *     the real relation — verified against the real sonnet and opus entries —
    *     but they are not what the provider would bill, and a provider that
-   *     does not bill cache writes separately is approximated outright;
+   *     does not bill cache writes separately is approximated outright.
    *   - a timed-out task is billed at the instant of the timeout, while its
    *     session keeps running, so the rest of its consumption is never billed.
    *     Correctly labelled `measured` (it is a real reading), but it means the
@@ -513,35 +564,134 @@ export class NexusOrchestrator {
 
       for (const model of data) {
         if (!model?.cost || !Array.isArray(model.cost) || model.cost.length === 0) continue
-        // `cost[0]` is the base context tier; a model's context window can
-        // price higher on later tiers, but the base tier is the representative
-        // figure for a single task.
-        const baseCost = model.cost[0]
         // Keyed by "providerID/id": bare ids are not unique across providers.
         this.modelCosts.set(`${model.providerID}/${model.id}`, {
-          input: per1k(baseCost.input),
-          output: per1k(baseCost.output),
-          cacheRead: per1k(baseCost.cache?.read),
-          cacheWrite: per1k(baseCost.cache?.write),
+          tiers: this.normaliseTiers(model.cost, per1k),
         })
       }
     } catch {
-      // Cost loading is best-effort — hardcoded fallbacks will be used
+      // Cost loading is best-effort — the labelled fallback table will be used
     }
+  }
+
+  /**
+   * OpenCode's raw `ModelCost[]` → our tiered per-1K price list.
+   *
+   * Three things happen here, all of them load-bearing:
+   *  - per-million → per-1K, on EVERY tier. Normalising only the base is how a
+   *    long-context premium ends up 1000× too large.
+   *  - non-context tiers are dropped. OpenCode's cost function only ever
+   *    consults tiers with `tier.type === "context"`, and only ever falls back
+   *    to a row with `tier === undefined`; a row with some other tier type is
+   *    invisible to it, so keeping it here would let a tier the bill never
+   *    applies compete for selection.
+   *  - a model whose list has context tiers but no untiered base gets a
+   *    synthetic base from `cost[0]`. OpenCode's own fallback in that case is
+   *    ZERO, i.e. "this model bills nothing" — the one answer that cannot be
+   *    right for a model that published prices. A synthetic base keeps the
+   *    model billable and makes the choice visible; the alternative is a $0
+   *    spend reported as `measured`.
+   *
+   *    Unlike the single-selection divergence above, THIS one can only
+   *    over-report, and it is worth being precise about why the two differ.
+   *    Against opencode's own arithmetic the synthetic base is safe by
+   *    construction: for any prompt where a real context tier matches,
+   *    `cost[0]` is never consulted, and for a prompt below every threshold
+   *    `Ng` returns 0, which is the floor — so there is no prompt at which our
+   *    rate is lower than opencode's. The residual risk is against the TRUE
+   *    BILL rather than against `Ng`: a tier-only model's synthetic base is
+   *    the lowest-threshold rate it published, so if the provider's real
+   *    sub-threshold price were HIGHER than its cheapest published tier we
+   *    would under-report. That is not knowable at runtime from the `cost`
+   *    array, so it is recorded rather than guarded.
+   */
+  private normaliseTiers(
+    cost: readonly OpenCodeModelCost[],
+    per1k: (v: number | undefined) => number
+  ): ModelPricingTiers["tiers"] {
+    const rates = (row: { input?: number; output?: number; cache?: { read?: number; write?: number } }) => ({
+      input: per1k(row.input),
+      output: per1k(row.output),
+      cacheRead: per1k(row.cache?.read),
+      cacheWrite: per1k(row.cache?.write),
+    })
+
+    const kept = cost
+      .filter(row => row?.tier === undefined || row.tier?.type === "context")
+      .map(row => ({
+        // An untiered row is the base; a context row's `size` is the threshold.
+        // A `{type: "context"}` row whose `size` is missing or not a number
+        // falls through to the untiered branch below and becomes the base —
+        // conservative, since `Ng` would never select it either. A `NaN` size
+        // is NOT caught here: every comparison against it is false, so such a
+        // tier is permanently unselectable. It is retained rather than dropped
+        // so the row stays visible in the `model.costs` display instead of
+        // vanishing from the price list, and `renderTiers` labels it honestly
+        // as `over NaN prompt tokens`.
+        ...(row.tier?.type === "context" && typeof row.tier.size === "number"
+          ? { threshold: row.tier.size }
+          : {}),
+        rates: rates(row),
+      }))
+
+    if (kept.length === 0) return [{ rates: rates(cost[0]) }]
+
+    const base = kept.find(t => t.threshold === undefined)
+    const contextual = kept
+      .filter(t => t.threshold !== undefined)
+      .sort((a, b) => (a.threshold as number) - (b.threshold as number))
+    // The synthetic base COPIES `kept[0]`'s rates rather than aliasing them.
+    // `modelCosts` is public and mutable, so sharing one rates object between
+    // `tiers[0]` and the lowest context tier would let a consumer mutating
+    // `tiers[0].rates.input` silently reprice the long-context tier too.
+    return base
+      ? [{ rates: { ...base.rates } }, ...contextual]
+      : [{ rates: { ...kept[0].rates } }, ...contextual]
   }
 
   /**
    * Manually set model costs (e.g., from TUI model list).
    * Keys may be "providerID/id" or a bare "id". Values are USD per 1K tokens,
    * matching the unit `loadModelCosts` normalises to.
+   *
+   * A set value is a single UNTIERED tier and it REPLACES any entry already
+   * there, rather than merging into one. The user is supplying one rate with
+   * no prompt size attached, so the only honest reading of it is "this is the
+   * rate, at every size". Merging a flat rate into an entry that already has a
+   * 200k premium would leave the user believing they had priced a model that
+   * still bills at the premium above that size. Replace-not-merge is also what
+   * makes the override authoritative: there is no path by which a stale
+   * published tier can outrank a rate the user just typed.
+   *
+   * THE COST IS THAT CACHE IS BILLED AT $0, and it is unbounded. `cacheRead`
+   * and `cacheWrite` default to 0 when omitted, and the `model.costs` tool's
+   * schema only offers in/out, so there is no value to default to. A
+   * cache-heavy session on a manually priced model therefore bills nothing for
+   * its cache — on a long-context run that is the whole bill.
+   *
+   * Stated plainly rather than defended as the lesser evil. An earlier version
+   * of this comment justified the zero by claiming that synthesising a cache
+   * rate "would silently override the provider's real cache rates when they are
+   * known, which is worse than an explicit zero". That was self-contradictory:
+   * replacing the entry already discards the provider's known `cacheRead` and
+   * `cacheWrite` along with its tiers, so the thing the comment feared had
+   * already happened by the time the default applied. Preferring the provider's
+   * real rates when the caller omits them would be strictly better and is the
+   * obvious follow-up; it needs a schema change to pass cache rates through, so
+   * it is not done here. Until then: a manually priced model's cache is free,
+   * and reported spend for one is an UNDER-report of unbounded size.
    */
   setModelCosts(costs: Record<string, { input: number; output: number; cacheRead?: number; cacheWrite?: number }>): void {
     for (const [model, cost] of Object.entries(costs)) {
       this.modelCosts.set(model, {
-        input: cost.input,
-        output: cost.output,
-        cacheRead: cost.cacheRead || 0,
-        cacheWrite: cost.cacheWrite || 0,
+        tiers: [{
+          rates: {
+            input: cost.input,
+            output: cost.output,
+            cacheRead: cost.cacheRead || 0,
+            cacheWrite: cost.cacheWrite || 0,
+          },
+        }],
       })
     }
   }
@@ -1054,9 +1204,10 @@ export class NexusOrchestrator {
 
       const duration = Date.now() - startTime
       // Real cost from the session's actual token usage, priced with the
-      // orchestrator's per-1K `modelCosts`. `estimateModelCost` returns a
-      // per-1K RATE, so it cannot stand in for a task's total — that was the
-      // old behaviour and it made spend a sum of rates, unrelated to usage.
+      // orchestrator's per-1K `modelCosts` at the context tier that usage
+      // selects. The deleted `estimateModelCost` returned a per-1K RATE, which
+      // cannot stand in for a task's total — that was the old behaviour and it
+      // made spend a sum of rates, unrelated to usage.
       const cost = await this.safeAccountTaskCost(agent, node.task)
       const result: CostedTaskResult = {
         success: true,
@@ -1308,11 +1459,45 @@ export class NexusOrchestrator {
     }
 
     // Step 3: Try fallback model
-    if (policy.fallbackModels.length > 0) {
+    //
+    // Escalation must CHANGE THE MODEL, and that has to be checked rather than
+    // assumed. `fallbackModels` and model selection draw from overlapping pools
+    // of ids, so the entry at the head can be the very model that just failed:
+    // on the fallback price table `selectBestModel` wins with
+    // 'google/gemini-2.5-flash' at essentially every complexity, and that is
+    // also `DEFAULT_ESCALATION.fallbackModels[0]`. Shifting it unconditionally
+    // terminated the agent, burned a full task's tokens re-running the identical
+    // task on the identical model, and consumed an escalation entry doing it —
+    // so a persistently failing node reached step 4 after a SHORTER real
+    // escalation chain than before, which is the opposite of what step 3 is for.
+    //
+    // Compared as a QUALIFIED reference on both sides. `agent.model` is
+    // provider-qualified and so is every entry in the default policy, but a
+    // user-configured policy may hold bare ids — comparing qualified against
+    // bare would silently never match and the check would do nothing.
+    const failedRef = `${agent.model.provider}/${agent.model.model}`
+    // Only consume anything if there is something USABLE to consume. When every
+    // entry equals the failed model there is no escalation to make, and leaving
+    // the list intact keeps one node's dead end from becoming the whole
+    // orchestrator's: the policy is shared across nodes, so draining it here
+    // would strip the escalation route from every other node too. See the
+    // `while` below for the case where some entries are usable.
+    const hasUsableFallback = policy.fallbackModels.some(m => m !== failedRef)
+    if (policy.fallbackModels.length > 0 && hasUsableFallback) {
       // `shift` consumes the entry, so each escalation burns one fallback: a
       // node reaches step 4 (alert) after at most `fallbackModels.length`
-      // fallback attempts.
-      const fallbackModel = policy.fallbackModels.shift()
+      // fallback attempts. Entries equal to the failed model are stepped over
+      // and consumed on the way — they are unusable by this node by definition,
+      // and a later node that also failed on that model would find them equally
+      // useless.
+      let fallbackModel: string | undefined
+      while (policy.fallbackModels.length > 0) {
+        const candidate = policy.fallbackModels.shift() as string
+        if (candidate !== failedRef) {
+          fallbackModel = candidate
+          break
+        }
+      }
       if (fallbackModel) {
         // Terminate the failed agent
         await this.terminateAgent(agent.id)
@@ -1709,6 +1894,11 @@ export class NexusOrchestrator {
    *   2. "provider/id" reconstructed from `provider` + `model`
    *   3. a bare-id match across providers — the cheapest wins, so a provider
    *      collision cannot silently shadow the cheaper price
+   *
+   * "Cheapest" compares the BASE tier's input rate, via `selectTier(tiers, 0)`:
+   * a prompt size of 0 is below every real context threshold, so this is the
+   * base row by construction rather than by indexing `tiers[0]`, which a
+   * hand-edited map could have reordered.
    */
   getModelCost(model: string, provider?: string): NexusModelCost | undefined {
     const exact = this.modelCosts.get(model)
@@ -1723,41 +1913,22 @@ export class NexusOrchestrator {
     let best: NexusModelCost | undefined
     for (const [key, cost] of this.modelCosts) {
       if (bareModelId(key) !== bare) continue
-      if (!best || cost.input < best.input) best = cost
+      if (!best || baseInputRate(cost) < baseInputRate(best)) best = cost
     }
     return best
   }
 
-  private estimateModelCost(model: string, provider?: string): number {
-    // Try real pricing data first. `modelCosts` is USD per 1K tokens, so the
-    // average of input and output is already the per-1K figure.
-    const realCost = this.getModelCost(model, provider)
-    if (realCost) {
-      return (realCost.input + realCost.output) / 2
-    }
-
-    // Fallback to hardcoded estimates.
-    //
-    // NOTE ON UNITS: this table is a hand-tuned rough *relative* scale on its
-    // own footing — its numbers are NOT USD per 1K tokens and are not derived
-    // from provider pricing (real per-1K for sonnet is ~0.009, not 0.15). It is
-    // only ever used to rank and to keep budgeting sane when OpenCode exposes
-    // no pricing, and `scoreModel`'s `maxCost` is calibrated to this table's
-    // scale. Do not "fix" one of the two to match the other: reconciling them
-    // means rescaling the table *and* `maxCost` together, which changes model
-    // selection. Real pricing is always preferred via `getModelCost` above.
-    const costs: Record<string, number> = {
-      'claude-sonnet-4-6': 0.15,
-      'claude-opus-4-7': 15.00,
-      'claude-haiku-4-5': 0.80,
-      'gpt-5-mini': 0.05,
-      'gpt-5': 2.50,
-      'gemini-2.5-flash': 0.075,
-      'minimax-m2.5-free': 0
-    }
-    return costs[model] || 0.10
-  }
-
+  /**
+   * RISK R5, and it got sharper with the cost term. An unrecognised model falls
+   * back to 0.60 here. While the cost term was normalised against a fixed
+   * ceiling, it sat at ≈1 for practically every candidate, so a badly-defaulted
+   * model was rescued by price and nobody noticed the gap. Now that the cost
+   * term is a real per-task estimate, a user-configured model absent from this
+   * table can lose to a listed one on cost alone at low complexity. The natural
+   * follow-up is to make an unrecognised model neutral rather than pessimistic
+   * (or to derive quality from the price tiers), but that is a separate change
+   * and deliberately not smuggled in here.
+   */
   private estimateModelQuality(model: string): number {
     const quality: Record<string, number> = {
       'claude-opus-4-7': 0.95,
@@ -1784,15 +1955,70 @@ export class NexusOrchestrator {
     return speeds[model] || 0.5
   }
 
-  scoreModel(modelId: string, role: string, complexity: ComplexityScore): ModelScore {
+  /**
+   * Score one candidate on quality and price.
+   *
+   * THE COST TERM IS A PER-TASK USD ESTIMATE, not a per-1K rate. It used to be
+   * `estimateModelCost`, which returned *either* a real per-1K rate *or* a
+   * hand-tuned relative figure — two different scales compared against a fixed
+   * `maxCost = 15.00`. That ceiling was calibrated to the invented table, so
+   * every REAL price scored ≈1 and cost did not discriminate at all, while two
+   * identically-priced models could still score differently because one was
+   * priced from `modelCosts` and the other from the table. The relative table
+   * is deleted; `forecaster.estimateCost` is the single figure, and it is the
+   * same one the budget filter compares.
+   *
+   * `estimates` is that shared map, keyed by the model reference as passed in.
+   * When it is omitted the candidate is priced on its own and the cost term is
+   * 1: with no comparison set, price is not a discriminator and must not be
+   * scored as one. `selectBestModel` always passes the map, so the ranker and
+   * the budget filter read the same numbers rather than re-deriving numbers
+   * that happen to agree.
+   *
+   * IN PRACTICE THIS IS A STEP FUNCTION, NOT A GRADIENT. `1 - estimate/max` is
+   * a ratio, but the estimates it orders come from a handful of hand-written
+   * per-1K tables, so candidates land in a few distinct price bands and the
+   * spread between neighbouring candidates is often a rounding-level price
+   * difference. Within a band the term does not discriminate at all. A smooth
+   * log-scale alternative, and normalising over only the affordable subset
+   * rather than all candidates including ones the budget filter will discard,
+   * are both defensible improvements — deliberately not taken here, since they
+   * change which model wins and that is a design decision rather than a fix.
+   *
+   * KNOWN INCONSISTENCY, currently unreachable: on a missing key the budget
+   * filter treats the candidate as free (`?? 0`, hence selectable) while this
+   * method re-derives the estimate. It cannot fire, because `selectBestModel`
+   * builds the map from the same candidate list it scores, so every key is
+   * present. Left as-is rather than unified, because the two behaviours are
+   * each defensible on their own terms and picking one would silently change
+   * what a missing price means.
+   */
+  scoreModel(
+    modelId: string,
+    role: string,
+    complexity: ComplexityScore,
+    estimates?: ReadonlyMap<string, number>
+  ): ModelScore {
     const [provider, ...parts] = modelId.split('/')
     const model = parts.join('/')
 
-    const cost = this.estimateModelCost(model, provider)
-    const quality = this.estimateModelQuality(model)
-    const maxCost = 15.00 // normalize against the fallback table's most expensive entry
+    const estimate = estimates?.get(modelId)
+      ?? this.forecaster.estimateCost(complexity, model, provider)
+    let maxEstimate = 0
+    for (const value of estimates?.values() ?? []) {
+      if (value > maxEstimate) maxEstimate = value
+    }
 
-    const costScore = 1 - (cost / maxCost)
+    // EXPLICIT ZERO BRANCH, and it is not cosmetic. `1 - 0/0` is NaN, NaN
+    // propagates into `overallScore`, and the sort comparator `(a, b) =>
+    // b.overallScore - a.overallScore` then returns NaN, whose sign is falsy —
+    // so the sort silently becomes a no-op and the FIRST candidate wins for
+    // reasons having nothing to do with cost. Same class of quiet wrong answer
+    // the `NaN` guard in `readSessionTokens` exists to prevent, and an
+    // all-free candidate set is reachable whenever `modelCosts` reports a
+    // locally-served model as free.
+    const costScore = maxEstimate === 0 ? 1 : 1 - (estimate / maxEstimate)
+    const quality = this.estimateModelQuality(model)
     const speedScore = this.estimateModelSpeed(model)
 
     // Weight based on complexity: high complexity favors quality, low favors cost
@@ -1806,9 +2032,11 @@ export class NexusOrchestrator {
       provider,
       costScore,
       qualityScore: quality,
+      // PRE-EXISTING and unchanged: `speedScore` is reported but is not a term
+      // in `overallScore`, so it never affects selection.
       speedScore,
       overallScore,
-      reasoning: `Score: ${overallScore.toFixed(2)} (quality: ${quality.toFixed(2)}, cost: ${costScore.toFixed(2)}, speed: ${speedScore.toFixed(2)})`
+      reasoning: `Score: ${overallScore.toFixed(2)} (quality: ${quality.toFixed(2)}, cost: ${costScore.toFixed(2)} [~$${estimate.toFixed(4)}/task], speed: ${speedScore.toFixed(2)})`
     }
   }
 
@@ -1828,17 +2056,26 @@ export class NexusOrchestrator {
     // Deduplicate while preserving order
     const unique = [...new Set(candidates)]
 
-    // Score all candidates
-    const scored = unique.map(m => this.scoreModel(m, role, complexity))
+    // ONE price per candidate, resolved once. The budget filter and the ranker
+    // both read this map, so they agree by construction rather than by two
+    // coincidentally-identical calculations.
+    const estimates = new Map<string, number>()
+    for (const ref of unique) {
+      const [provider, ...parts] = ref.split('/')
+      estimates.set(ref, this.forecaster.estimateCost(complexity, parts.join('/'), provider))
+    }
 
-    // Filter by budget. The comparison must be between two per-task dollar
-    // figures: the estimated cost of running a task of this complexity on the
-    // candidate, versus what is left of the total budget. The old filter
-    // compared a per-1K RATE against a per-task remaining total, which are not
-    // commensurable, so it excluded models essentially at random.
+    // Score all candidates
+    const scored = unique.map(ref => ({ ref, score: this.scoreModel(ref, role, complexity, estimates) }))
+
+    // Filter by budget. The comparison is between two per-task dollar figures:
+    // the estimated cost of running a task of this complexity on the candidate,
+    // versus what is left of the total budget. The old filter compared a per-1K
+    // RATE against a per-task remaining total, which are not commensurable, so
+    // it excluded models essentially at random.
     const budgetRemaining = this.budget.maxTotalCost - this.totalSpent
-    const affordable = scored.filter(s => {
-      const estimate = this.forecaster.estimateCost(complexity, s.model, s.provider)
+    const affordable = scored.filter(({ ref }) => {
+      const estimate = estimates.get(ref) ?? 0
       // A genuinely free model costs nothing and must stay selectable however
       // little budget is left — hence the `=== 0` escape hatch.
       return estimate <= budgetRemaining || estimate === 0
@@ -1846,17 +2083,17 @@ export class NexusOrchestrator {
 
     // Pick best — prefer affordable models, but fall back to all if none are affordable
     const best = (affordable.length > 0 ? affordable : scored)
-      .sort((a, b) => b.overallScore - a.overallScore)[0]
+      .sort((a, b) => b.score.overallScore - a.score.overallScore)[0]
 
     return {
-      provider: best.provider,
-      model: best.model,
-      // A per-task estimate in USD, not `estimateModelCost`'s per-1K rate: the
-      // field is named `estimatedCost` and consumers read it as one. The rate
-      // now lives only inside `scoreModel`, which ranks on it.
-      estimatedCost: this.forecaster.estimateCost(complexity, best.model, best.provider),
-      estimatedQuality: best.qualityScore,
-      reasoning: best.reasoning
+      provider: best.score.provider,
+      model: best.score.model,
+      // A per-task estimate in USD, which is what the field is named and what
+      // consumers read it as. Read from the same map the filter and the ranker
+      // used, so the reported figure is the figure that was compared.
+      estimatedCost: estimates.get(best.ref) ?? 0,
+      estimatedQuality: best.score.qualityScore,
+      reasoning: best.score.reasoning
     }
   }
 
@@ -1927,10 +2164,24 @@ export class NexusOrchestrator {
   /**
    * Cost one task from its session's REAL token usage.
    *
-   * `SessionInfo.cost` is deliberately not consulted: it is provider-billed
-   * against a context-size-dependent tier, and mixing it with our base-tier
-   * per-1K rates would make the plugin's spend disagree with the bill. Token
-   * counts are the trustworthy signal.
+   * `SessionInfo.cost` is deliberately not consulted, and the reason is
+   * granularity rather than unit. OpenCode prices every model CALL at the
+   * context tier that call's own prompt falls into and accumulates the running
+   * total; we are handed one SESSION TOTAL and make a SINGLE tier selection for
+   * it. Token counts are the trustworthy signal; the provider-billed total is a
+   * figure we cannot reproduce at our observation granularity, and reading it
+   * would also mean mixing a tier-aware total with our own per-1K rates.
+   *
+   * The error is not signed in a knowable direction. With monotonically
+   * non-decreasing rates — a premium tier costs more, the common case — a
+   * session sum reaches at least as high a tier as any single call's prompt, so
+   * we over-report. But a provider may publish a DISCOUNTED long-context tier
+   * (Gemini's long-context pricing is exactly this shape): several
+   * sub-threshold calls then sum past the threshold and we bill the whole
+   * session at the cheaper rate, under-reporting by the ratio between base and
+   * discounted rate. T5 in `test/pricing-tiers.test.ts` is the worked example.
+   * These figures are therefore not reconcilable with `SessionInfo.cost` in
+   * either direction, and must not be presented as the bill.
    *
    * Falls back to the forecaster's token estimate ONLY when the session could
    * not be read. A session that was read successfully and consumed nothing is a
