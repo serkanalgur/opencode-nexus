@@ -313,6 +313,23 @@ describe('the sessions view exists and makes the orphan case unmissable', () => 
   it('is driven by the state field, not by a filter on the agent list', () => {
     expect(/\.sessions\b/.test(executableSource())).toBe(true)
   })
+
+  it('keeps the "live agents only" caveat on the number it qualifies', () => {
+    // The overview card's sub-line read "3 working · 0 not working" and
+    // nothing else, which is a claim to be a complete census of the fleet. The
+    // Agents SECTION carries the caveat permanently, so the information was on
+    // the page — just nowhere near the number it qualifies, on a card of four,
+    // above the fold, long before that section is reached. The caveat is now in
+    // the sub-line itself.
+    const c = executableSource()
+    expect(/\(live agents only\)/.test(c)).toBe(true)
+    // Both halves of the arithmetic come from `liveAgents`. `activeCount` was
+    // already computed over it while the total was `agents.length`, so the
+    // sub-line mixed two different lists and could not be added up by a reader.
+    expect(/\(liveAgents\.length - activeCount\)/.test(c)).toBe(true)
+    // And the headline number agrees with the caveat printed under it.
+    expect(/\$statAgents\.textContent = String\(liveAgents\.length\)/.test(c)).toBe(true)
+  })
 })
 
 describe('the dependency graph draws the graph rather than a pipeline', () => {
@@ -341,6 +358,17 @@ describe('the dependency graph draws the graph rather than a pipeline', () => {
     expect(/dangling/.test(c)).toBe(true)
     expect(/idless/.test(c)).toBe(true)
     expect(/cycleCount/.test(c)).toBe(true)
+    // A task listing ITSELF as a dependency, too. It was dropped from the
+    // graph with no note, while every other undrawable edge beside it was
+    // counted — and a self-edge is a data fault rather than a missing task: the
+    // task is present, so it cannot be reported as dangling, and it will STALL
+    // rather than fail, which is the version of this bug nobody notices.
+    expect(/selfDep/.test(c)).toBe(true)
+    expect(/list themselves as a dependency/.test(c)).toBe(true)
+    // Counted separately rather than folded into `dangling`, because folding it
+    // in would tell a reader chasing a bad id to look for a task that is right
+    // there in the snapshot.
+    expect(/dep === t\.id\) \{ selfDep\+\+; continue; \}/.test(c)).toBe(true)
   })
 
   it('does not claim the layout is optimal', () => {
@@ -366,6 +394,134 @@ describe('the auto-refresh is consistent with a getState the server answers', ()
     const c = executableSource()
     expect(/ago\)/.test(c)).toBe(true)
     expect(/STALE_AFTER_MS/.test(c)).toBe(true)
+  })
+})
+
+/**
+ * The unbilled figure, and the eviction block underneath it.
+ *
+ * This half EXECUTES the page's function rather than grepping it, because the
+ * bug it pins is a missing branch — and a grep cannot tell a three-way
+ * `if/else` from a two-way one. `uncollectedSummary()` always emits
+ * `uncollected.evicted`, at zero, precisely so a consumer can distinguish
+ * "nothing was dropped" from "this build does not report drops". The page
+ * collapsed both into the same empty suffix, so a server that reported no
+ * evictions at all rendered identically to one that had dropped nothing — and
+ * the page is where a user decides whether the number in front of them is
+ * complete.
+ */
+describe('the unbilled stat distinguishes "none evicted" from "not reported"', () => {
+  /**
+   * One named function's source, brace-matched out of the page.
+   *
+   * Brace counting is naive about braces inside string literals, which is a
+   * real caveat and not a hypothetical one: the page's prose is full of `{`.
+   * It is sound here because the functions pulled are the small numeric and
+   * formatting helpers plus the two under test, none of which contain a brace
+   * in a string — and because `extracted` is asserted to be non-empty below, so
+   * a match that silently found the wrong span fails rather than passing.
+   */
+  function functionSource(name: string): string {
+    const src = executableSource()
+    const start = src.indexOf(`function ${name}(`)
+    if (start === -1) throw new Error(`dashboard/index.html has no function ${name}`)
+    let depth = 0
+    let opened = false
+    for (let i = start; i < src.length; i++) {
+      const ch = src[i]
+      if (ch === '{') { depth++; opened = true }
+      else if (ch === '}') {
+        depth--
+        if (opened && depth === 0) return src.slice(start, i + 1)
+      }
+    }
+    throw new Error(`unbalanced braces while extracting ${name}`)
+  }
+
+  /** A cost report with an `uncollected` block, at the given eviction count. */
+  function reportWith(evicted: Record<string, number> | null): Record<string, unknown> {
+    const uncollected: Record<string, unknown> = {
+      sessions: 2,
+      lastKnownTokens: 4000,
+      observedUncollected: 0.05,
+      taskIds: ['node-1', 'node-2'],
+      entries: [],
+    }
+    // `null` means the key is DELETED, not set to null — the server's type
+    // says the block is always present, so an absent key is exactly the
+    // "older or non-conforming build" case the three-way rendering exists for.
+    if (evicted !== null) uncollected.evicted = evicted
+    return { totalSpent: 1, budgetRemaining: 9, uncollected }
+  }
+
+  /** Run the page's own `renderUnbilledStat` over a report; return what it wrote. */
+  function render(report: Record<string, unknown>): { value: string; sub: string } {
+    const deps = ['num', 'fmt$', 'asObject', 'evictedSuffix', 'renderUnbilledStat']
+      .map(functionSource)
+      .join('\n')
+    const $statUnbilled = { textContent: '' }
+    const $statUnbilledSub = { textContent: '' }
+    // Non-vacuity: if extraction ever returns nothing, the function under test
+    // is missing and this must not quietly pass on an empty string.
+    expect(deps).toContain('function renderUnbilledStat')
+
+    const make = new Function(
+      '$statUnbilled', '$statUnbilledSub', 'costReport', 'costReportStatus',
+      `${deps}\nreturn renderUnbilledStat;`,
+    )
+    const renderUnbilledStat = make($statUnbilled, $statUnbilledSub, report, 'ready')
+    renderUnbilledStat()
+    return { value: $statUnbilled.textContent, sub: $statUnbilledSub.textContent }
+  }
+
+  const ZERO = { sessions: 0, lastKnownTokens: 0, observedUncollected: 0, cap: 200 }
+  const SOME = { sessions: 3, lastKnownTokens: 9000, observedUncollected: 0.21, cap: 200 }
+
+  it('says the server does not report evictions when the block is absent', () => {
+    const out = render(reportWith(null))
+    // THE ASSERTION. Before the fix this was byte-identical to the zero case
+    // below, which is the whole defect: a report that never mentioned drops
+    // rendered as a report that said nothing was dropped.
+    expect(out.sub).toContain('evictions NOT reported')
+    expect(out.sub).not.toContain('0 evicted')
+    // The figure itself is unaffected — only the claim about its completeness.
+    expect(out.value).toBe('≥ $0.05')
+  })
+
+  it('says the itemised list is complete when the block is present and zero', () => {
+    const out = render(reportWith({ ...ZERO }))
+    expect(out.sub).toContain('0 evicted')
+    expect(out.sub).toContain('list is complete')
+    expect(out.sub).not.toContain('NOT reported')
+  })
+
+  it('says how many were evicted when the block is present and positive', () => {
+    const out = render(reportWith({ ...SOME }))
+    expect(out.sub).toContain('3 evicted')
+    expect(out.sub).not.toContain('NOT reported')
+    expect(out.sub).not.toContain('list is complete')
+  })
+
+  it('gives the three cases three DIFFERENT strings', () => {
+    // The regression-guard form: pairwise distinct is what actually forbids
+    // two of the branches collapsing back into one, which is how the original
+    // bug got in.
+    const absent = render(reportWith(null)).sub
+    const zero = render(reportWith({ ...ZERO })).sub
+    const positive = render(reportWith({ ...SOME })).sub
+    expect(new Set([absent, zero, positive]).size).toBe(3)
+  })
+
+  it('reports the same three cases in the Accounting panel', () => {
+    // That panel builds its rows inline rather than through `evictedSuffix`, so
+    // it cannot share the executed test. Pinned at source level, with the
+    // wording named so a reword that drops a state fails here too.
+    const c = executableSource()
+    expect(/not reported by this server/.test(c)).toBe(true)
+    expect(/the itemised list is complete/.test(c)).toBe(true)
+    // And the positive branch still reports the evicted MONEY, not just a
+    // count — that figure is in no other block.
+    expect(/of which evicted from the itemised list/.test(c)).toBe(true)
   })
 })
 

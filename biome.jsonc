@@ -56,13 +56,21 @@
   //   useTemplate                 17
   //   noUnusedVariables           14  (all in test/)
   //   noUnusedImports              6
+  //   noUnusedFunctionParameters   6
   //   useIterableCallbackReturn    2  (src/orchestrator.ts)
   //   noGlobalIsNan                1  (src/tui.tsx)
   //   noAssignInExpressions        1  (test/broadcast-event-coverage.test.ts)
   //   noSwitchDeclarations         1  (src/tui.tsx)
   //   noUnsafeOptionalChaining     1  (test/orchestrator.test.ts)
+  //   useImportType                1  (test/config-reload-content-signal.test.ts)
   //   noBannedTypes                3
   //   useOptionalChain             2
+  //
+  // Every rule switched off here is listed with its count, because the promise
+  // this block makes is that the config matches the measured state of the tree.
+  // An unlisted "off" breaks that silently: the count is the only part anyone
+  // checks, and a rule switched off with no number beside it is indistinguishable
+  // from one that was never considered.
   // Everything else in the recommended preset stays ON and is enforced.
   "linter": {
     "enabled": true,

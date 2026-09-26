@@ -2410,10 +2410,27 @@
     renderLifecycle(state);
 
     // ── Overview Stats ──
-    $statAgents.textContent = String(agents.length);
+    // The headline count is `liveAgents.length` too, not `agents.length`: the
+    // sub-line now says "live agents only" and points at the Agents section,
+    // so a total that included entries the page cannot render would contradict
+    // the caveat printed directly beneath it.
+    $statAgents.textContent = String(liveAgents.length);
     var liveAgents = agents.filter(function(a) { return asObject(a) !== null; });
     var activeCount = liveAgents.filter(function(a) { return a.status === 'working'; }).length;
-    $statAgentsSub.textContent = activeCount + ' working · ' + (agents.length - activeCount) + ' not working';
+    // Both figures from `liveAgents`, not one from `agents`: the count beside
+    // the total has to be arithmetic the reader can do in their head, and
+    // `agents.length - activeCount` mixing the two lists made the sub-line
+    // disagree with the "Live agents only" section it is summarising whenever a
+    // null entry was present.
+    //
+    // The caveat stays IN this line, not only on the Agents section further
+    // down. The number it qualifies is HERE, so a reader who stops at the
+    // overview card must be told it is not a census — "3 working · 0 not
+    // working" reads as a complete count of the fleet, and this stat sits on a
+    // card of four, above the fold, long before the section that carries the
+    // qualifier is reached.
+    $statAgentsSub.textContent = activeCount + ' working · '
+      + (liveAgents.length - activeCount) + ' not working (live agents only)';
 
     var liveTasks = tasks.filter(function(t) { return asObject(t) !== null; });
     var runningTasks = liveTasks.filter(function(t) {
@@ -2482,9 +2499,37 @@
     $statUnbilled.textContent = lower === null ? '—' : '≥ ' + fmt$(lower);
     $statUnbilledSub.textContent = (count === null ? 'session count unreported' : count + ' session' + (count === 1 ? '' : 's'))
       + ' · lower bound, NOT in Spend'
-      + (evictedCount !== null && evictedCount > 0
-          ? ' · plus ' + evictedCount + ' evicted from the itemised list'
-          : '');
+      + evictedSuffix(evicted, evictedCount);
+  }
+
+  /**
+   * How a report's `uncollected.evicted` block is described, in THREE states.
+   *
+   * `uncollectedSummary()` always emits `evicted`, at zero, and it does so
+   * deliberately: the block is emitted unconditionally precisely so a consumer
+   * can tell "nothing was dropped" from "this build does not report drops".
+   * Collapsing the two — the obvious `evictedCount > 0 ? ... : ''` — throws
+   * that distinction away, and this is the one surface where that costs
+   * something concrete. The page is where a user decides whether the number in
+   * front of them is COMPLETE. Rendering an absent block as if it were a
+   * present-and-zero block asserts "nothing was evicted" from a report that
+   * never said so, which is the same silent-shrinking-number failure the block
+   * exists to prevent — arriving from the other direction.
+   *
+   *   absent   — the server does not report evictions at all. Say so, rather
+   *              than letting a silent omission read as a clean bill.
+   *   zero     — reported, and nothing was dropped. Said explicitly, because
+   *              "reported nothing" and "did not report" are different claims
+   *              and only one of them is true here.
+   *   positive — reported, and this many abandoned sessions left the itemised
+   *              list. Their money is in `evicted`, NOT in the headline figure.
+   */
+  function evictedSuffix(evicted, evictedCount) {
+    if (evicted === null || evictedCount === null) {
+      return ' · evictions NOT reported by this server';
+    }
+    if (evictedCount === 0) return ' · 0 evicted, list is complete';
+    return ' · plus ' + evictedCount + ' evicted from the itemised list';
   }
 
   // ── Sessions ──
@@ -2900,13 +2945,23 @@
     var known = {};
     var edges = [];
     var dangling = 0;
+    var selfDep = 0;
     for (var j = 0; j < list.length; j++) {
       var t = list[j];
       known[t.id] = [];
       var deps = Array.isArray(t.dependencies) ? t.dependencies : [];
       for (var d = 0; d < deps.length; d++) {
         var dep = deps[d];
-        if (typeof dep !== 'string' || dep === t.id) continue;
+        // A task listing ITSELF is dropped from the graph, and counted rather
+        // than skipped in silence: a self-edge can never be satisfied — the
+        // task waits for itself — so it is a data-integrity fault in the same
+        // class as the dangling refs and the cycles this note already reports,
+        // and drawing nothing while saying nothing would read as "no
+        // dependencies". It is deliberately NOT folded into `dangling`: the
+        // task IS in the snapshot, so counting it there would misdescribe the
+        // cause, and a reader chasing a bad id would never find it.
+        if (typeof dep !== 'string') continue;
+        if (dep === t.id) { selfDep++; continue; }
         if (Object.prototype.hasOwnProperty.call(byId, dep)) {
           known[t.id].push(dep);
           edges.push({ from: dep, to: t.id });
@@ -2989,6 +3044,12 @@
       notes.push('<strong>' + idless + ' task' + (idless === 1 ? '' : 's')
         + ' report no `id`</strong> and cannot be laid out, because an edge has nothing to address. '
         + 'They are excluded from the graph and from the count above.');
+    }
+    if (selfDep > 0) {
+      notes.push('<strong style="color: var(--red)">' + selfDep + ' task' + (selfDep === 1 ? '' : 's')
+        + ' list themselves as a dependency.</strong> A task cannot be its own '
+        + 'prerequisite, so that edge is dropped and never drawn. It is a fault in the task data '
+        + 'rather than a missing task, and it will stall the task rather than fail it.');
     }
     $dagNote.innerHTML = notes.join('<br>');
 
@@ -3262,7 +3323,16 @@
         (lower === null ? '—' : fmt$(lower)) + ' across '
         + (count === null ? 'an unreported number of' : String(count)) + ' session' + (count === 1 ? '' : 's'),
         'unbilled');
-      if (evictedCount !== null && evictedCount > 0) {
+      // The same three-way distinction the stat card makes, as its own row
+      // rather than a suffix — see `evictedSuffix`. An absent block is stated,
+      // not rendered as a clean zero.
+      if (evicted === null || evictedCount === null) {
+        html += accountingRow('  of which evicted from the itemised list',
+          'not reported by this server', 'unbilled');
+      } else if (evictedCount === 0) {
+        html += accountingRow('  of which evicted from the itemised list',
+          '0 — the itemised list is complete', 'unbilled');
+      } else {
         html += accountingRow('  of which evicted from the itemised list',
           fmt$(evicted.observedUncollected) + ' across ' + evictedCount + ' session' + (evictedCount === 1 ? '' : 's'),
           'unbilled');

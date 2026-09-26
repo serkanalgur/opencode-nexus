@@ -73,14 +73,18 @@ export class StateBroadcaster {
 
   /**
    * Register a new WebSocket client and send it the current orchestrator state.
+   *
+   * `getState()` is guarded because this is called from Bun's server upgrade
+   * handler, i.e. from the CONNECT path: a throw here would reject a client
+   * that has already been accepted, and the client is in `this.clients` from
+   * the line above, so it would be left in the broadcast set with no first
+   * state push and no explanation. Catching keeps a wedged `getState()` from
+   * taking the whole dashboard endpoint down; the log is what makes it
+   * diagnosable rather than merely survivable.
    */
   addClient(ws: WebSocketLike): void {
     this.clients.add(ws)
-    this.sendTo(ws, {
-      type: "orchestrator:state",
-      data: this.orchestrator.getState(),
-      timestamp: new Date().toISOString(),
-    })
+    this.snapshot("orchestrator:state", ws)
   }
 
   /**
@@ -111,6 +115,37 @@ export class StateBroadcaster {
   // ── State broadcast (throttled) ────────────────────────────────────
 
   /**
+   * Read `getState()` and ship it, with the read GUARDED.
+   *
+   * Both of this class's state reads are unowned by it: `getState()` walks the
+   * agent map, the DAG and the session views, and a throw in any of them
+   * would otherwise surface as a dropped broadcast — which is the right failure
+   * mode but a WHOLLY SILENT one. The caller is either a `setTimeout` callback
+   * (where an unhandled throw is a process-level event) or Bun's upgrade
+   * handler (where it rejects a live connection), and in neither case does the
+   * dashboard get to learn that its own state push failed.
+   *
+   * So a failed read is logged and the push is skipped, and — this is the part
+   * that matters — the client is still in the broadcast set, so the NEXT
+   * successful state change delivers a full state to it. A subscriber that
+   * merely got `undefined` would render an empty dashboard forever.
+   *
+   * `to` narrows the send to one client; omitted, it fans out to all of them.
+   */
+  private snapshot(type: string, to?: WebSocketLike): void {
+    let data: ReturnType<NexusOrchestrator['getState']>
+    try {
+      data = this.orchestrator.getState()
+    } catch (error) {
+      console.error(`[nexus] getState() failed; skipping the "${type}" push:`, error)
+      return
+    }
+    const frame = { type, data, timestamp: new Date().toISOString() }
+    if (to) this.sendTo(to, frame)
+    else this.broadcast(type, data)
+  }
+
+  /**
    * Schedule a throttled full-state broadcast. Multiple calls within the
    * throttle window collapse into a single broadcast.
    */
@@ -119,7 +154,7 @@ export class StateBroadcaster {
 
     this.broadcastTimer = setTimeout(() => {
       this.broadcastTimer = null
-      this.broadcast("orchestrator:state", this.orchestrator.getState())
+      this.snapshot("orchestrator:state")
     }, this.throttleMs)
     // `.unref()`'d for the same reason the timeout-delta timers in
     // `orchestrator.ts` are: a background watcher must never be the thing that

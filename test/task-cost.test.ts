@@ -1760,14 +1760,22 @@ describe('a re-entrant collection attempt bills nothing', () => {
 })
 
 describe('a correction that fails part-way is reported, not half-applied silently', () => {
-  it('still bills, still emits, and does not throw when a budget:alert subscriber throws', async () => {
-    // `trackCost` ends in `checkBudget()`, which `emit`s `budget:alert`, and
-    // `emit` is a bare `forEach` with no try/catch. Both `adjust` calls used to
-    // sit AFTER `trackCost`, so a throwing subscriber landed the charge, skipped
-    // every correction, emitted nothing, and propagated out — leaving
-    // `totalSpent` carrying the delta while history, performance, the agent
-    // metrics and the DAG result all still held the old figure, with no event
-    // to say so. The money was wrong AND unreported.
+  it('a throwing budget:alert subscriber no longer stops the corrections at all', async () => {
+    // `trackCost` ends in `checkBudget()`, which `emit`s `budget:alert`, and both
+    // `adjust` calls sit AFTER `trackCost`. When `emit` was a bare `forEach` with
+    // no try/catch, a throwing subscriber landed the charge, skipped every
+    // correction, emitted nothing, and propagated out — leaving `totalSpent`
+    // carrying the delta while history, performance, the agent metrics and the
+    // DAG result all still held the old figure, with no event to say so. The
+    // money was wrong AND unreported. Reproduced: totalSpent 1.80 against
+    // history 1.50 and performance 1.50.
+    //
+    // `emit` now isolates each handler, so that subscriber's throw is contained
+    // where it happens and `trackCost` returns normally. The outcome is strictly
+    // better than the containment this test used to assert: the corrections are
+    // no longer merely REPORTED as skipped, they are APPLIED. Every figure now
+    // agrees, so the partial state the describe block is named for is no longer
+    // reachable from this direction at all.
     const unhandled: unknown[] = []
     const onUnhandled = (reason: unknown) => { unhandled.push(reason) }
     process.on('unhandledRejection', onUnhandled)
@@ -1791,23 +1799,26 @@ describe('a correction that fails part-way is reported, not half-applied silentl
         }
       )
 
-      // The money moved. `trackCost` applies every mutation before its only
-      // throw site, so a subscriber that throws from inside `checkBudget`
-      // leaves the charge in place.
+      // The money moved.
       expect(totalSpent).toBeCloseTo(1.80, 12)
       expect(costReport.totalSpent).toBeCloseTo(1.80, 12)
 
-      // The event fired, and it says the corrections did not happen. The
-      // `recordsAdjusted` field exists precisely so this is visible.
+      // The event fired, and this time every record was corrected — so the four
+      // figures agree and there is no divergence left to report.
       expect(deltas).toHaveLength(1)
       expect(deltas[0].deltaCost).toBeCloseTo(0.30, 12)
       expect(deltas[0].recordsAdjusted)
-        .toEqual({ history: false, performance: false, node: false, agent: false })
-      expect(deltas[0].error).toBe('subscriber exploded')
+        .toEqual({ history: true, performance: true, node: true, agent: true })
+      // No `error` key at all: nothing failed. The subscriber's throw was
+      // contained by `emit`, which is where it belongs, and it is not this
+      // event's business to report a third party's bad day as an accounting
+      // failure.
+      expect(deltas[0].error).toBeUndefined()
 
-      // And the records really were left alone, rather than the event lying.
-      expect(orchestrator.executionHistory.getAll()[0].cost).toBeCloseTo(1.50, 12)
-      expect(orchestrator.performanceTracker.getScores()[0].avgCost).toBeCloseTo(1.50, 12)
+      // The real assertion: the figures the old test showed diverging now
+      // agree. This is the defect, inverted.
+      expect(orchestrator.executionHistory.getAll()[0].cost).toBeCloseTo(1.80, 12)
+      expect(orchestrator.performanceTracker.getScores()[0].avgCost).toBeCloseTo(1.80, 12)
       // `shutdown()` did not throw, and the ledger was still cleaned up.
       expect(after).toBeUndefined()
       expect(orchestrator['deltaLedgers'].size).toBe(0)
@@ -1816,6 +1827,51 @@ describe('a correction that fails part-way is reported, not half-applied silentl
       process.off('unhandledRejection', onUnhandled)
     }
     expect(unhandled).toEqual([])
+  })
+
+  it('still reports a partial correction, when a correction itself throws', async () => {
+    // The containment this file is really about, and it is still load-bearing:
+    // `emit` isolating its handlers does nothing for a throw from
+    // `executionHistory.adjust`, which is called INSIDE the guarded sequence
+    // rather than through an event. Driven through the real public field so the
+    // throw originates in the correction path itself and the assertions below
+    // are about the report, not about a stub of the whole block.
+    const deltas: Array<Record<string, unknown>> = []
+    const { orchestrator, node, agent } = await runTask(
+      makeCtx({
+        tokenSequence: [usage({ input: 250_000 }), usage({ input: 300_000 })],
+        waitResolvesAfterMs: 60,
+      }),
+      {
+        pricing: null, tiers: MONOTONE, taskTimeoutMs: 30, graceMs: 400, settle: 'flush',
+        onReady: (o) => {
+          o.on('cost:delta', (d: Record<string, unknown>) => deltas.push(d))
+          // Fails the FIRST correction and nothing after it, so the sequence is
+          // genuinely partial: history false, and — because the throw aborts
+          // the rest of the guarded block — performance, node and agent also
+          // unreached.
+          o.executionHistory.adjust = () => { throw new Error('history unavailable') }
+        },
+        afterTask: async () => { await Bun.sleep(150) },
+      }
+    )
+
+    expect(deltas).toHaveLength(1)
+    // The money still moved: `trackCost` runs before the first correction, so a
+    // correction failure never un-charges a charge that really happened.
+    expect(deltas[0].deltaCost).toBeCloseTo(0.30, 12)
+    // And the partial state is REPORTED rather than inferred — the field is the
+    // whole reason this block is wrapped, and a reader of the event can now see
+    // exactly which records were left behind.
+    expect(deltas[0].recordsAdjusted)
+      .toEqual({ history: false, performance: false, node: false, agent: false })
+    expect(deltas[0].error).toBe('history unavailable')
+    // `emit` still fired even though the guarded block threw, which is the
+    // other half of the guarantee: the failure is reported, never silent.
+    expect(orchestrator.totalSpent).toBeCloseTo(1.80, 12)
+    expect(orchestrator['deltaLedgers'].size).toBe(0)
+    expect(agent.id).toBeTruthy()
+    expect(node).toBeTruthy()
   })
 
   it('surfaces an evicted history record as recordsAdjusted.history false, end to end', async () => {

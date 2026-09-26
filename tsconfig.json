@@ -11,10 +11,17 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
-    "outDir": "./dist",
+    // `noEmit` is the load-bearing option here, and the four it replaces are
+    // what made its absence dangerous. Nothing in this repo runs a bare `tsc`
+    // — both scripts pass `--noEmit` explicitly, and the distributable is built
+    // by `bun build`, not `tsc` — so the emit options were inert in practice.
+    // But `include` covers `test/**/*` as well as `src/**/*`, and `outDir` was
+    // `./dist`, which is the directory `package.json`'s `files` ships. A bare
+    // `tsc` would therefore have written `.js` and `.d.ts` for all 32 test
+    // files into the published package. With `noEmit` set, that mistake is not
+    // available to make, and a flag on the command line can only ever narrow
+    // this further, never widen it.
+    "noEmit": true,
     "types": ["bun-types"]
   },
   "include": ["src/**/*", "test/**/*"],

@@ -36,11 +36,46 @@ const COMPLEXITY = {
 }
 
 /**
+ * A latch on `session.prompt`, for tests that must read orchestrator state
+ * WHILE a task is in flight.
+ *
+ * That window is the only place the `idle` → `working` → `idle` transition is
+ * observable at all: `executeTask` sets `working` immediately before it issues
+ * the prompt, and the `finally` puts it back down after the task settles. A ctx
+ * that answers `prompt` synchronously leaves no window to look into, and one
+ * that never released would hang the task instead of settling it — so the
+ * latch has to be closed by the test, deliberately, at the moment it is
+ * asserting.
+ */
+function promptLatch() {
+  let openGate: (() => void) | null = null
+  let markEntered: (() => void) | null = null
+  const gate = new Promise<void>(resolve => { openGate = resolve })
+  const entered = new Promise<void>(resolve => { markEntered = resolve })
+  return {
+    /** Awaited inside `session.prompt` for as long as the latch is held. */
+    gate,
+    /** Called by the ctx when `prompt` is entered. */
+    markEntered: () => markEntered?.(),
+    /** Resolves once the orchestrator is actually inside `prompt`. */
+    waitUntilEntered: () => entered,
+    /** Lets the held `prompt` return, so the task can run to completion. */
+    release: () => openGate?.(),
+  }
+}
+
+/**
  * A ctx whose session behaves over TIME rather than answering once, because the
  * case under test is about a session that outlives its agent. `tokenSequence`
  * is consumed by successive `session.get` calls, the last repeating.
  */
-function makeCtx(opts: { tokenSequence?: Tokens[]; waitNever?: boolean; waitResolvesAfterMs?: number } = {}) {
+function makeCtx(opts: {
+  tokenSequence?: Tokens[]
+  waitNever?: boolean
+  waitResolvesAfterMs?: number
+  /** When set, `prompt` blocks on this latch instead of resolving. */
+  promptGate?: ReturnType<typeof promptLatch>
+} = {}) {
   let gets = 0
   const at = (n: number): Tokens => {
     const seq = opts.tokenSequence
@@ -52,7 +87,11 @@ function makeCtx(opts: { tokenSequence?: Tokens[]; waitNever?: boolean; waitReso
     model: { list: mock(() => Promise.resolve({ data: [] })) },
     session: {
       create: mock(() => Promise.resolve({ id: SESSION_ID })),
-      prompt: mock(() => Promise.resolve()),
+      prompt: mock((): Promise<void> => {
+        if (!opts.promptGate) return Promise.resolve()
+        opts.promptGate.markEntered()
+        return opts.promptGate.gate
+      }),
       // A session that never goes idle is the one that keeps spending; one that
       // resolves after a delay is a session that outlived its task's timeout
       // and then settled, which is the collectable orphan.
@@ -91,15 +130,22 @@ interface TaskNode {
  * `onReady` runs after `initialize()`, and the orchestrator is deliberately NOT
  * shut down: `shutdown()` flushes every collection, which would erase the very
  * pending state these tests read.
+ *
+ * `detach` starts the task WITHOUT awaiting it and returns the promise as
+ * `settled`. It exists for the tests that hold `session.prompt` on a latch:
+ * those must inspect state while the task is suspended mid-prompt, which an
+ * `await` before the inspection can never allow.
  */
 async function runTask(
   ctx: ReturnType<typeof makeCtx>,
-  { taskTimeoutMs = 60_000, graceMs, onReady, afterTask }: {
+  { taskTimeoutMs = 60_000, graceMs, onReady, afterTask, detach }: {
     taskTimeoutMs?: number
     graceMs?: number
     /** Runs after `initialize()` and before the task, for listener wiring. */
     onReady?: (orchestrator: NexusOrchestrator) => void
     afterTask?: (orchestrator: NexusOrchestrator, agent: { id: string }) => Promise<void> | void
+    /** Start the task and hand back `settled` instead of awaiting it. */
+    detach?: boolean
   } = {}
 ) {
   const orchestrator = new NexusOrchestrator({
@@ -130,9 +176,12 @@ async function runTask(
   })
 
   const agent = await orchestrator.spawnAgent({ role: 'coder', model: MODEL }, { task: 'Do the thing' })
-  await orchestrator['executeTask'](agent, node as never)
-  await afterTask?.(orchestrator, agent)
-  return { orchestrator, agent, node }
+  const taskDone = orchestrator['executeTask'](agent, node as never).then(() => {})
+  if (!detach) {
+    await taskDone
+    await afterTask?.(orchestrator, agent)
+  }
+  return { orchestrator, agent, node, settled: taskDone }
 }
 
 /** The single session row, asserting there is exactly one. */
@@ -186,21 +235,74 @@ describe('getState().sessions', () => {
     await orchestrator.shutdown()
   })
 
-  it('reports an agent that is mid-task as running, and a fresh one as idle', async () => {
+  it('reports a fresh agent as idle, and an agent with no session as no row at all', async () => {
     const orchestrator = new NexusOrchestrator()
     await orchestrator.initialize(makeCtx() as never)
     const agent = await orchestrator.spawnAgent({ role: 'coder', model: MODEL }, { task: 't' })
 
-    // `spawnAgent` leaves the agent `idle`: alive, between tasks.
+    // `spawnAgent` leaves the agent `idle`: alive, between tasks. It is NOT
+    // yet `working` — that only happens once `executeTask` issues the prompt,
+    // which the sibling test below observes for real rather than by hand.
     expect(onlySession(orchestrator.getState()).state).toBe('idle')
-
-    agent.status = 'working'
-    expect(onlySession(orchestrator.getState()).state).toBe('running')
 
     // An agent with no session yet is not a session row. There is no id to key
     // it by, and inventing one would put a phantom in a list a user trusts.
     agent.sessionID = undefined
     expect(orchestrator.getState().sessions).toEqual([])
+
+    await orchestrator.shutdown()
+  })
+
+  /**
+   * The regression this file exists to prevent, in the form it actually
+   * shipped: `sessionStateOfAgent` mapped `working` to `running` correctly all
+   * along, and `executeTask` — the PRIMARY execution path — never assigned
+   * `'working'` at all. The agent therefore sat at `idle` for the whole of its
+   * task, and a session actively burning tokens rendered as `idle`.
+   *
+   * The earlier version of this test set `agent.status = 'working'` by hand and
+   * asserted the mapping, which passed for the wrong reason: it exercised the
+   * switch, not the code that was supposed to reach it. The hand-set is gone,
+   * and the transition is now observed from a task that is genuinely in flight.
+   */
+  it('reports a task that is in flight as running, and settles it afterwards', async () => {
+    const gate = promptLatch()
+    const ctx = makeCtx({ promptGate: gate })
+
+    // `detach` starts the task and returns without awaiting it, so the task is
+    // suspended inside `prompt` while this test inspects state. The latch is
+    // the ONLY window in which the `working` status exists, and asserting
+    // before releasing it is the whole point: the pre-fix code reported `idle`
+    // for the entire duration, and only differed from the correct answer after
+    // the task was already over.
+    const { orchestrator, settled } = await runTask(ctx, { detach: true })
+    await gate.waitUntilEntered()
+
+    // The ctx really was held — otherwise the assertions below would be
+    // observing a finished task and pass for the wrong reason.
+    expect(ctx.session.prompt).toHaveBeenCalled()
+
+    const inFlight = orchestrator.getState()
+    // Both views, because the page reads the session row for the sessions
+    // table and the agent row for the agent grid, and both derive from the same
+    // field. Fixing one without the other would leave a split-brain page.
+    expect(inFlight.sessions[0]?.state).toBe('running')
+    expect(inFlight.agents[0]?.status).toBe('working')
+
+    gate.release()
+    await settled
+
+    // After the task settles the `finally` puts the agent back down, and
+    // `running` must not be what it lands on — a stuck `working` would be its
+    // own lie, and would keep the page's `Running` filter permanently lit.
+    const after = orchestrator.getState()
+    expect(after.sessions[0]?.state).not.toBe('running')
+    expect(after.agents[0]?.status).not.toBe('working')
+    // A successful task leaves the agent `idle` specifically: alive, between
+    // tasks. This is the value the PRE-FIX run also produced, which is exactly
+    // why the in-flight assertions above are the ones with teeth.
+    expect(after.agents[0]?.status).toBe('idle')
+    expect(after.sessions[0]?.state).toBe('idle')
 
     await orchestrator.shutdown()
   })
@@ -244,55 +346,60 @@ describe('getState().sessions', () => {
   })
 })
 
+/**
+ * Time a task out, terminate its agent, and return the live orchestrator.
+ *
+ * `settle: 'pending'` leaves the collection outstanding (a long grace window
+ * and no read), which is the mid-flight state. `settle: 'abandon'` lets the
+ * real deadline probe run — a short grace window plus a `session.get` that
+ * shows the session still busy — because `flushTimeoutDeltas()` is the
+ * shutdown path and SETTLES a ledger rather than abandoning it, so it is the
+ * wrong lever here.
+ *
+ * At module scope rather than inside the timeout suite, because it is also how
+ * the cap suite reaches the REAL abandon path: `abandonTimeoutDelta` is what
+ * calls `trimUncollected`, and a helper that only the timeout tests can reach
+ * would leave the cap's production wiring untestable.
+ */
+async function timedOutThenTerminated(opts: {
+  atTimeout: Tokens
+  atProbe: Tokens
+  settle: 'pending' | 'abandon'
+}) {
+  // `settle: 'pending'` leaves the collection outstanding — a long grace
+  // window, so the mid-flight state is still there when the test reads it.
+  // `settle: 'abandon'` uses a short window and lets the real deadline probe
+  // run, because `flushTimeoutDeltas()` is the shutdown path and SETTLES a
+  // ledger rather than abandoning it, so it is the wrong lever here. The
+  // window is read when the ledger is armed, hence the two configurations.
+  const graceMs = opts.settle === 'abandon' ? 40 : 60_000
+  const ctx = makeCtx({ tokenSequence: [opts.atTimeout, opts.atProbe], waitNever: true })
+  // Registered BEFORE the task runs, so the deadline probe's event cannot
+  // fire into a listener that is not attached yet. The test then waits on the
+  // event rather than on a sleep, so it does not depend on the timer firing
+  // within some arbitrary budget.
+  let deltaSeen!: Promise<void>
+  const { orchestrator, agent } = await runTask(ctx, {
+    taskTimeoutMs: 30,
+    graceMs,
+    onReady: (o) => {
+      deltaSeen = new Promise<void>(resolve => { o.on('cost:delta', () => resolve()) })
+    },
+    afterTask: async (o, a) => {
+      await o.terminateAgent(a.id)
+    },
+  })
+  if (opts.settle === 'abandon') {
+    await Promise.race([deltaSeen, Bun.sleep(2000)])
+  }
+  return { orchestrator, agent }
+}
+
 describe('the timed-out session whose agent was terminated', () => {
   // The case this whole projection exists for. On timeout the task fails,
   // `handleFailure` calls `terminateAgent`, and the agent is removed from
   // `this.agents` — while the session is NOT aborted and keeps generating and
   // spending. It was therefore invisible on every layer.
-
-  /**
-   * Time a task out, terminate its agent, and return the live orchestrator.
-   *
-   * `settle: 'pending'` leaves the collection outstanding (a long grace window
-   * and no read), which is the mid-flight state. `settle: 'abandon'` lets the
-   * real deadline probe run — a short grace window plus a `session.get` that
-   * shows the session still busy — because `flushTimeoutDeltas()` is the
-   * shutdown path and SETTLES a ledger rather than abandoning it, so it is the
-   * wrong lever here.
-   */
-  async function timedOutThenTerminated(opts: {
-    atTimeout: Tokens
-    atProbe: Tokens
-    settle: 'pending' | 'abandon'
-  }) {
-    // `settle: 'pending'` leaves the collection outstanding — a long grace
-    // window, so the mid-flight state is still there when the test reads it.
-    // `settle: 'abandon'` uses a short window and lets the real deadline probe
-    // run, because `flushTimeoutDeltas()` is the shutdown path and SETTLES a
-    // ledger rather than abandoning it, so it is the wrong lever here. The
-    // window is read when the ledger is armed, hence the two configurations.
-    const graceMs = opts.settle === 'abandon' ? 40 : 60_000
-    const ctx = makeCtx({ tokenSequence: [opts.atTimeout, opts.atProbe], waitNever: true })
-    // Registered BEFORE the task runs, so the deadline probe's event cannot
-    // fire into a listener that is not attached yet. The test then waits on the
-    // event rather than on a sleep, so it does not depend on the timer firing
-    // within some arbitrary budget.
-    let deltaSeen!: Promise<void>
-    const { orchestrator, agent } = await runTask(ctx, {
-      taskTimeoutMs: 30,
-      graceMs,
-      onReady: (o) => {
-        deltaSeen = new Promise<void>(resolve => { o.on('cost:delta', () => resolve()) })
-      },
-      afterTask: async (o, a) => {
-        await o.terminateAgent(a.id)
-      },
-    })
-    if (opts.settle === 'abandon') {
-      await Promise.race([deltaSeen, Bun.sleep(2000)])
-    }
-    return { orchestrator, agent }
-  }
 
   it('is still reachable in the state, as an unowned running session', async () => {
     const { orchestrator, agent } = await timedOutThenTerminated({
@@ -666,8 +773,8 @@ describe('the uncollected cap', () => {
     return o['uncollected']
   }
 
-  /** Seed one entry, then trim — the two halves of the write path, in order. */
-  function abandon(o: NexusOrchestrator, n: number, lastKnownTokens: number): void {
+  /** Seed one entry WITHOUT trimming, so the cap state under test is explicit. */
+  function seedEntry(o: NexusOrchestrator, n: number, lastKnownTokens: number): void {
     uncollectedMap(o).set(`ses_${n}`, {
       sessionID: `ses_${n}`,
       taskId: `node-${n}`,
@@ -676,7 +783,37 @@ describe('the uncollected cap', () => {
       lastKnownTokens,
       observedUncollected: lastKnownTokens / 1000 * SONNET.input,
     })
+  }
+
+  /** Seed one entry, then trim — the two halves of the write path, in order. */
+  function abandon(o: NexusOrchestrator, n: number, lastKnownTokens: number): void {
+    seedEntry(o, n, lastKnownTokens)
     o['trimUncollected']()
+  }
+
+  /**
+   * Abandon a session the way PRODUCTION does: through `abandonTimeoutDelta`,
+   * the method the deadline probe calls when a timed-out session refuses to
+   * settle, and the one that ends with `this.trimUncollected()`.
+   *
+   * This is the distinction the test below turns on. Calling `abandon()` above
+   * invokes the trim BY HAND, so it proves the trim's arithmetic and nothing
+   * about whether anything calls it; calling this proves the call is there. The
+   * ledger is a minimal cast because only `sessionID`, `agent`, `charged` and
+   * `model` are read on this path — the rest of the interface belongs to the
+   * settlement path, which is not what is under test.
+   */
+  function abandonViaRealPath(o: NexusOrchestrator, sessionID: string): void {
+    o['abandonTimeoutDelta'](
+      {
+        sessionID,
+        agent: { id: `agent-${sessionID}`, metrics: { totalCost: 0, totalTokens: 0 } },
+        charged: usage(1000, 100),
+        model: MODEL,
+      } as never,
+      usage(9000, 900),
+      'abandoned',
+    )
   }
 
   function report(o: NexusOrchestrator) {
@@ -762,6 +899,69 @@ describe('the uncollected cap', () => {
     expect(after.observedUncollected).toBeCloseTo(expectedSurviving, 12)
     expect(after.observedUncollected + after.evicted.observedUncollected)
       .toBeCloseTo((CAP * 2000 + 5000) / 1000 * SONNET.input, 12)
+  })
+
+  it('trims on the REAL abandon path, so the cap is not a test-only fiction', async () => {
+    // The four tests above drive the map and `trimUncollected` DIRECTLY. That
+    // makes them white-box: they pin the trim's arithmetic exactly, and they
+    // would ALL stay green with the single `this.trimUncollected()` call at the
+    // end of `abandonTimeoutDelta` deleted — i.e. with the cap absent from
+    // production entirely. Given this whole change is about a leak that shipped
+    // silently, and that every one of these assertions is about bounding it,
+    // leaving the wiring unasserted was the wrong place to economise.
+    //
+    // So: seed the map to just under the cap, then drive genuine abandonments
+    // through the real path and require that they evict. Seeding is still
+    // white-box, and that is the point: the variable under test is not the FIFO
+    // arithmetic, which the tests above own, but whether PRODUCTION CODE ever
+    // asks for the trim.
+    const orchestrator = new NexusOrchestrator()
+    for (let n = 1; n <= CAP; n++) seedEntry(orchestrator, n, 1000)
+    // Precondition: full, not over, and nothing evicted yet — so any eviction
+    // below is attributable to a real abandon and not to the seeding.
+    expect(orchestrator['uncollected'].size).toBe(CAP)
+    expect(report(orchestrator).evicted.sessions).toBe(0)
+
+    // THE REAL PATH. `abandonTimeoutDelta` is the method the deadline probe
+    // calls when a timed-out session will not settle, and it is the method that
+    // ends with `this.trimUncollected()`. Deleting that one line is what this
+    // test exists to catch.
+    abandonViaRealPath(orchestrator, 'ses_real_1')
+    expect(orchestrator['uncollected'].size).toBe(CAP)
+    expect(orchestrator['uncollected'].has('ses_1')).toBe(false)
+    expect(orchestrator['uncollected'].has('ses_real_1')).toBe(true)
+    expect(report(orchestrator).evicted.sessions).toBe(1)
+
+    // Once more, to show it is not a one-shot: the oldest survivor goes next,
+    // and the evicted count accumulates.
+    abandonViaRealPath(orchestrator, 'ses_real_2')
+    expect(orchestrator['uncollected'].size).toBe(CAP)
+    expect(orchestrator['uncollected'].has('ses_2')).toBe(false)
+    expect(report(orchestrator).evicted.sessions).toBe(2)
+    expect(report(orchestrator).evicted.lastKnownTokens).toBe(2000)
+    // The newest abandonment is always the survivor — the one a reader could
+    // still act on, being closest to having been terminated.
+    expect(orchestrator['uncollected'].has('ses_real_2')).toBe(true)
+
+    // And the real production entry point, a genuine task timeout whose
+    // deadline probe gives up, writes through the same method and is capped by
+    // it. This is the path with no private access at all.
+    const { orchestrator: live } = await timedOutThenTerminated({
+      atTimeout: usage(150_000, 10_000),
+      atProbe: usage(400_000, 30_000),
+      settle: 'abandon',
+    })
+    const un = report(live)
+    expect(un.sessions).toBe(1)
+    expect(un.entries[0]?.sessionID).toBe(SESSION_ID)
+    // Full to the brim: the trim the probe's abandon just performed left it
+    // bounded, and the seeded 200 are what a second abandon would evict.
+    for (let n = 1; n <= CAP - 1; n++) seedEntry(live, n, 1000)
+    expect(live['uncollected'].size).toBe(CAP)
+    expect(un.evicted.sessions).toBe(0)
+
+    await live.shutdown()
+    await orchestrator.shutdown()
   })
 
   it('makes an evicted session vanish from sessions[], which is what the cap costs', () => {

@@ -536,13 +536,21 @@ export interface SessionStateView {
   model: string | null
   /**
    * - `running`   — actively doing work: an agent that is spawning/working, or a
-   *   session whose timed-out cost we are still collecting.
-   * - `idle`      — an agent alive but between tasks (`idle`, `blocked`).
+   *   session whose timed-out cost we are still collecting. On the DAG path
+   *   this is the whole of the task: `executeTask` sets `working` before it
+   *   issues the prompt, and the `finally` puts it back down.
+   * - `idle`      — an agent alive but BETWEEN tasks (`idle`, `blocked`). An
+   *   agent at `idle` holds a session and is expected to be given more work;
+   *   it is not spending. An agent that IS spending reports `running`.
    * - `settled`   — an agent that is done (`completed`, `failed`, `terminated`)
    *   and is not expected to spend more. Distinct from `idle` because "not
    *   spending right now" and "finished" are different answers.
    * - `abandoned` — we stopped collecting its cost while it was still running.
    *   The only state that implies unbilled spend; see `observedUncollected`.
+   *
+   *   All four are reachable on the DAG path: `running` and `idle` by the
+   *   transition above, `settled` by a terminal status, and `abandoned` by a
+   *   `terminateAgent` that leaves a still-running session behind.
    *
    *   An `abandoned` row is ABSENT once the `uncollected` cap has evicted it,
    *   because pass 3 of `sessionViews()` reads that map. A row vanishing here
@@ -1851,6 +1859,23 @@ export class NexusOrchestrator {
         taskPrompt += `\nErrors encountered: ${transferContext.errorLog.join(', ') || 'None'}`
         taskPrompt += `\n\nPlease continue from where the previous agent left off.`
       }
+
+      // The agent is ACTIVELY WORKING from here until the `finally` below.
+      //
+      // This is the DAG `executeTask` path, and it is the primary execution
+      // path. Nothing here set a status before, so the agent sat at the
+      // `spawnAgent` value of `idle` for the whole duration of its task: the
+      // sessions table rendered a session burning tokens as `idle`, and the
+      // page's `Running` filter matched ZERO rows during a healthy run. The
+      // only prior writer of `'working'` was the `spawn` TOOL path in
+      // `index.ts` — a different, less common route in.
+      //
+      // Set immediately BEFORE the prompt, and notify, so the transition is
+      // observable by anyone holding a state view rather than appearing only
+      // when the task finally lands. The `finally` still owns the way back
+      // down, and it does not touch a terminal status.
+      agent.status = 'working'
+      this.notifyStateChange()
 
       // Send the task to the session
       await this.ctx.session.prompt({
@@ -3922,9 +3947,35 @@ export class NexusOrchestrator {
     }
   }
 
+  /**
+   * Dispatch one event to every subscriber, ISOLATING each handler's failures.
+   *
+   * This is a fan-out to code nexus does not own: plugin listeners, and — since
+   * the state broadcaster subscribed to all thirteen events — a
+   * `JSON.stringify` of every payload leaving the orchestrator. That widened
+   * the blast radius of a throw from "the rest of this event's listeners" to
+   * "the rest of this event's listeners, once per event nexus emits", and
+   * `forEach` gives a throw no way to stop at the offender: it unwinds the
+   * whole loop.
+   *
+   * So each handler gets its own `try`. One bad subscriber now costs exactly
+   * one subscriber's delivery, and the throw is LOGGED rather than swallowed —
+   * an isolation boundary that says nothing is worse than no boundary at all,
+   * because it makes the failure invisible instead of merely contained.
+   *
+   * Note the ordering consequence, which is deliberate: handlers still run in
+   * registration order, and a throwing handler does not reorder or skip the
+   * ones after it. Delivery is not transactional and was never claimed to be.
+   */
   private emit(event: string, data: unknown): void {
     const handlers = this.eventHandlers.get(event) || []
-    handlers.forEach(handler => handler(data))
+    handlers.forEach((handler) => {
+      try {
+        handler(data)
+      } catch (error) {
+        console.error(`[nexus] event handler for "${event}" threw; other listeners were still notified:`, error)
+      }
+    })
   }
 
   // === Command Handling ===
