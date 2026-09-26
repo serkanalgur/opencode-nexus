@@ -249,12 +249,21 @@ describe('NexusOrchestrator.initBroadcaster', () => {
     orchestrator.broadcaster?.destroy()
   })
 
-  it('should attach a StateBroadcaster to the orchestrator', () => {
-    expect(orchestrator.broadcaster).toBeNull()
-
-    orchestrator.initBroadcaster({ throttleMs: 50 })
-
+  it('attaches a StateBroadcaster, and `initialize()` is what attaches it', () => {
+    // `initialize()` now calls `initBroadcaster()` itself. It had NO production
+    // caller at all, so `broadcaster` stayed null in production and the
+    // throttled state push was a no-op at every `notifyStateChange()` site —
+    // this is the assertion that would have caught that, had it been here.
     expect(orchestrator.broadcaster).toBeInstanceOf(StateBroadcaster)
+
+    // Re-initialising replaces rather than stacks. The old implementation
+    // CHAINED the previous state-change callback into a new closure, so a
+    // second `initBroadcaster()` would broadcast everything twice and leave the
+    // first broadcaster's `destroy()` unable to unsubscribe it.
+    const first = orchestrator.broadcaster!
+    orchestrator.initBroadcaster({ throttleMs: 50 })
+    expect(orchestrator.broadcaster).toBeInstanceOf(StateBroadcaster)
+    expect(orchestrator.broadcaster).not.toBe(first)
   })
 
   it('should broadcast state on notifyStateChange via the broadcaster', async () => {

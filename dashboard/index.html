@@ -90,6 +90,27 @@
     0%, 100% { opacity: 1; }
     50% { opacity: 0.4; }
   }
+
+  /* Orchestrator lifecycle pill. `paused` and `running` are distinct server
+     fields; a paused orchestrator must not be indistinguishable from a running
+     one, so this is a hard colour change, not a tint. */
+  .orch-pill {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border: 1px solid transparent;
+  }
+  .orch-pill.running { background: rgba(63, 185, 80, 0.15); color: var(--green); border-color: var(--green); }
+  .orch-pill.paused  { background: rgba(210, 153, 34, 0.2); color: var(--yellow); border-color: var(--yellow); }
+  .orch-pill.idle    { background: rgba(139, 148, 158, 0.15); color: var(--text-muted); border-color: var(--border); }
+  .orch-pill.unknown { background: rgba(139, 148, 158, 0.15); color: var(--text-muted); border-color: var(--border); }
+
   .uptime {
     font-size: 12px;
     color: var(--text-muted);
@@ -111,6 +132,8 @@
     font-size: 11px;
     color: var(--text-muted);
   }
+  .last-refresh.stale { color: var(--yellow); }
+  .last-refresh.lost { color: var(--red); }
 
   /* ── Main Layout ── */
   .main {
@@ -122,7 +145,7 @@
   /* ── Overview Cards ── */
   .overview {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
     gap: 16px;
     margin-bottom: 24px;
   }
@@ -155,6 +178,8 @@
   .stat-card.yellow .value { color: var(--yellow); }
   .stat-card.purple .value { color: var(--purple); }
   .stat-card.red .value { color: var(--red); }
+  .stat-card.orange .value { color: var(--orange); }
+  .stat-card.cyan .value { color: var(--cyan); }
 
   /* ── Section Headers ── */
   .section-header {
@@ -173,6 +198,23 @@
     padding: 2px 8px;
     border-radius: 10px;
     font-size: 12px;
+  }
+  /* A caveat that belongs next to the number it qualifies, so it cannot be
+     read as part of a neighbouring card. */
+  .section-note {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin: -10px 0 16px;
+    line-height: 1.5;
+  }
+  .section-note strong { color: var(--text); font-weight: 600; }
+  .section-note code, .config-explainer code, .cost-basis code, .accounting-note code {
+    font-family: 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: 11px;
+    background: var(--bg);
+    padding: 1px 4px;
+    border-radius: 3px;
+    color: var(--blue);
   }
 
   /* ── Agent Grid ── */
@@ -243,6 +285,10 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .agent-meta .mono {
+    font-family: 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: 11px;
+  }
   .agent-metrics {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
@@ -266,7 +312,7 @@
     font-variant-numeric: tabular-nums;
   }
   .agent-cost-bar {
-    height: 3px;
+    height: 4px;
     background: var(--border);
     border-radius: 2px;
     overflow: hidden;
@@ -276,6 +322,129 @@
     height: 100%;
     border-radius: 2px;
     transition: width 0.4s ease;
+  }
+  .bar-caption {
+    font-size: 10px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ── Sessions ── */
+  .sessions-section { margin-bottom: 24px; }
+  .sessions-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .sessions-scroll { overflow-x: auto; }
+  .session-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    min-width: 900px;
+  }
+  .session-table th {
+    text-align: left;
+    padding: 10px 12px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .session-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  .session-table tr:last-child td { border-bottom: none; }
+  .session-table .mono {
+    font-family: 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: 11px;
+    word-break: break-all;
+  }
+  .session-table .num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+
+  /* THE distinction this section exists for. An orphan (owned:false,
+     agentId:null) and an abandoned row are marked with a hard left rule, a
+     tinted ground, and a spelled-out badge — never a subtle shade. */
+  tr.session-row.orphan {
+    background: rgba(240, 136, 62, 0.10);
+    box-shadow: inset 4px 0 0 var(--orange);
+  }
+  tr.session-row.abandoned {
+    background: rgba(248, 81, 73, 0.10);
+    box-shadow: inset 4px 0 0 var(--red);
+  }
+  tr.session-row.unread td:last-child { color: var(--text-muted); }
+
+  .flag {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+  .flag.orphan { background: var(--orange); color: #0d1117; }
+  .flag.abandoned { background: var(--red); color: #ffffff; }
+  .flag.unread { background: var(--border); color: var(--text-muted); }
+
+  .session-state {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 4px;
+    text-transform: capitalize;
+    white-space: nowrap;
+  }
+  .session-state.running { background: rgba(63, 185, 80, 0.15); color: var(--green); }
+  .session-state.idle { background: rgba(210, 153, 34, 0.15); color: var(--yellow); }
+  .session-state.settled { background: rgba(88, 166, 255, 0.15); color: var(--blue); }
+  .session-state.abandoned { background: rgba(248, 81, 73, 0.2); color: var(--red); }
+
+  /* The section-level alarm. Shown only when at least one session is running
+     with no owning agent, because that is the leak. */
+  .orphan-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin: 0 0 16px;
+    padding: 12px 16px;
+    border: 2px solid var(--orange);
+    border-left-width: 6px;
+    border-radius: 8px;
+    background: rgba(240, 136, 62, 0.12);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .orphan-banner .icon { font-size: 16px; }
+  .orphan-banner .title { font-weight: 700; color: var(--orange); text-transform: uppercase; letter-spacing: 0.5px; font-size: 11px; }
+  .orphan-banner .body { color: var(--text); }
+  .orphan-banner .detail { color: var(--text-muted); font-size: 12px; margin-top: 2px; }
+
+  .session-filter-bar { display: flex; gap: 4px; flex-wrap: wrap; }
+  .session-filter-btn {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-muted);
+    font-size: 11px;
+    padding: 3px 10px;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .session-filter-btn:hover { border-color: var(--blue); color: var(--text); }
+  .session-filter-btn.active {
+    background: rgba(88, 166, 255, 0.15);
+    border-color: var(--blue);
+    color: var(--blue);
   }
 
   /* ── Budget Gauge ── */
@@ -337,6 +506,7 @@
     color: var(--text-muted);
     text-transform: uppercase;
   }
+  .gauge-ring.unmeasurable { opacity: 0.35; }
   .budget-details {
     display: flex;
     flex-direction: column;
@@ -347,6 +517,7 @@
     display: flex;
     justify-content: space-between;
     font-size: 13px;
+    gap: 12px;
   }
   .budget-row .budget-label { color: var(--text-muted); }
   .budget-row .budget-val { font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -367,27 +538,34 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    max-height: 340px;
+    max-height: 420px;
     overflow-y: auto;
     scrollbar-width: thin;
     scrollbar-color: var(--border) transparent;
   }
   .task-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
     padding: 10px 12px;
     background: var(--bg);
     border-radius: 6px;
     font-size: 13px;
+    border-left: 3px solid transparent;
+  }
+  .task-item.failed { border-left-color: var(--red); }
+  .task-item.completed { border-left-color: var(--blue); }
+  .task-item.running { border-left-color: var(--green); }
+  .task-item.queued { border-left-color: var(--yellow); }
+  .task-line {
+    display: flex;
+    align-items: center;
     gap: 8px;
   }
   .task-info {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
     overflow: hidden;
     flex: 1;
+    min-width: 0;
   }
   .task-name {
     font-weight: 500;
@@ -405,7 +583,6 @@
     font-size: 11px;
     font-variant-numeric: tabular-nums;
     flex-shrink: 0;
-    min-width: 40px;
     text-align: right;
   }
   .task-status {
@@ -422,6 +599,67 @@
   .task-status.completed { background: rgba(88, 166, 255, 0.15); color: var(--blue); }
   .task-status.failed { background: rgba(248, 81, 73, 0.15); color: var(--red); }
   .task-status.cancelled { background: rgba(139, 148, 158, 0.15); color: var(--text-muted); }
+
+  .task-chip {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    background: var(--border);
+    color: var(--text-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .task-chip.priority-critical { background: rgba(248, 81, 73, 0.2); color: var(--red); }
+  .task-chip.priority-high { background: rgba(240, 136, 62, 0.2); color: var(--orange); }
+  .task-chip.priority-normal { background: rgba(88, 166, 255, 0.15); color: var(--blue); }
+  .task-chip.priority-low { background: var(--border); color: var(--text-muted); }
+  .task-meta {
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-top: 4px;
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .task-meta .mono {
+    font-family: 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+  }
+
+  /* t.result: the only place a user can see WHY a task failed. */
+  .task-result {
+    margin-top: 6px;
+    font-size: 11px;
+  }
+  .task-result summary {
+    cursor: pointer;
+    color: var(--blue);
+    list-style: none;
+  }
+  .task-result summary::-webkit-details-marker { display: none; }
+  .task-result summary::before { content: '▸ '; }
+  .task-result[open] summary::before { content: '▾ '; }
+  .task-result pre {
+    margin-top: 6px;
+    padding: 8px 10px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: 11px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+  .task-result pre.error { border-color: var(--red); color: var(--red); }
+  .result-truncation {
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-top: 4px;
+  }
+
   .empty-message {
     text-align: center;
     padding: 24px;
@@ -524,20 +762,19 @@
 
   /* ── Responsive ── */
   @media (max-width: 900px) {
-    .overview { grid-template-columns: repeat(2, 1fr); }
     .budget-section { grid-template-columns: 1fr; }
     .agents-grid { grid-template-columns: 1fr; }
   }
   @media (max-width: 600px) {
-    .overview { grid-template-columns: 1fr; }
     .main { padding: 16px; }
     .header { padding: 12px 16px; flex-wrap: wrap; gap: 8px; }
     .header-right { gap: 8px; flex-wrap: wrap; }
     .gauge-container { flex-direction: column; align-items: flex-start; }
     .agent-metrics { grid-template-columns: repeat(2, 1fr); }
     .activity-filter-bar { flex-wrap: wrap; }
-    .task-item { flex-direction: column; align-items: flex-start; gap: 6px; }
+    .task-line { flex-wrap: wrap; }
     .task-cost { text-align: left; }
+    .activity-card h3 { flex-direction: column; align-items: flex-start; gap: 8px; }
   }
 
   /* ── Fade-in animation ── */
@@ -558,7 +795,10 @@
     50% { opacity: 0.5; }
   }
 
-  /* ── DAG Visualization ── */
+  /* ── Task Dependency Graph ──
+     Columns are dependency LAYERS (longest-path depth), so an arrow always
+     points right, and every arrow is drawn for a dependency edge the server
+     actually reported. There is no "next node in the list" arrow. */
   .dag-section {
     margin-bottom: 24px;
   }
@@ -582,33 +822,66 @@
     padding: 20px;
   }
   .dag-empty .icon { font-size: 28px; margin-bottom: 8px; }
-  .dag-graph {
+  .dag-canvas {
+    position: relative;
+    display: inline-block;
+    min-width: 100%;
+  }
+  .dag-edges {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    overflow: visible;
+  }
+  .dag-edges path { fill: none; stroke-width: 1.5; }
+  .dag-edges path.edge-satisfied { stroke: var(--green); }
+  .dag-edges path.edge-active { stroke: var(--blue); }
+  .dag-edges path.edge-pending { stroke: var(--border); }
+  .dag-edges polygon.arrowhead { fill: var(--border); }
+  .dag-layers {
     display: flex;
-    align-items: center;
-    gap: 0;
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    padding: 8px 0;
+    align-items: flex-start;
+    gap: 44px;
+    position: relative;
+    z-index: 1;
+  }
+  .dag-layer {
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+    justify-content: center;
+    min-height: 60px;
+  }
+  .dag-layer-index {
+    font-size: 9px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    text-align: center;
+    margin-bottom: 2px;
   }
   .dag-node {
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 6px;
-    min-width: 110px;
+    gap: 4px;
+    width: 120px;
     flex-shrink: 0;
   }
   .dag-node-box {
-    width: 100px;
+    width: 120px;
     padding: 10px 8px;
     border-radius: 8px;
     border: 2px solid var(--border);
-    background: var(--bg);
+    background: var(--surface);
     text-align: center;
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 500;
     transition: border-color 0.3s, box-shadow 0.3s;
     position: relative;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .dag-node-box.pending {
     border-color: var(--text-muted);
@@ -634,14 +907,10 @@
     border-color: var(--yellow);
     color: var(--yellow);
   }
-  .dag-node-box .dag-progress {
-    position: absolute;
-    bottom: 0;
-    left: 0;
-    height: 2px;
-    border-radius: 0 0 6px 6px;
-    background: var(--blue);
-    transition: width 0.4s ease;
+  .dag-node-box.cancelled {
+    border-color: var(--border);
+    color: var(--text-muted);
+    text-decoration: line-through;
   }
   @keyframes dagPulse {
     0%, 100% { box-shadow: 0 0 12px rgba(88, 166, 255, 0.3); }
@@ -650,7 +919,7 @@
   .dag-node-label {
     font-size: 10px;
     color: var(--text-muted);
-    max-width: 110px;
+    max-width: 120px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -661,19 +930,13 @@
     color: var(--text-muted);
     opacity: 0.7;
   }
-  .dag-arrow {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 40px;
-    flex-shrink: 0;
-    color: var(--border);
-    font-size: 18px;
+  .dag-node-deps {
+    font-size: 9px;
+    color: var(--text-muted);
+    text-align: center;
   }
-  .dag-arrow.active { color: var(--blue); }
-  .dag-arrow.completed { color: var(--green); }
 
-  /* ── Cost Chart ── */
+  /* ── Cost ── */
   .cost-section {
     margin-bottom: 24px;
   }
@@ -716,7 +979,8 @@
     font-size: 12px;
   }
   .cost-bar-label {
-    min-width: 90px;
+    min-width: 120px;
+    max-width: 160px;
     color: var(--text-muted);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -728,6 +992,7 @@
     background: var(--bg);
     border-radius: 4px;
     overflow: hidden;
+    min-width: 40px;
   }
   .cost-bar-fill {
     height: 100%;
@@ -735,7 +1000,7 @@
     transition: width 0.5s ease;
   }
   .cost-bar-value {
-    min-width: 55px;
+    min-width: 60px;
     text-align: right;
     font-weight: 600;
     font-variant-numeric: tabular-nums;
@@ -751,8 +1016,38 @@
   }
   .cost-total-label { color: var(--text-muted); }
   .cost-total-value { font-weight: 700; color: var(--blue); }
+  .cost-basis {
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-top: 6px;
+    line-height: 1.5;
+  }
+  .cost-status {
+    font-size: 12px;
+    color: var(--yellow);
+    margin-bottom: 12px;
+  }
+  .cost-status.hidden { display: none; }
+  .accounting-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    padding: 3px 0;
+    gap: 12px;
+  }
+  .accounting-row .k { color: var(--text-muted); }
+  .accounting-row .v { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .accounting-row .v.unbilled { color: var(--orange); }
+  .accounting-note {
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-top: 8px;
+    line-height: 1.5;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+  }
 
-  /* ── Config Panel ── */
+  /* ── Config Panel (read-only) ── */
   .config-section {
     margin-bottom: 24px;
   }
@@ -769,6 +1064,16 @@
     display: flex;
     align-items: center;
     gap: 8px;
+  }
+  .readonly-badge {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    padding: 2px 8px;
+    border-radius: 3px;
+    background: var(--border);
+    color: var(--text-muted);
   }
   .config-grid {
     display: grid;
@@ -797,6 +1102,7 @@
     align-items: center;
     padding: 4px 0;
     font-size: 13px;
+    gap: 12px;
   }
   .config-key {
     color: var(--text-muted);
@@ -805,13 +1111,26 @@
     font-weight: 500;
     font-family: 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
     font-size: 12px;
+    text-align: right;
+    word-break: break-all;
   }
   .config-val.enabled { color: var(--green); }
   .config-val.disabled { color: var(--text-muted); }
   .config-val.warning { color: var(--yellow); }
   .config-val.model { color: var(--blue); }
+  .config-val.unreported { color: var(--text-muted); font-style: italic; }
+  .config-explainer {
+    margin-top: 12px;
+    font-size: 11px;
+    color: var(--text-muted);
+    line-height: 1.6;
+  }
+  .config-explainer code {
+    font-family: 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+    color: var(--text);
+  }
 
-  /* ── Config Editor ── */
+  /* ── Resolved Config (read-only viewer) ── */
   .config-editor-section {
     margin-bottom: 24px;
   }
@@ -834,6 +1153,8 @@
     justify-content: space-between;
     align-items: center;
     margin-bottom: 12px;
+    gap: 12px;
+    flex-wrap: wrap;
   }
   .config-editor-actions {
     display: flex;
@@ -851,17 +1172,9 @@
     transition: all 0.2s;
   }
   .config-btn:hover { border-color: var(--blue); color: var(--blue); }
-  .config-btn.primary {
-    background: rgba(88, 166, 255, 0.15);
-    border-color: var(--blue);
-    color: var(--blue);
-  }
-  .config-btn.primary:hover {
-    background: rgba(88, 166, 255, 0.25);
-  }
   .config-textarea {
     width: 100%;
-    min-height: 180px;
+    min-height: 200px;
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 6px;
@@ -872,16 +1185,18 @@
     padding: 12px;
     resize: vertical;
     outline: none;
-    transition: border-color 0.2s;
   }
-  .config-textarea:focus {
-    border-color: var(--blue);
+  /* Not `readOnly` styling only — the field cannot be typed into, and says so. */
+  .config-textarea[readonly] {
+    cursor: default;
+    border-style: dashed;
   }
   .config-status {
     font-size: 11px;
     color: var(--text-muted);
     margin-top: 8px;
     min-height: 18px;
+    line-height: 1.5;
   }
   .config-status.error { color: var(--red); }
   .config-status.success { color: var(--green); }
@@ -1005,13 +1320,16 @@
   <div class="header-left">
     <span class="header-logo">⚡</span>
     <span class="header-title">Nexus Dashboard</span>
+    <!-- state.running / state.paused, read from the server. A paused
+         orchestrator must not look like a running one. -->
+    <span class="orch-pill unknown" id="orch-status" title="Orchestrator lifecycle, as reported by the server">No state</span>
   </div>
   <div class="header-right">
-    <span class="uptime" id="uptime"></span>
+    <span class="uptime" id="uptime">Server uptime —</span>
     <label class="auto-refresh-toggle">
       <input type="checkbox" id="auto-refresh-check" checked> Auto-refresh
     </label>
-    <span class="last-refresh" id="last-refresh"></span>
+    <span class="last-refresh" id="last-refresh">No state received</span>
     <div class="connection-badge disconnected" id="conn-badge">
       <span class="connection-dot"></span>
       <span id="conn-text">Disconnected</span>
@@ -1026,23 +1344,65 @@
   <div class="overview">
     <div class="stat-card green">
       <span class="label">Agents</span>
-      <span class="value" id="stat-agents">0</span>
-      <span class="sub" id="stat-agents-sub">No agents spawned</span>
+      <span class="value" id="stat-agents">—</span>
+      <span class="sub" id="stat-agents-sub">Live agents only</span>
     </div>
     <div class="stat-card blue">
       <span class="label">Tasks</span>
-      <span class="value" id="stat-tasks">0</span>
-      <span class="sub" id="stat-tasks-sub">No tasks</span>
+      <span class="value" id="stat-tasks">—</span>
+      <span class="sub" id="stat-tasks-sub">No tasks reported</span>
+    </div>
+    <div class="stat-card cyan">
+      <span class="label">Sessions</span>
+      <span class="value" id="stat-sessions">—</span>
+      <span class="sub" id="stat-sessions-sub">No sessions reported</span>
     </div>
     <div class="stat-card yellow">
       <span class="label">Spent</span>
-      <span class="value" id="stat-spent">$0.00</span>
-      <span class="sub" id="stat-spent-sub">of $10.00 budget</span>
+      <span class="value" id="stat-spent">—</span>
+      <span class="sub" id="stat-spent-sub">Budget ceiling not reported</span>
     </div>
     <div class="stat-card purple">
       <span class="label">Remaining</span>
-      <span class="value" id="stat-remaining">$10.00</span>
-      <span class="sub" id="stat-remaining-sub">100% available</span>
+      <span class="value" id="stat-remaining">—</span>
+      <span class="sub" id="stat-remaining-sub">Awaiting state</span>
+    </div>
+    <div class="stat-card orange">
+      <span class="label">Unbilled</span>
+      <span class="value" id="stat-unbilled">—</span>
+      <span class="sub" id="stat-unbilled-sub">Lower bound · not in Spend</span>
+    </div>
+  </div>
+
+  <!-- Sessions. The headline section: a session that is still running with no
+       owning agent is the failure this page exists to make visible. -->
+  <div class="sessions-section">
+    <div class="section-header">
+      <h2>🧵 Sessions</h2>
+      <span class="count" id="session-count">0</span>
+      <span class="session-filter-bar">
+        <button class="session-filter-btn active" data-sfilter="all">All</button>
+        <button class="session-filter-btn" data-sfilter="orphan">No owning agent</button>
+        <button class="session-filter-btn" data-sfilter="running">Running</button>
+        <button class="session-filter-btn" data-sfilter="abandoned">Abandoned</button>
+      </span>
+    </div>
+    <p class="section-note" id="session-note">
+      <strong>State is nexus's own bookkeeping, not a server session list.</strong>
+      A row with <strong>no owning agent</strong> is a session that is still generating
+      after the agent that owned it was terminated — it keeps spending, and nothing
+      is collecting that spend. <strong>Abandoned</strong> means the plugin stopped
+      watching; its <strong>unbilled</strong> figure is a <strong>lower bound</strong>
+      on what went unbilled, not a total, and is deliberately not added to Spend.
+      Token counts are the last figure actually read, not a live reading.
+    </p>
+    <div id="orphan-banner"></div>
+    <div class="sessions-card">
+      <div class="sessions-scroll">
+        <div id="sessions-container">
+          <div class="empty-message">No sessions reported</div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -1051,6 +1411,11 @@
     <h2>🤖 Agents</h2>
     <span class="count" id="agent-count">0</span>
   </div>
+  <p class="section-note">
+    <strong>Live agents only.</strong> The orchestrator deletes an agent when it
+    terminates, so a completed or terminated agent's spend leaves this list and
+    survives only in <strong>Cost Breakdown</strong>, which reads the full history.
+  </p>
   <div id="agents-container">
     <div class="no-agents">
       <div class="icon">🤖</div>
@@ -1058,16 +1423,17 @@
     </div>
   </div>
 
-  <!-- DAG Visualization -->
+  <!-- Task Dependency Graph -->
   <div class="dag-section">
     <div class="section-header">
-      <h2>📊 Task Pipeline</h2>
+      <h2>📊 Task Dependencies</h2>
       <span class="count" id="dag-count">0</span>
     </div>
+    <p class="section-note" id="dag-note"></p>
     <div id="dag-container">
       <div class="dag-empty">
         <div class="icon">📊</div>
-        <div>No tasks in the pipeline yet.</div>
+        <div>No tasks in the graph yet.</div>
       </div>
     </div>
   </div>
@@ -1078,36 +1444,47 @@
     <div class="budget-card">
       <h3>💰 Budget</h3>
       <div class="gauge-container">
-        <div class="gauge-ring">
+        <div class="gauge-ring" id="gauge-ring">
           <svg width="120" height="120" viewBox="0 0 120 120">
             <circle class="track" cx="60" cy="60" r="52"></circle>
             <circle class="fill" id="gauge-fill" cx="60" cy="60" r="52"
               stroke-dasharray="326.73" stroke-dashoffset="0"></circle>
           </svg>
           <div class="gauge-center">
-            <span class="gauge-pct" id="gauge-pct">100%</span>
+            <span class="gauge-pct" id="gauge-pct">—</span>
             <span class="gauge-pct-label">Left</span>
           </div>
         </div>
         <div class="budget-details">
           <div class="budget-row">
-            <span class="budget-label">Total Budget</span>
-            <span class="budget-val" id="budget-total">$10.00</span>
+            <span class="budget-label">Ceiling</span>
+            <span class="budget-val" id="budget-total">—</span>
           </div>
           <div class="budget-row">
             <span class="budget-label">Spent</span>
-            <span class="budget-val" id="budget-spent">$0.00</span>
+            <span class="budget-val" id="budget-spent">—</span>
           </div>
           <div class="budget-row">
             <span class="budget-label">Remaining</span>
-            <span class="budget-val" id="budget-remaining">$10.00</span>
+            <span class="budget-val" id="budget-remaining">—</span>
+          </div>
+          <div class="budget-row">
+            <span class="budget-label">Alert below</span>
+            <span class="budget-val" id="budget-alert">—</span>
           </div>
           <div class="budget-row">
             <span class="budget-label">Status</span>
-            <span class="budget-val" id="budget-status" style="color: var(--green)">Healthy</span>
+            <span class="budget-val" id="budget-status" style="color: var(--text-muted)">Unknown</span>
           </div>
         </div>
       </div>
+      <p class="config-explainer">
+        <strong>Alert below</strong> is <code>config.budget.alertThreshold</code>:
+        the fraction of the ceiling <em>still unspent</em> at or below which the
+        orchestrator raises a budget alert. It is not a percentage of the budget
+        consumed. <strong>Status</strong> is derived from remaining-vs-alert-threshold
+        only, so it never claims a "critical" level the config has no threshold for.
+      </p>
     </div>
 
     <!-- Tasks -->
@@ -1119,20 +1496,82 @@
     </div>
   </div>
 
-  <!-- Cost Chart -->
+  <!-- Cost Breakdown: reads /api/costs, which covers the FULL history rather
+       than only the live agents in state. -->
   <div class="cost-section">
     <div class="cost-card">
       <h3>💸 Cost Breakdown</h3>
+      <div class="cost-status hidden" id="cost-status"></div>
       <div class="cost-grid">
-        <div class="cost-chart" id="cost-by-role">
-          <div class="cost-chart-title">By Role</div>
-          <div class="empty-message" style="padding:8px">No cost data yet</div>
+        <div class="cost-chart" id="cost-by-agent">
+          <div class="cost-chart-title">By Agent</div>
+          <div class="empty-message" style="padding:8px">No cost report yet</div>
         </div>
         <div class="cost-chart" id="cost-by-model">
           <div class="cost-chart-title">By Model</div>
-          <div class="empty-message" style="padding:8px">No cost data yet</div>
+          <div class="empty-message" style="padding:8px">No cost report yet</div>
         </div>
       </div>
+      <div class="cost-chart" id="cost-accounting" style="margin-top:16px">
+        <div class="cost-chart-title">Accounting</div>
+        <div class="empty-message" style="padding:8px">No cost report yet</div>
+      </div>
+      <p class="cost-basis" id="cost-basis"></p>
+    </div>
+  </div>
+
+  <!-- Config Panel. Read-only, matching the server: it has no config write
+       path, and a localhost socket with CORS:* is not the place to add one. -->
+  <div class="config-section">
+    <div class="config-card">
+      <h3>⚙️ Configuration <span class="readonly-badge">Read-only</span></h3>
+      <div class="config-grid">
+        <div class="config-group">
+          <div class="config-group-title">🤖 Models per Role</div>
+          <div id="config-models">
+            <div class="config-row"><span class="config-key">—</span><span class="config-val unreported">No state received</span></div>
+          </div>
+        </div>
+        <div class="config-group">
+          <div class="config-group-title">💰 Budget</div>
+          <div id="config-budget">
+            <div class="config-row"><span class="config-key">—</span><span class="config-val unreported">No state received</span></div>
+          </div>
+        </div>
+        <div class="config-group">
+          <div class="config-group-title">🔧 Self-Healing</div>
+          <div id="config-healing">
+            <div class="config-row"><span class="config-key">—</span><span class="config-val unreported">No state received</span></div>
+          </div>
+        </div>
+      </div>
+      <p class="config-explainer">
+        Read from <code>state.config</code> under the real key names.
+        <strong>Budget</strong> is the constraint in force right now, which
+        <code>execute()</code> may have replaced for the duration of a run.
+        <strong>Self-healing</strong> is <code>config.selfHealing</code>. There is no
+        critical threshold, no auto-terminate and no escalation or deadlock-detection
+        setting — none of those exist, so none are shown. Escalation to a
+        notification is a code default after retries and model fallback are
+        exhausted, not a configuration value.
+      </p>
+    </div>
+  </div>
+
+  <!-- Resolved Config viewer. Replaces the editor: there is no write path to
+       apply to, so there is nothing for an Apply button to do. -->
+  <div class="config-editor-section">
+    <div class="config-editor-card">
+      <div class="config-editor-header">
+        <h3>📝 Resolved Config <span class="readonly-badge">Read-only</span></h3>
+        <div class="config-editor-actions">
+          <button class="config-btn" id="config-format-btn">Format</button>
+          <button class="config-btn" id="config-validate-btn">Check</button>
+        </div>
+      </div>
+      <textarea class="config-textarea" id="config-editor" readonly wrap="off" spellcheck="false"
+        placeholder="No configuration received from the server yet."></textarea>
+      <div class="config-status" id="config-editor-status">Read-only: this server accepts no configuration writes.</div>
     </div>
   </div>
 
@@ -1159,61 +1598,7 @@
     </div>
   </div>
 
-  <!-- Config Panel -->
-  <div class="config-section">
-    <div class="config-card">
-      <h3>⚙️ Configuration</h3>
-      <div class="config-grid">
-        <div class="config-group">
-          <div class="config-group-title">🤖 Models per Role</div>
-          <div id="config-models">
-            <div class="config-row"><span class="config-key">architect</span><span class="config-val model">—</span></div>
-            <div class="config-row"><span class="config-key">coder</span><span class="config-val model">—</span></div>
-            <div class="config-row"><span class="config-key">reviewer</span><span class="config-val model">—</span></div>
-            <div class="config-row"><span class="config-key">tester</span><span class="config-val model">—</span></div>
-            <div class="config-row"><span class="config-key">explorer</span><span class="config-val model">—</span></div>
-            <div class="config-row"><span class="config-key">documenter</span><span class="config-val model">—</span></div>
-          </div>
-        </div>
-        <div class="config-group">
-          <div class="config-group-title">💰 Budget Settings</div>
-          <div id="config-budget">
-            <div class="config-row"><span class="config-key">max budget</span><span class="config-val">$10.00</span></div>
-            <div class="config-row"><span class="config-key">alert threshold</span><span class="config-val warning">30%</span></div>
-            <div class="config-row"><span class="config-key">critical threshold</span><span class="config-val warning">10%</span></div>
-            <div class="config-row"><span class="config-key">auto-terminate</span><span class="config-val enabled">enabled</span></div>
-          </div>
-        </div>
-        <div class="config-group">
-          <div class="config-group-title">🔧 Self-Healing</div>
-          <div id="config-healing">
-            <div class="config-row"><span class="config-key">retry on failure</span><span class="config-val enabled">enabled</span></div>
-            <div class="config-row"><span class="config-key">max retries</span><span class="config-val">3</span></div>
-            <div class="config-row"><span class="config-key">escalation</span><span class="config-val enabled">enabled</span></div>
-            <div class="config-row"><span class="config-key">deadlock detect</span><span class="config-val enabled">enabled</span></div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Config Editor -->
-  <div class="config-editor-section">
-    <div class="config-editor-card">
-      <div class="config-editor-header">
-        <h3>📝 Config Editor</h3>
-        <div class="config-editor-actions">
-          <button class="config-btn" id="config-format-btn">Format</button>
-          <button class="config-btn" id="config-validate-btn">Validate</button>
-          <button class="config-btn primary" id="config-apply-btn">Apply Config</button>
-        </div>
-      </div>
-      <textarea class="config-textarea" id="config-editor" spellcheck="false" placeholder="Loading configuration..."></textarea>
-      <div class="config-status" id="config-editor-status"></div>
-    </div>
-  </div>
-
-  <!-- Enhanced Log Stream -->
+  <!-- Event Stream -->
   <div class="log-stream-section">
     <div class="log-stream-card">
       <h3>
@@ -1245,19 +1630,30 @@
 (function() {
   'use strict';
 
-  // ── State ──
+  // ── Constants ──
   var MAX_LOG_ENTRIES = 200;
-  var MAX_BUDGET = 10.00;
-  var CIRCUMFERENCE = 2 * Math.PI * 52; // ~326.73
+  var CIRCUMFERENCE = 2 * Math.PI * 52; // ~326.73, the r=52 ring
   var AUTO_REFRESH_INTERVAL = 5000;
+  var STALE_AFTER_MS = 15000; // a snapshot older than this is labelled stale
+  // The server truncates `result.output` at this length. Labelled in the UI so a
+  // clipped output is not read as the whole output.
+  var SERVER_OUTPUT_TRUNCATION = 500;
 
   var ws = null;
   var reconnectDelay = 1000;
   var reconnectTimer = null;
-  var startTime = Date.now();
   var logEntries = [];
   var autoRefreshTimer = null;
   var lastState = null;
+  /** ISO timestamp of the last snapshot we actually received. */
+  var lastStateReceivedAt = null;
+  /** ISO `state.lastUpdated`, as the server stamped it. */
+  var lastStateUpdated = null;
+  /** Parsed /api/costs, or null when it has never loaded. */
+  var costReport = null;
+  /** 'loading' | 'ready' | 'failed' — what to say about /api/costs. */
+  var costReportStatus = 'loading';
+  var costReportError = '';
 
   // Log Stream
   var logStreamEntries = [];
@@ -1266,6 +1662,9 @@
 
   // Activity Log filter
   var activityFilter = 'all';
+
+  // Sessions filter
+  var sessionFilter = 'all';
 
   // Role emojis
   var ROLE_EMOJI = {
@@ -1278,6 +1677,7 @@
     architect: '#bc8cff', coder: '#58a6ff', reviewer: '#39d2c0',
     tester: '#3fb950', explorer: '#d29922', documenter: '#8b949e'
   };
+  var BAR_COLOR_PALETTE = ['#58a6ff', '#bc8cff', '#39d2c0', '#3fb950', '#d29922', '#f0883e', '#f85149'];
 
   // ── DOM Refs ──
   var $connBadge = document.getElementById('conn-badge');
@@ -1285,27 +1685,39 @@
   var $uptime = document.getElementById('uptime');
   var $autoRefreshCheck = document.getElementById('auto-refresh-check');
   var $lastRefresh = document.getElementById('last-refresh');
+  var $orchStatus = document.getElementById('orch-status');
 
   // Stats
   var $statAgents = document.getElementById('stat-agents');
   var $statAgentsSub = document.getElementById('stat-agents-sub');
   var $statTasks = document.getElementById('stat-tasks');
   var $statTasksSub = document.getElementById('stat-tasks-sub');
+  var $statSessions = document.getElementById('stat-sessions');
+  var $statSessionsSub = document.getElementById('stat-sessions-sub');
   var $statSpent = document.getElementById('stat-spent');
   var $statSpentSub = document.getElementById('stat-spent-sub');
   var $statRemaining = document.getElementById('stat-remaining');
   var $statRemainingSub = document.getElementById('stat-remaining-sub');
+  var $statUnbilled = document.getElementById('stat-unbilled');
+  var $statUnbilledSub = document.getElementById('stat-unbilled-sub');
+
+  // Sessions
+  var $sessionsContainer = document.getElementById('sessions-container');
+  var $sessionCount = document.getElementById('session-count');
+  var $orphanBanner = document.getElementById('orphan-banner');
 
   // Agents
   var $agentsContainer = document.getElementById('agents-container');
   var $agentCount = document.getElementById('agent-count');
 
   // Budget
+  var $gaugeRing = document.getElementById('gauge-ring');
   var $gaugeFill = document.getElementById('gauge-fill');
   var $gaugePct = document.getElementById('gauge-pct');
   var $budgetTotal = document.getElementById('budget-total');
   var $budgetSpent = document.getElementById('budget-spent');
   var $budgetRemaining = document.getElementById('budget-remaining');
+  var $budgetAlert = document.getElementById('budget-alert');
   var $budgetStatus = document.getElementById('budget-status');
 
   // Tasks
@@ -1314,38 +1726,78 @@
   // Log
   var $logContainer = document.getElementById('log-container');
 
-  // DAG
+  // Task dependency graph
   var $dagContainer = document.getElementById('dag-container');
   var $dagCount = document.getElementById('dag-count');
+  var $dagNote = document.getElementById('dag-note');
 
   // Config
   var $configModels = document.getElementById('config-models');
   var $configBudget = document.getElementById('config-budget');
   var $configHealing = document.getElementById('config-healing');
 
-  // Config Editor
+  // Resolved config viewer
   var $configEditor = document.getElementById('config-editor');
   var $configEditorStatus = document.getElementById('config-editor-status');
   var $configFormatBtn = document.getElementById('config-format-btn');
   var $configValidateBtn = document.getElementById('config-validate-btn');
-  var $configApplyBtn = document.getElementById('config-apply-btn');
 
   // Log Stream
   var $logStreamContainer = document.getElementById('log-stream-container');
   var $logStreamCount = document.getElementById('log-stream-count');
 
-  // Cost Charts
-  var $costByRole = document.getElementById('cost-by-role');
+  // Cost
+  var $costByAgent = document.getElementById('cost-by-agent');
   var $costByModel = document.getElementById('cost-by-model');
+  var $costAccounting = document.getElementById('cost-accounting');
+  var $costStatus = document.getElementById('cost-status');
+  var $costBasis = document.getElementById('cost-basis');
 
-  // ── Utilities ──
-  function fmt$(v) { return '$' + (v || 0).toFixed(2); }
+  // ── Value formatting ──
+  //
+  // One rule drives all of these: a value the server did not report renders as
+  // an em dash, never as a plausible number. `num()` returning null for a
+  // non-finite input is what makes that possible, so a caller cannot
+  // accidentally format `undefined` as `$0.00`.
+
+  /** A finite number, or null. The gate every formatter goes through. */
+  function num(v) {
+    return (typeof v === 'number' && isFinite(v)) ? v : null;
+  }
+
+  function fmt$(v) {
+    var n = num(v);
+    return n === null ? '—' : '$' + n.toFixed(2);
+  }
+
+  function fmtInt(v) {
+    var n = num(v);
+    return n === null ? '—' : Math.round(n).toLocaleString('en-US');
+  }
+
+  function fmtMs(v) {
+    var n = num(v);
+    if (n === null) return '—';
+    if (n < 1000) return Math.round(n) + 'ms';
+    return (n / 1000).toFixed(2) + 's';
+  }
+
+  /** A 0..1 fraction as a percentage, or '—'. */
+  function fmtPct(fraction) {
+    var n = num(fraction);
+    return n === null ? '—' : (n * 100).toFixed(1) + '%';
+  }
 
   function fmtTime(iso) {
-    try {
-      var d = new Date(iso);
-      return d.toLocaleTimeString('en-US', { hour12: false });
-    } catch (e) { return '--:--:--'; }
+    var d = iso ? new Date(iso) : null;
+    if (!d || isNaN(d.getTime())) return '—';
+    return d.toLocaleTimeString('en-US', { hour12: false });
+  }
+
+  function fmtDateTime(iso) {
+    var d = iso ? new Date(iso) : null;
+    if (!d || isNaN(d.getTime())) return '—';
+    return d.toLocaleString('en-US', { hour12: false });
   }
 
   function fmtElapsed(ms) {
@@ -1362,32 +1814,177 @@
     return new Date().toLocaleTimeString('en-US', { hour12: false });
   }
 
-  // ── Uptime ticker ──
-  setInterval(function() {
-    $uptime.textContent = 'Uptime ' + fmtElapsed(Date.now() - startTime);
-  }, 1000);
+  /** 'enabled' / 'disabled' / 'not reported' for a boolean the server may omit. */
+  function boolText(v) {
+    if (typeof v !== 'boolean') return { text: 'not reported', cls: 'unreported' };
+    return { text: v ? 'enabled' : 'disabled', cls: v ? 'enabled' : 'disabled' };
+  }
+
+  /** A string, or the unreported marker. Never substitutes a placeholder. */
+  function text(v) {
+    return (typeof v === 'string' && v.length > 0) ? v : null;
+  }
+
+  function escHtml(s) {
+    var d = document.createElement('div');
+    d.textContent = s === null || s === undefined ? '' : String(s);
+    return d.innerHTML;
+  }
+
+  // ── Header: lifecycle, uptime, snapshot age ──
+
+  /**
+   * `running` and `paused` are separate server fields. `paused` wins when both
+   * are true, because a paused orchestrator is mid-run and not executing — that
+   * is the state the old page could not show at all.
+   */
+  function renderLifecycle(state) {
+    var running = state.running;
+    var paused = state.paused;
+    if (typeof running !== 'boolean' && typeof paused !== 'boolean') {
+      $orchStatus.className = 'orch-pill unknown';
+      $orchStatus.textContent = 'No state';
+      $orchStatus.title = 'The server has not reported running/paused yet.';
+      return;
+    }
+    if (paused === true) {
+      $orchStatus.className = 'orch-pill paused';
+      $orchStatus.textContent = 'Paused';
+    } else if (running === true) {
+      $orchStatus.className = 'orch-pill running';
+      $orchStatus.textContent = 'Running';
+    } else {
+      $orchStatus.className = 'orch-pill idle';
+      $orchStatus.textContent = 'Idle';
+    }
+    $orchStatus.title = 'state.running=' + String(running) + ' · state.paused=' + String(paused);
+  }
+
+  /** Narrow an arbitrary parsed JSON value to an object, or null. */
+  function asObject(v) {
+    if (v === null || typeof v !== 'object' || Array.isArray(v)) return null;
+    return v;
+  }
+
+  /** Narrow an arbitrary parsed JSON value to an array, or []. */
+  function asArray(v) {
+    return Array.isArray(v) ? v : [];
+  }
+
+  /**
+   * Age of the last snapshot, labelled. A page holding a stale snapshot is
+   * presenting numbers that are no longer true, so the staleness is stated
+   * rather than the timestamp simply left sitting there.
+   */
+  function renderSnapshotAge() {
+    if (lastStateReceivedAt === null) {
+      $lastRefresh.textContent = 'No state received';
+      $lastRefresh.className = 'last-refresh lost';
+      return;
+    }
+    var age = Date.now() - lastStateReceivedAt;
+    var text = 'State ' + fmtTime(lastStateUpdated || new Date(lastStateReceivedAt).toISOString())
+      + ' (' + fmtElapsed(age) + ' ago)';
+    $lastRefresh.textContent = text;
+    $lastRefresh.className = 'last-refresh' + (age > STALE_AFTER_MS ? ' stale' : '');
+    $lastRefresh.title = 'Snapshot received at ' + fmtTime(new Date(lastStateReceivedAt).toISOString())
+      + '. ' + (ws && ws.readyState === WebSocket.OPEN
+          ? 'Auto-refresh asks the server every ' + (AUTO_REFRESH_INTERVAL / 1000) + 's.'
+          : 'Not connected: this may be the last state the server sent.');
+  }
 
   // ── Auto-refresh ──
+  //
+  // The server answers `{type:'getState'}` and pushes a throttled snapshot on
+  // every change, so the push is what keeps the page fresh and this poll is the
+  // belt-and-braces refresh. Events are NOT deduped client-side: the server
+  // delivers each one exactly once.
+
   function startAutoRefresh() {
-    stopAutoRefresh();
+    stopAutoRefresh(true);
     autoRefreshTimer = setInterval(function() {
       if (ws && ws.readyState === WebSocket.OPEN) {
-        // Request fresh state
-        try { ws.send(JSON.stringify({ type: 'getState' })); } catch (e) {}
-        $lastRefresh.textContent = 'Updated ' + now();
+        try {
+          ws.send(JSON.stringify({ type: 'getState' }));
+        } catch (e) {
+          addLog('error', '⚠️', 'Could not request state: ' + errorText(e));
+        }
       }
+      refreshSideChannels();
     }, AUTO_REFRESH_INTERVAL);
   }
 
-  function stopAutoRefresh() {
+  function stopAutoRefresh(silent) {
     if (autoRefreshTimer) { clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
-    $lastRefresh.textContent = '';
+    if (!silent) renderSnapshotAge();
   }
 
   $autoRefreshCheck.addEventListener('change', function() {
-    if (this.checked) startAutoRefresh();
-    else stopAutoRefresh();
+    if (this.checked) {
+      startAutoRefresh();
+      refreshSideChannels();
+    } else {
+      stopAutoRefresh();
+    }
   });
+
+  /**
+   * `/api/health` and `/api/costs` are the two things the WebSocket does not
+   * carry. Polled on the auto-refresh tick and once on connect.
+   */
+  function refreshSideChannels() {
+    refreshHealth();
+    refreshCostReport();
+  }
+
+  function refreshHealth() {
+    fetch('/api/health')
+      .then(function(res) {
+        if (res.status !== 200) throw new Error('HTTP ' + res.status);
+        return res.json();
+      })
+      .then(function(body) {
+        var data = asObject(body);
+        if (data === null) throw new Error('not an object');
+        var secs = num(data.uptime);
+        if (secs === null) {
+          $uptime.textContent = 'Server uptime —';
+          $uptime.title = '/api/health did not report uptime.';
+          return;
+        }
+        $uptime.textContent = 'Server uptime ' + fmtElapsed(secs * 1000);
+        $uptime.title = 'The dashboard server process, from /api/health.';
+      })
+      .catch(function(err) {
+        $uptime.textContent = 'Server uptime unavailable';
+        $uptime.title = '/api/health failed: ' + errorText(err);
+      });
+  }
+
+  function refreshCostReport() {
+    fetch('/api/costs')
+      .then(function(res) {
+        if (res.status !== 200) throw new Error('HTTP ' + res.status);
+        return res.json();
+      })
+      .then(function(body) {
+        var data = asObject(body);
+        if (data === null) throw new Error('response was not an object');
+        costReport = data;
+        costReportStatus = 'ready';
+        costReportError = '';
+        renderCost();
+        // The cost report is a separate channel from the socket, so the unbilled
+        // card would otherwise wait for the next state push to notice it landed.
+        if (lastState) renderUnbilledStat();
+      })
+      .catch(function(err) {
+        costReportStatus = 'failed';
+        costReportError = errorText(err);
+        renderCost();
+        if (lastState) renderUnbilledStat();
+      });
+  }
 
   // ── Activity Log ──
   function addLog(type, icon, msg) {
@@ -1404,12 +2001,10 @@
       if (old.parentNode) old.parentNode.removeChild(old);
     }
 
-    // Apply filter
     if (activityFilter !== 'all' && type !== activityFilter) {
       entry.classList.add('hidden');
     }
 
-    // Insert at top
     if ($logContainer.firstChild) {
       $logContainer.insertBefore(entry, $logContainer.firstChild);
     } else {
@@ -1440,12 +2035,6 @@
     }
   }
 
-  function escHtml(s) {
-    var d = document.createElement('div');
-    d.textContent = s;
-    return d.innerHTML;
-  }
-
   // ── Log Stream ──
   function addLogStream(severity, label, msg) {
     var entry = document.createElement('div');
@@ -1473,7 +2062,6 @@
     $logStreamCount.textContent = logStreamEntries.length + ' events';
   }
 
-  // ── Log Filter ──
   function setupLogFilters() {
     var btns = document.querySelectorAll('.log-filter-btn');
     for (var i = 0; i < btns.length; i++) {
@@ -1497,6 +2085,12 @@
     }
   }
 
+  function errorText(err) {
+    if (err instanceof Error) return err.message;
+    if (typeof err === 'string') return err;
+    return String(err);
+  }
+
   // ── Connection ──
   function setConnState(state) {
     $connBadge.className = 'connection-badge ' + state;
@@ -1509,14 +2103,20 @@
     }
   }
 
+  function socketUrl() {
+    // `location.port` is the dashboard's own HTTP port, which is also the
+    // WebSocket port — same server, same origin.
+    return 'ws://' + location.hostname + ':' + location.port + '/ws/events';
+  }
+
   function connect() {
-    var url = 'ws://' + location.hostname + ':' + location.port + '/ws/events';
+    var url = socketUrl();
 
     try {
       ws = new WebSocket(url);
     } catch (e) {
-      addLog('error', '❌', 'WebSocket creation failed: ' + e.message);
-      addLogStream('error', 'WS', 'WebSocket creation failed: ' + e.message);
+      addLog('error', '❌', 'WebSocket creation failed: ' + errorText(e));
+      addLogStream('error', 'WS', 'WebSocket creation failed: ' + errorText(e));
       scheduleReconnect();
       return;
     }
@@ -1530,16 +2130,17 @@
       reconnectDelay = 1000;
       addLog('system', '🔌', 'Connected to Nexus server');
       addLogStream('success', 'CONN', 'Connected to Nexus server');
-      if ($autoRefreshCheck.checked) startAutoRefresh();
+      if ($autoRefreshCheck.checked) {
+        startAutoRefresh();
+        refreshSideChannels();
+      }
     };
 
     ws.onmessage = function(evt) {
       try {
-        var msg = JSON.parse(evt.data);
-        handleMessage(msg);
+        handleMessage(JSON.parse(evt.data));
       } catch (e) {
-        // Not JSON, log as-is
-        addLog('info', '📩', typeof evt.data === 'string' ? evt.data : '[binary]');
+        addLog('info', '📩', 'Non-JSON frame from server: ' + errorText(e));
       }
     };
 
@@ -1548,6 +2149,7 @@
       addLog('error', '🔌', 'Disconnected (code: ' + evt.code + ')');
       addLogStream('error', 'CONN', 'Disconnected (code: ' + evt.code + ')');
       stopAutoRefresh();
+      renderSnapshotAge();
       scheduleReconnect();
     };
 
@@ -1569,53 +2171,78 @@
   }
 
   // ── Message Handler ──
+  //
+  // Every case below names an event the orchestrator actually emits and the
+  // broadcaster actually forwards. The names handled here are exactly
+  // BROADCAST_EVENTS plus `orchestrator:state` and `pong`; the eight dead
+  // names the previous version carried (`state`, `task:started`,
+  // `task-assigned`, `task:completed`, `task-failed`, `task-completed`,
+  // `review-completed`, `status-update`) were removed rather than left as
+  // branches that could never run.
+
   function handleMessage(msg) {
     var type = msg.type || msg.event || '';
+    var data = asObject(msg.data) || {};
 
     switch (type) {
-      case 'state':
       case 'orchestrator:state':
-        lastState = msg.data || msg.state || msg;
+        // The server sends `{type, data, timestamp}`. If `data` is somehow not
+        // an object, fall back rather than storing a primitive and reading
+        // `.config` off it.
+        lastState = asObject(msg.data) || asObject(msg.state) || asObject(msg) || {};
+        lastStateReceivedAt = Date.now();
+        lastStateUpdated = typeof lastState.lastUpdated === 'string' ? lastState.lastUpdated : null;
         renderState(lastState);
-        addLogStream('info', 'STATE', 'State update received');
+        renderSnapshotAge();
+        break;
+
+      case 'pong':
+        // Request/reply liveness. Not a state change, so it is not logged.
         break;
 
       case 'agent:spawned':
-        addLog('spawn', '🤖', 'Agent spawned: ' + agentLabel(msg.data || msg));
-        addLogStream('success', 'SPAWN', 'Agent spawned: ' + agentLabel(msg.data || msg));
+        addLog('spawn', '🤖', 'Agent spawned: ' + agentLabel(data));
+        addLogStream('success', 'SPAWN', 'Agent spawned: ' + agentLabel(data));
         break;
 
       case 'agent:terminated':
-        addLog('info', '🛑', 'Agent terminated: ' + agentLabel(msg.data || msg));
-        addLogStream('warning', 'TERM', 'Agent terminated: ' + agentLabel(msg.data || msg));
+        addLog('info', '🛑', 'Agent terminated: ' + agentLabel(data));
+        addLogStream('warning', 'TERM', 'Agent terminated: ' + agentLabel(data));
         break;
 
-      case 'task:started':
-      case 'task-assigned':
-        addLog('task', '▶', 'Task started: ' + taskLabel(msg.data || msg));
-        addLogStream('task', 'TASK', 'Task started: ' + taskLabel(msg.data || msg));
-        break;
-
-      case 'task:completed':
-      case 'task-completed':
-        addLog('task', '✅', 'Task completed: ' + taskLabel(msg.data || msg));
-        addLogStream('success', 'DONE', 'Task completed: ' + taskLabel(msg.data || msg));
+      case 'agent:escalation':
+        addLog('error', '📣', 'Escalation: ' + escalationText(data));
+        addLogStream('error', 'ESCALATE', escalationText(data));
         break;
 
       case 'task:failed':
-      case 'task-failed':
-        addLog('error', '❌', 'Task failed: ' + taskLabel(msg.data || msg));
-        addLogStream('error', 'FAIL', 'Task failed: ' + taskLabel(msg.data || msg));
+        addLog('error', '❌', 'Task failed: ' + taskLabel(data) + ' — ' + errorOf(data));
+        addLogStream('error', 'FAIL', 'Task failed: ' + taskLabel(data) + ' — ' + errorOf(data));
+        break;
+
+      case 'cost:delta':
+        addLog('budget', '💲', costDeltaText(data));
+        addLogStream(costDeltaSeverity(data), 'COST', costDeltaText(data));
+        break;
+
+      case 'security:issues-found':
+        addLog('error', '🛡️', 'Security: ' + securityText(data));
+        addLogStream('error', 'SECURITY', securityText(data));
+        break;
+
+      case 'memory:set':
+        addLog('info', '🧠', 'Memory set: ' + memoryText(data));
+        addLogStream('info', 'MEMORY', memoryText(data));
         break;
 
       case 'budget:alert':
-        addLog('budget', '⚠️', 'Budget alert: ' + fmt$(msg.data?.remaining || 0) + ' remaining');
-        addLogStream('warning', 'BUDGET', 'Budget alert: ' + fmt$(msg.data?.remaining || 0) + ' remaining');
+        addLog('budget', '⚠️', 'Budget alert: ' + fmt$(data.remaining) + ' remaining (' + fmtPct(data.remainingPercent) + ')');
+        addLogStream('warning', 'BUDGET', 'Budget alert: ' + fmt$(data.remaining) + ' remaining (' + fmtPct(data.remainingPercent) + ')');
         break;
 
       case 'budget:exceeded':
-        addLog('error', '🚨', 'Budget exceeded! Spent: ' + fmt$(msg.data?.totalSpent || 0));
-        addLogStream('error', 'BUDGET', 'Budget exceeded! Spent: ' + fmt$(msg.data?.totalSpent || 0));
+        addLog('error', '🚨', 'Budget exceeded. Spent: ' + fmt$(data.totalSpent));
+        addLogStream('error', 'BUDGET', 'Budget exceeded. Spent: ' + fmt$(data.totalSpent));
         break;
 
       case 'orchestrator:paused':
@@ -1628,466 +2255,1230 @@
         addLogStream('system', 'SYS', 'Orchestrator resumed');
         break;
 
-      case 'review-completed':
-        addLog('task', '🔍', 'Review completed: ' + (msg.data?.taskName || msg.data?.id || ''));
-        addLogStream('success', 'REVIEW', 'Review completed: ' + (msg.data?.taskName || msg.data?.id || ''));
+      case 'orchestrator:shutdown':
+        addLog('system', '🛑', 'Orchestrator shutting down');
+        addLogStream('system', 'SYS', 'Orchestrator shutting down');
         break;
 
-      case 'config:updated':
-        addLog('system', '⚙️', 'Configuration updated');
-        addLogStream('system', 'CONFIG', 'Configuration updated');
-        if (lastState) renderConfig(lastState);
-        break;
-
-      case 'status-update':
-        addLog('info', '📊', 'Status update: ' + JSON.stringify(msg.data || {}).slice(0, 120));
-        addLogStream('info', 'STATUS', 'Status update received');
+      case 'config:reloaded':
+        addLog('system', '⚙️', 'Config reloaded: ' + configReloadText(data));
+        addLogStream('system', 'CONFIG', 'Config reloaded: ' + configReloadText(data));
         break;
 
       default:
-        // Generic log
+        // No known handler. Logged verbatim rather than dropped, so a new server
+        // event is visible instead of silently invisible.
         if (type) {
-          addLog('info', '📩', type + ': ' + JSON.stringify(msg.data || msg).slice(0, 150));
-          addLogStream('info', type.toUpperCase().slice(0, 8), JSON.stringify(msg.data || msg).slice(0, 150));
+          var blob = JSON.stringify(msg.data === undefined ? msg : msg.data);
+          if (blob.length > 150) blob = blob.slice(0, 150) + '…';
+          addLog('info', '📩', type + ': ' + blob);
+          addLogStream('info', type.toUpperCase().slice(0, 8), blob);
         }
     }
   }
 
+  // ── Event payload formatting ──
+  // Each returns a string containing a dash rather than a number when the field
+  // the server did not send is missing.
+
   function agentLabel(d) {
-    if (!d) return '';
-    if (d.name) return d.name;
-    if (d.role) return d.role;
-    return d.id || 'unknown';
+    if (d.name) return String(d.name);
+    if (d.role) return String(d.role);
+    return String(d.id || 'unknown agent');
   }
 
   function taskLabel(d) {
-    if (!d) return '';
-    if (d.name) return d.name;
-    return d.id || 'unknown';
+    if (d.taskName) return String(d.taskName);
+    if (d.name) return String(d.name);
+    if (d.taskId) return String(d.taskId);
+    if (d.id) return String(d.id);
+    return 'unknown task';
+  }
+
+  function errorOf(d) {
+    var e = text(d.error);
+    return e === null ? 'no error message reported' : e;
+  }
+
+  function escalationText(d) {
+    return taskLabel(d) + ' on agent ' + (text(d.agentId) || 'unreported') + ' — ' + errorOf(d)
+      + ' (retries and model fallback are exhausted; notifying)';
+  }
+
+  /** `SecurityIssue` is `{id, severity, category, message, file?, line?}`. */
+  function securityText(d) {
+    var total = num(d.totalIssues);
+    var head = taskLabel(d) + ': ' + (total === null ? 'issue count unreported' : total + ' issue' + (total === 1 ? '' : 's'));
+    var issues = asArray(d.issues);
+    if (issues.length === 0) return head;
+    return head + ' — ' + issues.slice(0, 3).map(function(i) {
+      var obj = asObject(i);
+      if (obj === null) return String(i);
+      var where = text(obj.file);
+      if (where !== null) {
+        where += num(obj.line) === null ? '' : ':' + fmtInt(obj.line);
+      }
+      return (text(obj.message) || text(obj.id) || 'issue')
+        + ' [' + (text(obj.severity) || 'no severity')
+        + (text(obj.category) === null ? '' : '/' + text(obj.category))
+        + (where === null ? '' : ' at ' + where) + ']';
+    }).join('; ') + (issues.length > 3 ? ' …' : '');
+  }
+
+  function memoryText(d) {
+    var key = text(d.key);
+    return (key === null ? 'key unreported' : key)
+      + ' (scope ' + (text(d.scope) || 'unreported') + ', author ' + (text(d.author) || 'unreported') + ')';
+  }
+
+  /**
+   * `config:reloaded` carries `NexusConfigLoadInfo`, so the useful part is which
+   * files were consulted, whether a session override is layered on top of them,
+   * and how many times this has loaded.
+   */
+  function configReloadText(d) {
+    var parts = [];
+    var count = num(d.loadCount);
+    parts.push(count === null ? 'load count unreported' : 'load #' + fmtInt(count));
+    parts.push('loaded ' + fmtDateTime(d.loadedAt));
+    if (typeof d.sessionOverride === 'boolean') {
+      parts.push(d.sessionOverride ? 'session override layered on top of disk' : 'no session override');
+    }
+    var project = asObject(d.project);
+    if (project !== null) parts.push('project ' + configFileText(project));
+    var global = asObject(d.global);
+    if (global !== null) parts.push('global ' + configFileText(global));
+    return parts.join(' · ');
+  }
+
+  function configFileText(info) {
+    var existence = info.existed === true ? 'found'
+      : info.existed === false ? 'absent'
+      : 'existence unreported';
+    var parsed = typeof info.parsed === 'boolean' ? (info.parsed ? ', parsed' : ', unparsed') : '';
+    return (text(info.path) || 'path unreported') + ' (' + existence + parsed + ')';
+  }
+
+  /**
+   * `cost:delta` is the most informative event for sessions: it carries the
+   * session id, the reason it settled, and the amount. The `reason` decides how
+   * alarming the line is — `abandoned` means unbilled spend.
+   */
+  function costDeltaSeverity(d) {
+    if (d.reason === 'abandoned') return 'error';
+    var dc = num(d.deltaCost);
+    if (dc === null || dc === 0) return 'info';
+    return 'success';
+  }
+
+  function costDeltaText(d) {
+    var session = text(d.sessionID);
+    var reason = text(d.reason);
+    var delta = num(d.deltaCost);
+    var head = 'Session ' + (session === null ? 'unreported' : session)
+      + ' (' + taskLabel(d) + ')';
+    if (reason === 'abandoned') {
+      var uncollected = asObject(d.uncollected);
+      var lower = uncollected === null ? null : num(uncollected.observedUncollected);
+      return head + ' ABANDONED — stopped collecting while still running; at least '
+        + fmt$(lower) + ' unbilled (lower bound)';
+    }
+    if (reason === 'shutdown') {
+      return head + ' charged at teardown, settlement unverified: ' + fmt$(delta);
+    }
+    if (reason === 'session-idle') {
+      return head + ' went idle; settled ' + fmt$(delta) + ' (session total '
+        + fmt$(d.sessionTotalCost) + ')';
+    }
+    return head + ' ' + (reason === null ? 'reason unreported' : reason) + ': '
+      + fmt$(delta) + ' (session total ' + fmt$(d.sessionTotalCost) + ')';
   }
 
   // ── Render State ──
   function renderState(state) {
     if (!state) return;
 
-    var agents = state.agents || [];
-    var tasks = state.tasks || [];
-    var totalSpent = state.totalSpent || 0;
-    var budgetRemaining = state.budgetRemaining != null ? state.budgetRemaining : (MAX_BUDGET - totalSpent);
-    var budgetTotal = totalSpent + budgetRemaining;
-    if (budgetTotal <= 0) budgetTotal = MAX_BUDGET;
-    var remainingPct = Math.max(0, Math.min(100, (budgetRemaining / budgetTotal) * 100));
+    var agents = asArray(state.agents);
+    var tasks = asArray(state.tasks);
+    var sessions = asArray(state.sessions);
+    var config = asObject(state.config);
+    var configBudget = config === null ? null : asObject(config.budget);
+    var maxTotalCost = configBudget === null ? null : num(configBudget.maxTotalCost);
+    var totalSpent = num(state.totalSpent);
+    var budgetRemaining = num(state.budgetRemaining);
+
+    renderLifecycle(state);
 
     // ── Overview Stats ──
-    $statAgents.textContent = agents.length;
-    var activeCount = agents.filter(function(a) { return a.status === 'working'; }).length;
-    $statAgentsSub.textContent = activeCount + ' working, ' + (agents.length - activeCount) + ' idle';
+    $statAgents.textContent = String(agents.length);
+    var liveAgents = agents.filter(function(a) { return asObject(a) !== null; });
+    var activeCount = liveAgents.filter(function(a) { return a.status === 'working'; }).length;
+    $statAgentsSub.textContent = activeCount + ' working · ' + (agents.length - activeCount) + ' not working';
 
-    var runningTasks = tasks.filter(function(t) { return t.status === 'running' || t.status === 'queued'; }).length;
-    var completedTasks = tasks.filter(function(t) { return t.status === 'completed'; }).length;
-    var failedTasks = tasks.filter(function(t) { return t.status === 'failed'; }).length;
-    $statTasks.textContent = tasks.length;
-    $statTasksSub.textContent = runningTasks + ' running, ' + completedTasks + ' done';
+    var liveTasks = tasks.filter(function(t) { return asObject(t) !== null; });
+    var runningTasks = liveTasks.filter(function(t) {
+      return t.status === 'running' || t.status === 'queued';
+    }).length;
+    var completedTasks = liveTasks.filter(function(t) { return t.status === 'completed'; }).length;
+    var failedTasks = liveTasks.filter(function(t) { return t.status === 'failed'; }).length;
+    $statTasks.textContent = String(tasks.length);
+    $statTasksSub.textContent = runningTasks + ' running/queued · ' + completedTasks + ' done'
+      + (failedTasks > 0 ? ' · ' + failedTasks + ' failed' : '');
 
     $statSpent.textContent = fmt$(totalSpent);
-    $statSpentSub.textContent = 'of ' + fmt$(budgetTotal) + ' budget' + (failedTasks > 0 ? ' · ' + failedTasks + ' failed' : '');
+    $statSpentSub.textContent = maxTotalCost === null
+      ? 'Budget ceiling not reported'
+      : 'of ' + fmt$(maxTotalCost) + ' ceiling'
+        + (totalSpent === null ? '' : ' · ' + (maxTotalCost > 0 ? ((totalSpent / maxTotalCost) * 100).toFixed(1) + '% consumed' : 'ceiling is 0'));
 
     $statRemaining.textContent = fmt$(budgetRemaining);
-    $statRemainingSub.textContent = remainingPct.toFixed(0) + '% available';
+    $statRemainingSub.textContent = remainingSub(maxTotalCost, totalSpent, budgetRemaining);
 
-    // ── Agent Cards ──
-    $agentCount.textContent = agents.length;
-    if (agents.length === 0) {
-      $agentsContainer.innerHTML = '<div class="no-agents"><div class="icon">🤖</div>'
-        + '<div class="msg">No agents spawned yet. Tasks will spawn agents automatically.</div></div>';
-    } else {
-      var maxAgentCost = 0;
-      for (var i = 0; i < agents.length; i++) {
-        if ((agents[i].totalCost || 0) > maxAgentCost) maxAgentCost = agents[i].totalCost;
-      }
+    renderUnbilledStat();
 
-      var html = '<div class="agents-grid">';
-      for (var i = 0; i < agents.length; i++) {
-        var a = agents[i];
-        var emoji = ROLE_EMOJI[a.role] || '🤖';
-        var costPct = maxAgentCost > 0 ? ((a.totalCost || 0) / maxAgentCost * 100) : 0;
-        var costColor = ROLE_COLORS[a.role] || '#58a6ff';
-
-        html += '<div class="agent-card fade-in">';
-        html += '<div class="agent-header">';
-        html += '<div class="agent-name"><span class="status-dot ' + escHtml(a.status) + '"></span>'
-          + emoji + ' ' + escHtml(a.name || a.role) + '</div>';
-        html += '<span class="agent-role-badge ' + escHtml(a.role) + '">' + escHtml(a.role) + '</span>';
-        html += '</div>';
-        html += '<div class="agent-meta">📦 ' + escHtml(a.model || 'unknown') + '</div>';
-        if (a.sessionId) {
-          html += '<div class="agent-meta" style="font-size:10px;opacity:0.6">🔗 ' + escHtml(a.sessionId.slice(0, 12)) + '</div>';
-        }
-        html += '<div class="agent-metrics">';
-        html += '<div class="metric"><span class="metric-label">Tasks</span>'
-          + '<span class="metric-value">' + (a.tasksCompleted || 0) + ' done</span></div>';
-        html += '<div class="metric"><span class="metric-label">Failed</span>'
-          + '<span class="metric-value">' + (a.tasksFailed || 0) + '</span></div>';
-        html += '<div class="metric"><span class="metric-label">Cost</span>'
-          + '<span class="metric-value">' + fmt$(a.totalCost || 0) + '</span></div>';
-        html += '</div>';
-        html += '<div class="agent-cost-bar"><div class="agent-cost-fill" style="width:' + costPct + '%;background:' + costColor + '"></div></div>';
-        html += '</div>';
-      }
-      html += '</div>';
-      $agentsContainer.innerHTML = html;
-    }
-
-    // ── Budget Gauge ──
-    var offset = CIRCUMFERENCE * (1 - remainingPct / 100);
-    $gaugeFill.style.strokeDashoffset = offset;
-    $gaugeFill.className = 'fill' + (remainingPct < 20 ? ' danger' : remainingPct < 40 ? ' warning' : '');
-    $gaugePct.textContent = remainingPct.toFixed(0) + '%';
-
-    $budgetTotal.textContent = fmt$(budgetTotal);
-    $budgetSpent.textContent = fmt$(totalSpent);
-    $budgetRemaining.textContent = fmt$(budgetRemaining);
-
-    if (remainingPct < 10) {
-      $budgetStatus.textContent = 'Critical';
-      $budgetStatus.style.color = 'var(--red)';
-    } else if (remainingPct < 30) {
-      $budgetStatus.textContent = 'Warning';
-      $budgetStatus.style.color = 'var(--yellow)';
-    } else {
-      $budgetStatus.textContent = 'Healthy';
-      $budgetStatus.style.color = 'var(--green)';
-    }
-
-    // ── Tasks List ──
-    if (tasks.length === 0) {
-      $taskList.innerHTML = '<div class="empty-message">No tasks yet</div>';
-    } else {
-      var thtml = '';
-      for (var j = 0; j < tasks.length; j++) {
-        var t = tasks[j];
-        thtml += '<div class="task-item">';
-        thtml += '<div class="task-info">';
-        thtml += '<span class="task-name">' + escHtml(t.name || t.id) + '</span>';
-        if (t.role) thtml += '<span class="task-role">' + escHtml(t.role) + '</span>';
-        thtml += '</div>';
-        if (t.cost != null) thtml += '<span class="task-cost">' + fmt$(t.cost) + '</span>';
-        thtml += '<span class="task-status ' + escHtml(t.status) + '">' + escHtml(t.status) + '</span>';
-        thtml += '</div>';
-      }
-      $taskList.innerHTML = thtml;
-    }
-
-    // ── DAG Visualization ──
-    renderDAG(tasks);
-
-    // ── Cost Chart ──
-    renderCostChart(agents, tasks);
-
-    // ── Config Panel ──
+    // ── Sections ──
+    renderSessions(sessions);
+    renderAgents(agents, configBudget);
+    renderBudget(configBudget, totalSpent, budgetRemaining);
+    renderTasks(tasks);
+    renderDag(tasks);
+    renderCost();
     renderConfig(state);
-
-    // ── Config Editor ──
-    updateConfigEditor(state);
+    updateConfigViewer(state);
   }
 
-  // ── DAG Rendering ──
-  function renderDAG(tasks) {
-    if (!tasks || tasks.length === 0) {
-      $dagContainer.innerHTML = '<div class="dag-empty"><div class="icon">📊</div><div>No tasks in the pipeline yet.</div></div>';
-      $dagCount.textContent = '0';
+  function remainingSub(maxTotalCost, totalSpent, budgetRemaining) {
+    if (maxTotalCost === null) return 'Ceiling not reported · no percentage shown';
+    if (maxTotalCost <= 0) return 'Ceiling is $0.00 · percentage undefined';
+    var base = num(budgetRemaining);
+    if (base === null) return 'Ceiling ' + fmt$(maxTotalCost) + ' · remaining unreported';
+    return ((base / maxTotalCost) * 100).toFixed(1) + '% of ' + fmt$(maxTotalCost) + ' ceiling';
+  }
+
+  /**
+   * The unbilled figure comes from `/api/costs`, never from a running sum over
+   * `state.sessions`, and it is always presented as a lower bound. It is not
+   * added to `state.totalSpent` on either side of this line.
+   */
+  function renderUnbilledStat() {
+    if (costReportStatus !== 'ready' || costReport === null) {
+      $statUnbilled.textContent = '—';
+      $statUnbilledSub.textContent = costReportStatus === 'failed'
+        ? 'Cost report unavailable'
+        : 'Loading cost report…';
+      return;
+    }
+    var uncollected = asObject(costReport.uncollected);
+    if (uncollected === null) {
+      $statUnbilled.textContent = '—';
+      $statUnbilledSub.textContent = 'Report carries no uncollected block';
+      return;
+    }
+    var lower = num(uncollected.observedUncollected);
+    var count = num(uncollected.sessions);
+    var evicted = asObject(uncollected.evicted);
+    var evictedCount = evicted === null ? null : num(evicted.sessions);
+
+    $statUnbilled.textContent = lower === null ? '—' : '≥ ' + fmt$(lower);
+    $statUnbilledSub.textContent = (count === null ? 'session count unreported' : count + ' session' + (count === 1 ? '' : 's'))
+      + ' · lower bound, NOT in Spend'
+      + (evictedCount !== null && evictedCount > 0
+          ? ' · plus ' + evictedCount + ' evicted from the itemised list'
+          : '');
+  }
+
+  // ── Sessions ──
+  /** Null-safe: a malformed entry must not take the whole section down. */
+  function sessionIsOrphan(s) {
+    if (s === null || s === undefined) return false;
+    return s.owned !== true || s.agentId === null;
+  }
+
+  function sessionPassesFilter(s) {
+    if (s === null || s === undefined) return false;
+    if (sessionFilter === 'all') return true;
+    if (sessionFilter === 'orphan') return sessionIsOrphan(s);
+    if (sessionFilter === 'running') return s.state === 'running';
+    if (sessionFilter === 'abandoned') return s.state === 'abandoned';
+    return true;
+  }
+
+  function setupSessionFilters() {
+    var btns = document.querySelectorAll('.session-filter-btn');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].addEventListener('click', function() {
+        sessionFilter = this.getAttribute('data-sfilter');
+        for (var j = 0; j < btns.length; j++) btns[j].classList.remove('active');
+        this.classList.add('active');
+        renderSessions(lastState ? asArray(lastState.sessions) : []);
+      });
+    }
+  }
+
+  function renderSessions(sessions) {
+    sessions = asArray(sessions);
+    $sessionCount.textContent = String(sessions.length);
+    renderOrphanBanner(sessions);
+
+    if (sessions.length === 0) {
+      $sessionsContainer.innerHTML = '<div class="empty-message">'
+        + 'No sessions reported. This list covers sessions nexus owns, is still collecting from, '
+        + 'or has abandoned — it is not an enumeration of every open session on the server.'
+        + '</div>';
       return;
     }
 
-    // Build dependency edges from task deps
-    var taskMap = {};
-    for (var i = 0; i < tasks.length; i++) {
-      taskMap[tasks[i].id] = tasks[i];
+    // Orphans first: the row that matters must not be below the fold of a long
+    // list of healthy sessions.
+    var rows = sessions.slice().sort(function(a, b) {
+      return sessionRank(b) - sessionRank(a);
+    });
+
+    var shown = rows.filter(sessionPassesFilter);
+    if (shown.length === 0) {
+      $sessionsContainer.innerHTML = '<div class="empty-message">No sessions match this filter.</div>';
+      return;
     }
 
-    // Topological sort: build adjacency and in-degree
-    var adj = {};
-    var inDeg = {};
-    for (var i = 0; i < tasks.length; i++) {
-      var tid = tasks[i].id;
-      adj[tid] = [];
-      inDeg[tid] = inDeg[tid] || 0;
-      var deps = tasks[i].deps || tasks[i].dependencies || [];
-      for (var d = 0; d < deps.length; d++) {
-        if (adj[deps[d]]) {
-          adj[deps[d]].push(tid);
-          inDeg[tid] = (inDeg[tid] || 0) + 1;
-        }
+    var html = '<table class="session-table"><thead><tr>'
+      + '<th>Session</th><th>Owner</th><th>Task</th><th>Role</th><th>Model</th>'
+      + '<th>State</th><th class="num">Last read tokens</th><th class="num">Unbilled (≥)</th>'
+      + '</tr></thead><tbody>';
+    for (var i = 0; i < shown.length; i++) {
+      html += sessionRow(asObject(shown[i]));
+    }
+    html += '</tbody></table>';
+    $sessionsContainer.innerHTML = html;
+  }
+
+  function sessionRank(s) {
+    if (s === null || s === undefined) return 0;
+    if (s.state === 'abandoned') return 3;
+    if (sessionIsOrphan(s) && s.state === 'running') return 2;
+    if (sessionIsOrphan(s)) return 1;
+    return 0;
+  }
+
+  function sessionRow(s) {
+    if (s === null) return '';
+    var id = text(s.id);
+    var isOrphan = sessionIsOrphan(s);
+    var abandoned = s.state === 'abandoned';
+    var classes = 'session-row' + (abandoned ? ' abandoned' : isOrphan ? ' orphan' : '');
+    // 0 tokens means "never read", not "spent nothing". Say which.
+    var tokens = num(s.lastKnownTokens);
+    var unread = tokens === null || tokens === 0;
+    if (unread) classes += ' unread';
+
+    var owner;
+    if (isOrphan) {
+      owner = '<span class="flag orphan">No owning agent</span>';
+    } else {
+      owner = '<span class="mono">' + escHtml(text(s.agentId) || 'unreported') + '</span>';
+    }
+
+    var flags = '';
+    if (abandoned) flags += ' <span class="flag abandoned">Abandoned</span>';
+    if (unread) flags += ' <span class="flag unread" title="The server reports 0 when it has no reading for this session">No reading</span>';
+
+    var unbilled = num(s.observedUncollected);
+
+    return '<tr class="' + classes + '">'
+      + '<td class="mono">' + escHtml(id === null ? 'unreported' : id) + flags + '</td>'
+      + '<td>' + owner + '</td>'
+      + '<td class="mono">' + escHtml(text(s.taskId) || '—') + '</td>'
+      + '<td>' + escHtml(text(s.role) || '—') + '</td>'
+      + '<td class="mono">' + escHtml(text(s.model) || '—') + '</td>'
+      + '<td><span class="session-state ' + escHtml(text(s.state) || 'unknown') + '">'
+        + escHtml(text(s.state) || 'unreported') + '</span></td>'
+      + '<td class="num" title="The last token count actually observed for this session. Not a live reading.">'
+        + (unread ? '—' : fmtInt(tokens)) + '</td>'
+      + '<td class="num" title="Lower bound on what this session spent unbilled. A lower bound, not a total; excluded from Spend.">'
+        + (unbilled === null || unbilled === 0 ? '—' : '≥ ' + fmt$(unbilled)) + '</td>'
+      + '</tr>';
+  }
+
+  /**
+   * The section-level alarm. It fires on the specific combination that is the
+   * point of the whole view: a session that is still running, has no owning
+   * agent, and is therefore spending into nothing.
+   */
+  function renderOrphanBanner(sessions) {
+    var leaking = [];
+    var abandoned = 0;
+    for (var i = 0; i < sessions.length; i++) {
+      var s = asObject(sessions[i]);
+      if (s === null) continue;
+      if (s.state === 'abandoned') abandoned++;
+      if (sessionIsOrphan(s) && s.state === 'running') leaking.push(s);
+    }
+
+    if (leaking.length === 0 && abandoned === 0) {
+      $orphanBanner.innerHTML = '';
+      return;
+    }
+
+    var parts = [];
+    if (leaking.length > 0) {
+      var ids = leaking.map(function(s) { return text(s.id) || 'unreported'; });
+      parts.push(
+        '<div class="orphan-banner">'
+        + '<span class="icon">🔓</span><div>'
+        + '<div class="title">' + leaking.length + ' running session' + (leaking.length === 1 ? '' : 's')
+        + ' with no owning agent</div>'
+        + '<div class="body">These sessions are still generating after the agent that owned '
+        + 'them was terminated. Whatever they spend is not being collected, and the server '
+        + 'keeps them in view so you can terminate them.</div>'
+        + '<div class="detail">Session ids: <span class="mono">' + escHtml(ids.join(', ')) + '</span></div>'
+        + '</div></div>');
+    }
+    if (abandoned > 0) {
+      parts.push(
+        '<div class="orphan-banner" style="border-color: var(--red); background: rgba(248,81,73,0.10)">'
+        + '<span class="icon">⛔</span><div>'
+        + '<div class="title" style="color: var(--red)">' + abandoned + ' abandoned session'
+        + (abandoned === 1 ? '' : 's') + '</div>'
+        + '<div class="body">The plugin stopped watching these while they were still running. '
+        + 'Their unbilled spend is a <strong>lower bound</strong> and is excluded from Spend.</div>'
+        + '</div></div>');
+    }
+    $orphanBanner.innerHTML = parts.join('');
+  }
+
+  // ── Agents ──
+  function renderAgents(agents, configBudget) {
+    $agentCount.textContent = String(agents.length);
+    if (agents.length === 0) {
+      $agentsContainer.innerHTML = '<div class="no-agents"><div class="icon">🤖</div>'
+        + '<div class="msg">No agents spawned yet. Tasks will spawn agents automatically.</div></div>';
+      return;
+    }
+
+    // Normalised against the per-agent ceiling, not against the most expensive
+    // agent: normalising to the max makes the top bar 100% by construction, so
+    // the bars encode rank rather than budget consumption.
+    var perAgentCap = configBudget === null ? null : num(configBudget.maxCostPerAgent);
+
+    var html = '<div class="agents-grid">';
+    for (var i = 0; i < agents.length; i++) {
+      var a = asObject(agents[i]);
+      if (a === null) continue;
+      var role = text(a.role);
+      var emoji = (role === null ? null : ROLE_EMOJI[role]) || '🤖';
+      var status = text(a.status) || 'unknown';
+      var cost = num(a.totalCost);
+      var barPct = null;
+      if (cost !== null && perAgentCap !== null && perAgentCap > 0) {
+        barPct = Math.min(100, (cost / perAgentCap) * 100);
       }
-    }
+      var overCap = cost !== null && perAgentCap !== null && cost > perAgentCap;
+      var barColor = overCap ? '#f85149' : (role === null ? '#58a6ff' : (ROLE_COLORS[role] || '#58a6ff'));
 
-    // Kahn's algorithm for topological order
-    var queue = [];
-    for (var i = 0; i < tasks.length; i++) {
-      if (!inDeg[tasks[i].id] || inDeg[tasks[i].id] === 0) {
-        queue.push(tasks[i].id);
-      }
-    }
-    var sorted = [];
-    while (queue.length > 0) {
-      var curr = queue.shift();
-      sorted.push(curr);
-      var neighbors = adj[curr] || [];
-      for (var n = 0; n < neighbors.length; n++) {
-        inDeg[neighbors[n]]--;
-        if (inDeg[neighbors[n]] === 0) queue.push(neighbors[n]);
-      }
-    }
-    // Add any remaining (cycles)
-    for (var i = 0; i < tasks.length; i++) {
-      if (sorted.indexOf(tasks[i].id) === -1) sorted.push(tasks[i].id);
-    }
-
-    $dagCount.textContent = sorted.length;
-
-    // Build edges for arrow highlighting
-    var edges = [];
-    for (var i = 0; i < tasks.length; i++) {
-      var deps = tasks[i].deps || tasks[i].dependencies || [];
-      for (var d = 0; d < deps.length; d++) {
-        edges.push({ from: deps[d], to: tasks[i].id });
-      }
-    }
-
-    var html = '<div class="dag-graph">';
-    for (var i = 0; i < sorted.length; i++) {
-      var t = taskMap[sorted[i]];
-      if (!t) continue;
-      var status = t.status || 'pending';
-      var label = t.name || t.id || 'task-' + i;
-      var progress = t.progress || (status === 'completed' ? 100 : status === 'running' ? 50 : 0);
-
-      html += '<div class="dag-node">';
-      html += '<div class="dag-node-box ' + escHtml(status) + '">';
-      html += escHtml(label);
-      if (status === 'running' || status === 'completed') {
-        html += '<div class="dag-progress" style="width:' + Math.min(100, progress) + '%"></div>';
-      }
+      html += '<div class="agent-card fade-in">';
+      html += '<div class="agent-header">';
+      html += '<div class="agent-name"><span class="status-dot ' + escHtml(status) + '"></span>'
+        + emoji + ' ' + escHtml(text(a.name) || role || 'unnamed agent') + '</div>';
+      html += '<span class="agent-role-badge ' + escHtml(role || 'documenter') + '">'
+        + escHtml(role || 'role unreported') + '</span>';
       html += '</div>';
-      html += '<div class="dag-node-label">' + escHtml(status) + '</div>';
-      if (t.role) html += '<div class="dag-node-role">' + escHtml(t.role) + '</div>';
+
+      // `sessionID`, not `sessionId` — the previous casing matched nothing the
+      // server sends, so the session link below was dead code.
+      var sessionId = text(a.sessionID);
+      html += '<div class="agent-meta" title="Resolved model">📦 ' + escHtml(text(a.model) || 'model unreported') + '</div>';
+      html += '<div class="agent-meta"><span>🔗</span><span class="mono">'
+        + (sessionId === null ? 'no session id reported' : escHtml(sessionId)) + '</span></div>';
+      html += '<div class="agent-meta" title="state.agents[].spawnedAt">🕑 spawned '
+        + escHtml(fmtDateTime(a.spawnedAt)) + '</div>';
+
+      html += '<div class="agent-metrics">';
+      html += metric('Tasks', num(a.tasksCompleted) === null ? '—' : fmtInt(a.tasksCompleted) + ' done');
+      html += metric('Failed', fmtInt(a.tasksFailed));
+      html += metric('Cost', fmt$(a.totalCost));
+      html += metric('Tokens', fmtInt(a.totalTokens));
+      html += metric('Avg resp', fmtMs(a.averageResponseTime));
+      html += metric('Error rate', fmtPct(a.errorRate));
       html += '</div>';
-      if (i < sorted.length - 1) {
-        // Check if there's a direct edge
-        var hasEdge = false;
-        var allComplete = false;
-        for (var e = 0; e < edges.length; e++) {
-          if (edges[e].from === sorted[i] && edges[e].to === sorted[i + 1]) {
-            hasEdge = true;
-            var fromTask = taskMap[sorted[i]];
-            var toTask = taskMap[sorted[i + 1]];
-            allComplete = fromTask && fromTask.status === 'completed';
-            break;
-          }
-        }
-        var arrowClass = 'dag-arrow';
-        if (hasEdge) {
-          arrowClass += allComplete ? ' completed' : ' active';
-        }
-        html += '<div class="' + arrowClass + '">→</div>';
-      }
+
+      html += '<div class="agent-cost-bar"><div class="agent-cost-fill" style="width:'
+        + (barPct === null ? 0 : barPct.toFixed(1)) + '%;background:' + barColor + '"></div></div>';
+      html += '<div class="bar-caption">'
+        + (perAgentCap === null || perAgentCap <= 0
+            ? 'Per-agent ceiling not reported — no bar scale'
+            : fmt$(a.totalCost) + ' of ' + fmt$(perAgentCap) + ' per-agent ceiling'
+              + (overCap ? ' · OVER CEILING' : ''))
+        + '</div>';
+      html += '</div>';
     }
     html += '</div>';
+    $agentsContainer.innerHTML = html;
+  }
+
+  function metric(label, value) {
+    return '<div class="metric"><span class="metric-label">' + escHtml(label) + '</span>'
+      + '<span class="metric-value">' + escHtml(value) + '</span></div>';
+  }
+
+  // ── Budget ──
+  function renderBudget(configBudget, totalSpent, budgetRemaining) {
+    var ceiling = configBudget === null ? null : num(configBudget.maxTotalCost);
+    var alertThreshold = configBudget === null ? null : num(configBudget.alertThreshold);
+    var hardLimit = configBudget === null ? null : configBudget.hardLimit;
+
+    // The gauge is a share of the REPORTED CEILING. With no ceiling there is no
+    // fraction to draw, so the ring is dimmed and the centre says '—' rather
+    // than falling back to an invented total.
+    var remainingFraction = null;
+    if (ceiling !== null && ceiling > 0 && budgetRemaining !== null) {
+      remainingFraction = Math.max(0, Math.min(1, budgetRemaining / ceiling));
+    }
+
+    if (remainingFraction === null) {
+      $gaugeRing.className = 'gauge-ring unmeasurable';
+      $gaugeFill.className = 'fill';
+      $gaugeFill.style.strokeDashoffset = String(CIRCUMFERENCE);
+      $gaugePct.textContent = '—';
+    } else {
+      $gaugeRing.className = 'gauge-ring';
+      $gaugePct.textContent = (remainingFraction * 100).toFixed(0) + '%';
+      $gaugeFill.style.strokeDashoffset = String(CIRCUMFERENCE * (1 - remainingFraction));
+      // Thresholds come from `alertThreshold` only. The previous 20%/40% bands
+      // were invented here and had nothing to do with any configuration.
+      $gaugeFill.className = 'fill'
+        + (alertThreshold !== null && remainingFraction <= alertThreshold ? ' danger' : '');
+    }
+
+    $budgetTotal.textContent = fmt$(ceiling);
+    $budgetSpent.textContent = fmt$(totalSpent);
+    $budgetRemaining.textContent = fmt$(budgetRemaining);
+
+    if (alertThreshold === null) {
+      $budgetAlert.textContent = 'not reported';
+      $budgetAlert.style.color = 'var(--text-muted)';
+    } else {
+      // Stated as what it is: the REMAINING fraction at or below which we alert.
+      $budgetAlert.textContent = fmtPct(alertThreshold) + ' remaining';
+      $budgetAlert.style.color = 'var(--yellow)';
+    }
+
+    if (remainingFraction === null) {
+      $budgetStatus.textContent = 'Unknown';
+      $budgetStatus.style.color = 'var(--text-muted)';
+    } else if (alertThreshold !== null && remainingFraction <= alertThreshold) {
+      $budgetStatus.textContent = 'At alert threshold';
+      $budgetStatus.style.color = 'var(--red)';
+    } else if (typeof hardLimit === 'boolean' && hardLimit && remainingFraction === 0) {
+      $budgetStatus.textContent = 'At ceiling';
+      $budgetStatus.style.color = 'var(--red)';
+    } else {
+      $budgetStatus.textContent = 'Above alert threshold';
+      $budgetStatus.style.color = 'var(--green)';
+    }
+  }
+
+  // ── Tasks ──
+  function renderTasks(tasks) {
+    if (tasks.length === 0) {
+      $taskList.innerHTML = '<div class="empty-message">No tasks yet</div>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < tasks.length; i++) {
+      var t = asObject(tasks[i]);
+      if (t === null) continue;
+      var status = text(t.status) || 'unknown';
+      var priority = text(t.priority);
+
+      html += '<div class="task-item ' + escHtml(status) + '">';
+      html += '<div class="task-line">';
+      html += '<div class="task-info">';
+      html += '<span class="task-name" title="' + escHtml(text(t.id) || '') + '">'
+        + escHtml(text(t.name) || text(t.id) || 'unnamed task') + '</span>';
+      if (text(t.role) !== null) html += '<span class="task-role">' + escHtml(text(t.role)) + '</span>';
+      if (priority !== null) {
+        html += '<span class="task-chip priority-' + escHtml(priority) + '">' + escHtml(priority) + '</span>';
+      }
+      html += '</div>';
+      // cost/tokensUsed are `TaskResult` fields, absent until a task has a
+      // result. Rendered only when present — no `$0.00` for "not run yet".
+      if (num(t.cost) !== null) html += '<span class="task-cost">' + fmt$(t.cost) + '</span>';
+      if (num(t.tokensUsed) !== null) html += '<span class="task-cost">' + fmtInt(t.tokensUsed) + ' tok</span>';
+      html += '<span class="task-status ' + escHtml(status) + '">' + escHtml(status) + '</span>';
+      html += '</div>';
+
+      // assignedAgent: whose it is, and dependencies: what it waits on.
+      var meta = [];
+      var agent = text(t.assignedAgent);
+      meta.push('agent: ' + (agent === null ? 'unassigned' : agent));
+      var deps = Array.isArray(t.dependencies) ? t.dependencies : [];
+      meta.push('deps: ' + (deps.length === 0 ? 'none reported' : deps.join(', ')));
+      if (num(t.tokensUsed) !== null) meta.push('tokens: ' + fmtInt(t.tokensUsed));
+      html += '<div class="task-meta">';
+      for (var m = 0; m < meta.length; m++) {
+        var isMono = meta[m].indexOf('agent:') === 0 || meta[m].indexOf('deps:') === 0;
+        html += '<span class="' + (isMono ? 'mono' : '') + '">' + escHtml(meta[m]) + '</span>';
+      }
+      html += '</div>';
+
+      html += taskResultBlock(t);
+      html += '</div>';
+    }
+    $taskList.innerHTML = html;
+  }
+
+  /**
+   * `t.result` is the only place a user can see WHY a task failed. Truncated to
+   * 500 characters by the server, which the caption says rather than letting a
+   * clipped output read as a whole one.
+   */
+  function taskResultBlock(t) {
+    var result = asObject(t.result);
+    if (result === null) return '';
+
+    var success = typeof result.success === 'boolean' ? result.success : null;
+    var output = text(result.output);
+    var err = text(result.error);
+    var duration = num(result.duration);
+    if (output === null && err === null && duration === null) return '';
+
+    var summary = success === true ? 'Result: success'
+      : success === false ? 'Result: failed'
+      : 'Result (success flag not reported)';
+
+    var body = '';
+    if (err !== null) body += '<pre class="error">' + escHtml(err) + '</pre>';
+    if (output !== null) {
+      body += '<pre>' + escHtml(output) + '</pre>';
+      if (output.length >= SERVER_OUTPUT_TRUNCATION) {
+        body += '<div class="result-truncation">Output truncated to '
+          + SERVER_OUTPUT_TRUNCATION + ' characters by the server.</div>';
+      }
+    }
+    if (duration !== null) {
+      body += '<div class="result-truncation">Duration: ' + escHtml(fmtMs(duration)) + '</div>';
+    }
+
+    return '<details class="task-result"><summary>' + escHtml(summary) + '</summary>'
+      + '<div>' + body + '</div></details>';
+  }
+
+  // ── Task dependency graph ──
+  //
+  // The previous version topologically sorted the tasks and drew an arrow
+  // between each consecutive pair, which renders as a linear pipeline whatever
+  // the real graph is. This lays the tasks out in dependency LAYERS (longest
+  // path from a root) and draws one arrow per REPORTED edge, so the picture is
+  // the graph the server described or there is no picture.
+  //
+  // It is a truthful layout, not an optimal one: layers are assigned by
+  // longest-path depth and within a layer tasks keep the order `state.tasks`
+  // gave them, so edges may cross. A crossing-minimised ordering (Sugiyama or
+  // barycentre) is not attempted.
+
+  function renderDag(tasks) {
+    var all = tasks.filter(function(t) { return asObject(t) !== null; });
+    // A task with no id cannot be a node: an edge could never address it, so as
+    // a box it would look unconnected and imply "no dependencies". Counted and
+    // reported below rather than drawn.
+    var list = all.filter(function(t) { return typeof t.id === 'string' && t.id.length > 0; });
+    var idless = all.length - list.length;
+
+    if (all.length === 0) {
+      $dagCount.textContent = '0';
+      $dagNote.textContent = '';
+      $dagContainer.innerHTML = '<div class="dag-empty"><div class="icon">📊</div>'
+        + '<div>No tasks in the graph yet.</div></div>';
+      return;
+    }
+
+    var byId = {};
+    for (var i = 0; i < list.length; i++) byId[list[i].id] = list[i];
+
+    // Only edges whose source is actually in this state are drawn. An edge to a
+    // task that is not in the snapshot is counted and reported, because drawing
+    // nothing and saying nothing would read as "no dependencies".
+    var known = {};
+    var edges = [];
+    var dangling = 0;
+    for (var j = 0; j < list.length; j++) {
+      var t = list[j];
+      known[t.id] = [];
+      var deps = Array.isArray(t.dependencies) ? t.dependencies : [];
+      for (var d = 0; d < deps.length; d++) {
+        var dep = deps[d];
+        if (typeof dep !== 'string' || dep === t.id) continue;
+        if (Object.prototype.hasOwnProperty.call(byId, dep)) {
+          known[t.id].push(dep);
+          edges.push({ from: dep, to: t.id });
+        } else {
+          dangling++;
+        }
+      }
+    }
+
+    // Cycle detection (Kahn). A cycle makes the dependency depth undefined; it
+    // is reported rather than silently laid out as if it were a DAG.
+    var inDegree = {};
+    for (var k = 0; k < list.length; k++) inDegree[list[k].id] = known[list[k].id].length;
+    var queue = [];
+    for (var q = 0; q < list.length; q++) if (inDegree[list[q].id] === 0) queue.push(list[q].id);
+    var acyclic = 0;
+    while (queue.length > 0) {
+      var current = queue.shift();
+      acyclic++;
+      for (var t2 = 0; t2 < list.length; t2++) {
+        var tid = list[t2].id;
+        if (known[tid].indexOf(current) === -1) continue;
+        inDegree[tid]--;
+        if (inDegree[tid] === 0) queue.push(tid);
+      }
+    }
+    var cycleCount = list.length - acyclic;
+
+    // Longest-path layering, iterated to a fixed point. In a cyclic graph the
+    // value stops being a depth; those tasks land in deep columns and the cycle
+    // is reported below rather than drawn as a dependency.
+    var layer = {};
+    for (var pass = 0; pass <= list.length; pass++) {
+      var changed = false;
+      for (var p = 0; p < list.length; p++) {
+        var pid = list[p].id;
+        var want = 0;
+        for (var pd = 0; pd < known[pid].length; pd++) {
+          var depLayer = layer[known[pid][pd]];
+          if (typeof depLayer !== 'number') continue;
+          if (depLayer + 1 > want) want = depLayer + 1;
+        }
+        if (layer[pid] !== want) { layer[pid] = want; changed = true; }
+      }
+      if (!changed) break;
+    }
+
+    var maxLayer = 0;
+    for (var m = 0; m < list.length; m++) {
+      if (layer[list[m].id] > maxLayer) maxLayer = layer[list[m].id];
+    }
+    var columns = [];
+    for (var c = 0; c <= maxLayer; c++) columns.push([]);
+    for (var s = 0; s < list.length; s++) columns[layer[list[s].id]].push(list[s]);
+
+    $dagCount.textContent = list.length
+      + (idless > 0 ? ' of ' + all.length : '')
+      + (columns.length > 1 ? ' · ' + columns.length + ' layers' : '');
+
+    // ── Note under the header: what is and is not drawn. ──
+    var notes = [];
+    notes.push('Columns are <strong>dependency layers</strong> (longest path from a task with no dependencies). '
+      + 'Every arrow is a dependency <code>state.tasks[].dependencies</code> edge the server reported. '
+      + 'Layout is longest-path layering, not crossing-minimised, so arrows may cross.');
+    if (edges.length === 0) {
+      notes.push('<strong>No task reports any dependency</strong> on another task in this snapshot, '
+        + 'so there is no graph to draw and the tasks below are shown by status only, in no implied order.');
+    }
+    if (cycleCount > 0) {
+      notes.push('<strong style="color: var(--red)">' + cycleCount + ' task' + (cycleCount === 1 ? '' : 's')
+        + ' sit in a dependency cycle.</strong> Layer depth is undefined for a cycle; those columns are a '
+        + 'fallback placement, not a dependency.');
+    }
+    if (dangling > 0) {
+      notes.push('<strong>' + dangling + ' dependency reference' + (dangling === 1 ? '' : 's')
+        + ' points at a task id that is not in this snapshot</strong> and ' + (dangling === 1 ? 'is' : 'are')
+        + ' not drawn. Either the task has left `state.tasks` or the id never matched.');
+    }
+    if (idless > 0) {
+      notes.push('<strong>' + idless + ' task' + (idless === 1 ? '' : 's')
+        + ' report no `id`</strong> and cannot be laid out, because an edge has nothing to address. '
+        + 'They are excluded from the graph and from the count above.');
+    }
+    $dagNote.innerHTML = notes.join('<br>');
+
+    // ── Nodes, one column per layer. ──
+    var html = '<div class="dag-canvas"><svg class="dag-edges" aria-hidden="true"></svg><div class="dag-layers">';
+    for (var col = 0; col < columns.length; col++) {
+      html += '<div class="dag-layer"><div class="dag-layer-index">L' + col + '</div>';
+      for (var n = 0; n < columns[col].length; n++) {
+        html += dagNode(columns[col][n], known);
+      }
+      html += '</div>';
+    }
+    html += '</div></div>';
     $dagContainer.innerHTML = html;
+
+    drawDagEdges(edges, byId, cycleCount);
   }
 
-  // ── Cost Chart Rendering ──
-  function renderCostChart(agents, tasks) {
-    // Aggregate by role
-    var roleCosts = {};
-    for (var i = 0; i < agents.length; i++) {
-      var a = agents[i];
-      var role = a.role || 'unknown';
-      roleCosts[role] = (roleCosts[role] || 0) + (a.totalCost || 0);
+  function dagNode(t, known) {
+    var status = text(t.status) || 'unknown';
+    var deps = known[t.id];
+    return '<div class="dag-node" data-dag-id="' + escHtml(t.id) + '">'
+      + '<div class="dag-node-box ' + escHtml(status) + '" title="' + escHtml(t.name || t.id) + '">'
+      + escHtml(text(t.name) || text(t.id) || 'unnamed task') + '</div>'
+      + '<div class="dag-node-label">' + escHtml(status) + '</div>'
+      + '<div class="dag-node-role">' + escHtml(text(t.role) || 'role unreported') + '</div>'
+      + '<div class="dag-node-deps">' + (deps.length === 0 ? 'no deps' : '← ' + deps.length + ' dep' + (deps.length === 1 ? '' : 's')) + '</div>'
+      + '</div>';
+  }
+
+  /**
+   * Draws the reported edges over the layer columns. Edges whose two endpoints
+   * ended up in the same or inverted columns (only possible in a cycle) are
+   * counted and skipped rather than drawn as a misleading backwards arrow.
+   */
+  function drawDagEdges(edges, byId, cycleCount) {
+    var canvas = $dagContainer.querySelector('.dag-canvas');
+    var svg = $dagContainer.querySelector('.dag-edges');
+    if (canvas === null || svg === null) return;
+
+    var width = canvas.offsetWidth;
+    var height = canvas.offsetHeight;
+    if (width === 0 || height === 0) return;
+    svg.setAttribute('width', String(width));
+    svg.setAttribute('height', String(height));
+    svg.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+
+    var port = {};
+    var boxes = canvas.querySelectorAll('.dag-node-box');
+    for (var i = 0; i < boxes.length; i++) {
+      var node = boxes[i].parentNode;
+      var id = node.getAttribute('data-dag-id');
+      port[id] = {
+        x1: boxes[i].offsetLeft + boxes[i].offsetWidth,
+        y1: boxes[i].offsetTop + boxes[i].offsetHeight / 2,
+        x2: boxes[i].offsetLeft,
+        y2: boxes[i].offsetTop + boxes[i].offsetHeight / 2
+      };
     }
-    // Also aggregate task costs by role
-    for (var j = 0; j < tasks.length; j++) {
-      var t = tasks[j];
-      if (t.cost && t.role) {
-        // Don't double-count; use task cost if agent data missing
-        if (!roleCosts[t.role]) roleCosts[t.role] = t.cost;
+
+    var paths = '';
+    var skipped = 0;
+    for (var e = 0; e < edges.length; e++) {
+      // `Object.prototype` has keys like `toString`, so an id that collided with
+      // one would otherwise resolve to a truthy inherited property and draw
+      // from a number instead of a port.
+      if (!Object.prototype.hasOwnProperty.call(port, edges[e].from)
+          || !Object.prototype.hasOwnProperty.call(port, edges[e].to)) {
+        skipped++;
+        continue;
       }
+      var from = port[edges[e].from];
+      var to = port[edges[e].to];
+      if (to.x2 <= from.x1) { skipped++; continue; }
+      var source = asObject(byId[edges[e].from]);
+      var sourceStatus = source === null ? null : source.status;
+      var cls = sourceStatus === 'completed' ? 'edge-satisfied'
+        : sourceStatus === 'running' ? 'edge-active'
+        : 'edge-pending';
+      var dx = Math.max(24, (to.x2 - from.x1) / 2);
+      paths += '<path class="' + cls + '" d="M ' + from.x1 + ' ' + from.y1
+        + ' C ' + (from.x1 + dx) + ' ' + from.y1
+        + ', ' + (to.x2 - dx) + ' ' + to.y2
+        + ', ' + to.x2 + ' ' + to.y2 + '"></path>';
+      paths += '<polygon class="arrowhead" points="'
+        + to.x2 + ',' + (to.y2 - 3) + ' ' + (to.x2 - 5) + ',' + to.y2 + ' ' + (to.x2) + ',' + (to.y2 + 3)
+        + '" style="fill:' + (cls === 'edge-satisfied' ? 'var(--green)' : cls === 'edge-active' ? 'var(--blue)' : 'var(--border)') + '"></polygon>';
     }
+    svg.innerHTML = paths;
 
-    // Aggregate by model
-    var modelCosts = {};
-    for (var i = 0; i < agents.length; i++) {
-      var model = agents[i].model || 'unknown';
-      // Shorten model name
-      var shortModel = model.split('/').pop();
-      modelCosts[shortModel] = (modelCosts[shortModel] || 0) + (agents[i].totalCost || 0);
+    if (skipped > 0) {
+      $dagNote.innerHTML += '<br><strong>' + skipped + ' edge' + (skipped === 1 ? '' : 's')
+        + ' could not be drawn</strong>'
+        + (cycleCount > 0 ? ' because its two endpoints are not in strict dependency order (see the cycle warning above).'
+                          : ' because an endpoint is not laid out.');
     }
+  }
 
-    var totalRoleCost = 0;
-    for (var k in roleCosts) totalRoleCost += roleCosts[k];
-    var totalModelCost = 0;
-    for (var k in modelCosts) totalModelCost += modelCosts[k];
+  // ── Cost ──
+  //
+  // `state.agents` is LIVE ONLY — `terminateAgent` deletes the agent, so its
+  // cost disappears from the agent list while the orchestrator still holds it.
+  // Everything below therefore comes from /api/costs, which covers the whole
+  // history, and the agent grid above says so rather than implying otherwise.
 
-    // Render role chart
-    if (Object.keys(roleCosts).length === 0 || totalRoleCost === 0) {
-      $costByRole.innerHTML = '<div class="cost-chart-title">By Role</div>'
-        + '<div class="empty-message" style="padding:8px">No cost data yet</div>';
-    } else {
-      var rhtml = '<div class="cost-chart-title">By Role</div>';
-      var roles = Object.keys(roleCosts).sort(function(a, b) { return roleCosts[b] - roleCosts[a]; });
-      for (var i = 0; i < roles.length; i++) {
-        var r = roles[i];
-        var pct = (roleCosts[r] / totalRoleCost * 100).toFixed(0);
-        var color = ROLE_COLORS[r] || '#58a6ff';
-        rhtml += '<div class="cost-bar-row">'
-          + '<span class="cost-bar-label">' + (ROLE_EMOJI[r] || '🤖') + ' ' + escHtml(r) + '</span>'
-          + '<div class="cost-bar-track"><div class="cost-bar-fill" style="width:' + pct + '%;background:' + color + '"></div></div>'
-          + '<span class="cost-bar-value">' + fmt$(roleCosts[r]) + '</span>'
-          + '</div>';
-      }
-      rhtml += '<div class="cost-total-row"><span class="cost-total-label">Total by Role</span>'
-        + '<span class="cost-total-value">' + fmt$(totalRoleCost) + '</span></div>';
-      $costByRole.innerHTML = rhtml;
-    }
-
-    // Render model chart
-    if (Object.keys(modelCosts).length === 0 || totalModelCost === 0) {
+  function renderCost() {
+    if (costReportStatus !== 'ready' || costReport === null) {
+      $costByAgent.innerHTML = '<div class="cost-chart-title">By Agent</div>'
+        + '<div class="empty-message" style="padding:8px">No cost report yet</div>';
       $costByModel.innerHTML = '<div class="cost-chart-title">By Model</div>'
-        + '<div class="empty-message" style="padding:8px">No cost data yet</div>';
+        + '<div class="empty-message" style="padding:8px">No cost report yet</div>';
+      $costAccounting.innerHTML = '<div class="cost-chart-title">Accounting</div>'
+        + '<div class="empty-message" style="padding:8px">No cost report yet</div>';
+      $costBasis.textContent = '';
+
+      if (costReportStatus === 'failed') {
+        $costStatus.className = 'cost-status';
+        $costStatus.textContent = 'Cost report unavailable: /api/costs failed (' + costReportError
+          + '). These bars are not shown rather than shown as zero.';
+      } else {
+        $costStatus.className = 'cost-status hidden';
+        $costStatus.textContent = '';
+      }
+      return;
+    }
+
+    $costStatus.className = 'cost-status hidden';
+    $costStatus.textContent = '';
+
+    var ceiling = null;
+    if (lastState) {
+      var cfg = asObject(lastState.config);
+      var budget = cfg === null ? null : asObject(cfg.budget);
+      if (budget !== null) ceiling = num(budget.maxTotalCost);
+    }
+
+    // Bars are normalised against the BUDGET CEILING, so a bar's length is a
+    // share of the money available, not a rank among the bars. Falling back to
+    // share-of-total (labelled) only when there is no ceiling to divide by.
+    var useCeiling = ceiling !== null && ceiling > 0;
+    var basisText = useCeiling
+      ? 'Bar length is each entry\'s cost as a share of the ' + fmt$(ceiling)
+        + ' budget ceiling — so a full bar means "this entry alone spent the '
+        + 'whole budget". Source: <code>/api/costs</code>, which covers the full '
+        + 'history, not only the live agents listed above.'
+      : 'Budget ceiling not reported, so bar length is each entry\'s share of the '
+        + 'sum of the entries shown — relative size only, not budget consumption. '
+        + 'Source: <code>/api/costs</code>, which covers the full history.';
+    // `byAgent` and `byModel` are per-dimension sums, and neither is required to
+    // equal `Total spent`: a timeout-delta settlement attributes its cost to an
+    // agent id, while the pre-settlement charge already counted in `Total spent`.
+    // The chart totals are therefore labelled as the sum of what is shown, not as
+    // the run's total, so a discrepancy reads as what it is.
+    basisText += ' Each chart\'s total is the sum of the entries in that chart, which is not '
+      + 'necessarily <code>Total spent</code> — the two are different accounting cuts of the same ledger.';
+    // Static text with no interpolation, so innerHTML is safe here and keeps the
+    // <code> markup readable.
+    $costBasis.innerHTML = basisText;
+
+    // Agent names, for the ids the report is keyed by. An agent that has been
+    // terminated is no longer in `state.agents`, so its id is shown on its own
+    // rather than guessed at.
+    var nameById = {};
+    if (lastState) {
+      var live = asArray(lastState.agents);
+      for (var i = 0; i < live.length; i++) {
+        var a = asObject(live[i]);
+        if (a !== null && typeof a.id === 'string') nameById[a.id] = a;
+      }
+    }
+
+    var byAgent = asObject(costReport.byAgent) || {};
+    var agentKeys = Object.keys(byAgent);
+    agentKeys.sort(function(a, b) { return num(byAgent[b]) - num(byAgent[a]); });
+    $costByAgent.innerHTML = costBars('By Agent', agentKeys, byAgent, useCeiling ? ceiling : null,
+      function(key) {
+        // `nameById[key]` is `undefined`, not `null`, for an agent the
+        // orchestrator has since deleted — which is most of them, and exactly
+        // the ones this chart exists to keep visible.
+        var a = nameById[key];
+        if (a === undefined || a === null) return key + ' (not a live agent)';
+        var role = text(a.role);
+        var emoji = role === null ? null : ROLE_EMOJI[role];
+        return (emoji === null ? null : emoji + ' ') + key + ' · ' + (text(a.name) || key);
+      });
+
+    var byModel = asObject(costReport.byModel) || {};
+    var modelKeys = Object.keys(byModel);
+    modelKeys.sort(function(a, b) { return num(byModel[b]) - num(byModel[a]); });
+    var tokensByModel = asObject(costReport.tokensByModel) || {};
+    $costByModel.innerHTML = costBars('By Model', modelKeys, byModel, useCeiling ? ceiling : null,
+      function(key) { return key; },
+      function(key) { return fmtInt(tokensByModel[key]) + ' tok'; });
+
+    renderCostAccounting();
+  }
+
+  /**
+   * One bar chart. `divisor` is the budget ceiling when there is one; the caller
+   * says so in the caption, so the reader always knows what a bar length means.
+   * The footer sums what is on screen and calls it that, because a per-dimension
+   * sum is not the run's `totalSpent` and the two are allowed to disagree.
+   */
+  function costBars(title, keys, source, divisor, labelFor, valueSuffixFor) {
+    var head = '<div class="cost-chart-title">' + escHtml(title) + '</div>';
+    if (keys.length === 0) {
+      return head + '<div class="empty-message" style="padding:8px">Nothing recorded yet</div>';
+    }
+
+    var sum = 0;
+    for (var i = 0; i < keys.length; i++) sum += num(source[keys[i]]) || 0;
+
+    var html = head;
+    for (var k = 0; k < keys.length; k++) {
+      var key = keys[k];
+      var value = num(source[key]);
+      var widthPct;
+      if (value === null) {
+        widthPct = 0;
+      } else if (divisor !== null) {
+        widthPct = Math.max(0, Math.min(100, (value / divisor) * 100));
+      } else {
+        widthPct = sum > 0 ? (value / sum) * 100 : 0;
+      }
+      html += '<div class="cost-bar-row">'
+        + '<span class="cost-bar-label" title="' + escHtml(labelFor(key)) + '">' + escHtml(labelFor(key)) + '</span>'
+        + '<div class="cost-bar-track"><div class="cost-bar-fill" style="width:'
+        + widthPct.toFixed(1) + '%;background:' + BAR_COLOR_PALETTE[k % BAR_COLOR_PALETTE.length] + '"></div></div>'
+        + '<span class="cost-bar-value">' + escHtml(fmt$(value))
+        + (valueSuffixFor === undefined ? '' : '<span style="color:var(--text-muted);font-weight:400"> '
+          + escHtml(valueSuffixFor(key)) + '</span>')
+        + '</span>'
+        + '</div>';
+    }
+    html += '<div class="cost-total-row"><span class="cost-total-label">Sum of these entries</span>'
+      + '<span class="cost-total-value">' + escHtml(fmt$(sum)) + '</span></div>';
+    return html;
+  }
+
+  /**
+   * The measured/estimated split and the uncollected bound, side by side,
+   * because `totalSpent` on its own is not a fully billed figure and adding the
+   * lower bound to it would produce a third thing that is neither.
+   */
+  function renderCostAccounting() {
+    var report = asObject(costReport);
+    if (report === null) return;
+
+    var measured = num(report.measuredSpend);
+    var estimated = num(report.estimatedSpend);
+    var measuredEntries = num(report.measuredEntries);
+    var estimatedEntries = num(report.estimatedEntries);
+    var uncollected = asObject(report.uncollected);
+
+    var html = '<div class="cost-chart-title">Accounting</div>';
+    html += accountingRow('Measured', fmt$(measured));
+    html += accountingRow('Estimated', fmt$(estimated));
+    html += accountingRow('Total spent', fmt$(report.totalSpent));
+    html += accountingRow('Budget remaining', fmt$(report.budgetRemaining));
+    html += accountingRow('Priced entries', fmtInt(measuredEntries) + ' measured · ' + fmtInt(estimatedEntries) + ' estimated');
+    html += accountingRow('Tokens by model', String(Object.keys(asObject(report.tokensByModel) || {}).length) + ' models');
+
+    if (uncollected === null) {
+      html += accountingRow('Unbilled', 'no uncollected block in report', 'unbilled');
     } else {
-      var mhtml = '<div class="cost-chart-title">By Model</div>';
-      var models = Object.keys(modelCosts).sort(function(a, b) { return modelCosts[b] - modelCosts[a]; });
-      var modelColors = ['#58a6ff', '#bc8cff', '#39d2c0', '#3fb950', '#d29922', '#f0883e', '#f85149'];
-      for (var i = 0; i < models.length; i++) {
-        var m = models[i];
-        var pct = (modelCosts[m] / totalModelCost * 100).toFixed(0);
-        var color = modelColors[i % modelColors.length];
-        mhtml += '<div class="cost-bar-row">'
-          + '<span class="cost-bar-label">' + escHtml(m) + '</span>'
-          + '<div class="cost-bar-track"><div class="cost-bar-fill" style="width:' + pct + '%;background:' + color + '"></div></div>'
-          + '<span class="cost-bar-value">' + fmt$(modelCosts[m]) + '</span>'
-          + '</div>';
+      var count = num(uncollected.sessions);
+      var lower = num(uncollected.observedUncollected);
+      var evicted = asObject(uncollected.evicted);
+      var evictedCount = evicted === null ? null : num(evicted.sessions);
+      html += accountingRow('Unbilled (≥, excluded from Total spent)',
+        (lower === null ? '—' : fmt$(lower)) + ' across '
+        + (count === null ? 'an unreported number of' : String(count)) + ' session' + (count === 1 ? '' : 's'),
+        'unbilled');
+      if (evictedCount !== null && evictedCount > 0) {
+        html += accountingRow('  of which evicted from the itemised list',
+          fmt$(evicted.observedUncollected) + ' across ' + evictedCount + ' session' + (evictedCount === 1 ? '' : 's'),
+          'unbilled');
       }
-      mhtml += '<div class="cost-total-row"><span class="cost-total-label">Total by Model</span>'
-        + '<span class="cost-total-value">' + fmt$(totalModelCost) + '</span></div>';
-      $costByModel.innerHTML = mhtml;
     }
+
+    html += '<div class="accounting-note">'
+      + 'Total spent is the orchestrator\'s billed figure and is what the budget is checked against. '
+      + 'The unbilled row is a <strong>lower bound</strong> on what abandoned sessions spent without '
+      + 'being charged: it is the priced increment observed but not billed, and a session abandoned while '
+      + 'still generating keeps spending past that reading, so the true under-count is larger by an unknown '
+      + 'amount. It is deliberately not added to Total spent.'
+      + '</div>';
+
+    $costAccounting.innerHTML = html;
   }
 
-  // ── Config Rendering ──
+  function accountingRow(key, value, valueClass) {
+    return '<div class="accounting-row"><span class="k">' + escHtml(key) + '</span>'
+      + '<span class="v ' + (valueClass || '') + '">' + escHtml(value) + '</span></div>';
+  }
+
+  // ── Config panel (read-only, real key names) ──
   function renderConfig(state) {
-    if (!state) return;
-
-    // Models per role
-    var models = state.config?.models || state.models || {};
-    var roles = ['architect', 'coder', 'reviewer', 'tester', 'explorer', 'documenter'];
-    var mhtml = '';
-    for (var r = 0; r < roles.length; r++) {
-      var model = models[roles[r]] || '—';
-      mhtml += '<div class="config-row"><span class="config-key">' + roles[r] + '</span>'
-        + '<span class="config-val model">' + escHtml(model) + '</span></div>';
+    var config = asObject(state.config);
+    if (config === null) {
+      $configModels.innerHTML = '<div class="config-row"><span class="config-key">models</span>'
+        + '<span class="config-val unreported">state.config not reported</span></div>';
+      $configBudget.innerHTML = '<div class="config-row"><span class="config-key">budget</span>'
+        + '<span class="config-val unreported">state.config not reported</span></div>';
+      $configHealing.innerHTML = '<div class="config-row"><span class="config-key">selfHealing</span>'
+        + '<span class="config-val unreported">state.config not reported</span></div>';
+      return;
     }
-    $configModels.innerHTML = mhtml;
 
-    // Budget settings
-    var budget = state.config?.budget || state.budgetConfig || {};
-    var maxBudget = budget.maxBudget || budget.max || MAX_BUDGET;
-    var alertPct = budget.alertThreshold || budget.alertPct || 30;
-    var critPct = budget.criticalThreshold || budget.criticalPct || 10;
-    var autoTerm = budget.autoTerminate != null ? budget.autoTerminate : true;
-    $configBudget.innerHTML =
-      '<div class="config-row"><span class="config-key">max budget</span><span class="config-val">' + fmt$(maxBudget) + '</span></div>'
-      + '<div class="config-row"><span class="config-key">alert threshold</span><span class="config-val warning">' + alertPct + '%</span></div>'
-      + '<div class="config-row"><span class="config-key">critical threshold</span><span class="config-val warning">' + critPct + '%</span></div>'
-      + '<div class="config-row"><span class="config-key">auto-terminate</span><span class="config-val ' + (autoTerm ? 'enabled' : 'disabled') + '">' + (autoTerm ? 'enabled' : 'disabled') + '</span></div>';
-
-    // Self-healing config
-    var healing = state.config?.selfHealing || state.selfHealing || {};
-    var retryOnFail = healing.retryOnFailure != null ? healing.retryOnFailure : true;
-    var maxRetries = healing.maxRetries || 3;
-    var escalation = healing.escalation != null ? healing.escalation : true;
-    var deadlockDetect = healing.deadlockDetection != null ? healing.deadlockDetection : true;
-    $configHealing.innerHTML =
-      '<div class="config-row"><span class="config-key">retry on failure</span><span class="config-val ' + (retryOnFail ? 'enabled' : 'disabled') + '">' + (retryOnFail ? 'enabled' : 'disabled') + '</span></div>'
-      + '<div class="config-row"><span class="config-key">max retries</span><span class="config-val">' + maxRetries + '</span></div>'
-      + '<div class="config-row"><span class="config-key">escalation</span><span class="config-val ' + (escalation ? 'enabled' : 'disabled') + '">' + (escalation ? 'enabled' : 'disabled') + '</span></div>'
-      + '<div class="config-row"><span class="config-key">deadlock detect</span><span class="config-val ' + (deadlockDetect ? 'enabled' : 'disabled') + '">' + (deadlockDetect ? 'enabled' : 'disabled') + '</span></div>';
-  }
-
-  // ── Config Editor ──
-  function updateConfigEditor(state) {
-    if (!state) return;
-    var configData = state.config || {};
-    // Only update if editor is not focused (user might be editing)
-    if (document.activeElement !== $configEditor) {
-      try {
-        $configEditor.value = JSON.stringify(configData, null, 2);
-      } catch (e) {
-        $configEditor.value = '// Error serializing config';
+    // Models per role: the resolved map's own keys, not a hardcoded role list.
+    // A configured role the list below did not think of still shows up.
+    var models = asObject(config.models);
+    if (models === null) {
+      $configModels.innerHTML = '<div class="config-row"><span class="config-key">models</span>'
+        + '<span class="config-val unreported">not reported</span></div>';
+    } else {
+      var roleKeys = Object.keys(models).sort();
+      if (roleKeys.length === 0) {
+        $configModels.innerHTML = '<div class="config-row"><span class="config-key">models</span>'
+          + '<span class="config-val unreported">empty</span></div>';
+      } else {
+        var mhtml = '';
+        for (var r = 0; r < roleKeys.length; r++) {
+          var model = text(models[roleKeys[r]]);
+          var emoji = ROLE_EMOJI[roleKeys[r]] || '🤖';
+          mhtml += configRow(emoji + ' ' + roleKeys[r],
+            model === null ? 'not reported' : model,
+            model === null ? 'unreported' : 'model');
+        }
+        $configModels.innerHTML = mhtml;
       }
     }
+
+    // Budget: the real keys, none of the invented ones.
+    var budget = asObject(config.budget);
+    if (budget === null) {
+      $configBudget.innerHTML = '<div class="config-row"><span class="config-key">budget</span>'
+        + '<span class="config-val unreported">not reported</span></div>';
+    } else {
+      var bhtml = '';
+      bhtml += configRow('maxTotalCost', fmt$(num(budget.maxTotalCost)));
+      bhtml += configRow('maxCostPerTask', fmt$(num(budget.maxCostPerTask)));
+      bhtml += configRow('maxCostPerAgent', fmt$(num(budget.maxCostPerAgent)));
+      // Stated as the remaining fraction it is, not as "critical at X% spent".
+      var alert = fmtPct(num(budget.alertThreshold));
+      bhtml += configRow('alertThreshold', alert === '—' ? 'not reported' : alert + ' remaining', 'warning');
+      // `hardLimit` is the real key and the opposite sense to `autoTerminate`:
+      // true means STOP at the ceiling. Labelled that way.
+      var hard = boolText(budget.hardLimit);
+      bhtml += configRow('hardLimit (stop at ceiling)', hard.text, hard.cls);
+      $configBudget.innerHTML = bhtml;
+    }
+
+    // Self-healing: the real keys only.
+    var healing = asObject(config.selfHealing);
+    if (healing === null) {
+      $configHealing.innerHTML = '<div class="config-row"><span class="config-key">selfHealing</span>'
+        + '<span class="config-val unreported">not reported</span></div>';
+    } else {
+      var hhtml = '';
+      var enabled = boolText(healing.enabled);
+      hhtml += configRow('enabled', enabled.text, enabled.cls);
+      hhtml += configRow('maxRetries', fmtInt(num(healing.maxRetries)));
+      hhtml += configRow('retryDelay', fmtMs(num(healing.retryDelay)));
+      hhtml += configRow('backoffMultiplier', num(healing.backoffMultiplier) === null
+        ? 'not reported'
+        : '× ' + num(healing.backoffMultiplier).toFixed(2));
+      var transfer = boolText(healing.contextTransfer);
+      hhtml += configRow('contextTransfer', transfer.text, transfer.cls);
+      $configHealing.innerHTML = hhtml;
+    }
+  }
+
+  function configRow(key, value, valueClass) {
+    return '<div class="config-row"><span class="config-key">' + escHtml(key) + '</span>'
+      + '<span class="config-val ' + (valueClass || '') + '">' + escHtml(value) + '</span></div>';
+  }
+
+  // ── Resolved config viewer ──
+  //
+  // Was an editor with an Apply button that sent `{type:'config:update'}`. The
+  // server handles only `ping` and `getState`, so the button reported success
+  // and nothing happened. There is no auth story for writes and the socket is
+  // localhost with CORS `*`, so no write path was added here either: the field
+  // is `readonly` and says so, and the Apply control is gone.
+  function updateConfigViewer(state) {
+    var config = asObject(state.config);
+    if (config === null) {
+      $configEditor.value = '';
+      $configEditorStatus.textContent = 'Read-only: this server accepts no configuration writes. '
+        + 'No configuration has been reported yet.';
+      $configEditorStatus.className = 'config-status';
+      return;
+    }
+    var serialised;
+    try {
+      serialised = JSON.stringify(config, null, 2);
+    } catch (e) {
+      $configEditor.value = '';
+      $configEditorStatus.textContent = 'Read-only: the reported config could not be serialised: ' + errorText(e);
+      $configEditorStatus.className = 'config-status error';
+      return;
+    }
+    $configEditor.value = serialised;
+    $configEditorStatus.textContent = 'Read-only: this is the config the orchestrator reports as in force. '
+      + 'It is the resolved config (defaults → global → project → session override), not the file on disk. '
+      + 'This server accepts no configuration writes, so there is nothing to apply.';
+    $configEditorStatus.className = 'config-status';
   }
 
   $configFormatBtn.addEventListener('click', function() {
     try {
       var parsed = JSON.parse($configEditor.value);
       $configEditor.value = JSON.stringify(parsed, null, 2);
-      $configEditorStatus.textContent = 'Formatted successfully';
-      $configEditorStatus.className = 'config-status success';
+      $configEditorStatus.textContent = 'Re-indented. Still read-only — nothing was sent to the server.';
+      $configEditorStatus.className = 'config-status';
     } catch (e) {
-      $configEditorStatus.textContent = 'Invalid JSON: ' + e.message;
+      $configEditorStatus.textContent = 'Not valid JSON: ' + errorText(e);
       $configEditorStatus.className = 'config-status error';
     }
   });
 
+  /**
+   * A shape check on the reported config, against the REAL key names. The old
+   * check looked for `budget.maxBudget`, which does not exist, so it could not
+   * have fired even when the editor had content.
+   */
   $configValidateBtn.addEventListener('click', function() {
+    var parsed;
     try {
-      var parsed = JSON.parse($configEditor.value);
-      var warnings = [];
-      if (parsed.budget && parsed.budget.maxBudget && parsed.budget.maxBudget > 100) {
-        warnings.push('Budget exceeds $100');
-      }
-      if (parsed.selfHealing && parsed.selfHealing.maxRetries && parsed.selfHealing.maxRetries > 10) {
-        warnings.push('Max retries > 10 may cause excessive re-runs');
-      }
-      if (warnings.length > 0) {
-        $configEditorStatus.textContent = 'Valid with warnings: ' + warnings.join('; ');
-        $configEditorStatus.className = 'config-status';
-        $configEditorStatus.style.color = 'var(--yellow)';
-      } else {
-        $configEditorStatus.textContent = 'Valid JSON configuration ✓';
-        $configEditorStatus.className = 'config-status success';
-      }
+      parsed = asObject(JSON.parse($configEditor.value));
+      if (parsed === null) throw new Error('top level is not an object');
     } catch (e) {
-      $configEditorStatus.textContent = 'Invalid JSON: ' + e.message;
+      $configEditorStatus.textContent = 'Not valid JSON: ' + errorText(e);
       $configEditorStatus.className = 'config-status error';
+      return;
     }
-  });
 
-  $configApplyBtn.addEventListener('click', function() {
-    try {
-      var parsed = JSON.parse($configEditor.value);
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'config:update', data: parsed }));
-        $configEditorStatus.textContent = 'Config update sent to server';
-        $configEditorStatus.className = 'config-status success';
-        addLog('system', '⚙️', 'Config update sent');
-        addLogStream('system', 'CONFIG', 'Config update sent via dashboard');
-      } else {
-        $configEditorStatus.textContent = 'Not connected to server';
-        $configEditorStatus.className = 'config-status error';
+    var notes = [];
+    var budget = asObject(parsed.budget);
+    if (budget === null) {
+      notes.push('no `budget` block reported');
+    } else {
+      var ceiling = num(budget.maxTotalCost);
+      if (ceiling === null) notes.push('`budget.maxTotalCost` is missing or not a number');
+      else if (ceiling <= 0) notes.push('`budget.maxTotalCost` is ' + fmt$(ceiling) + ' — spend can never register against it');
+      var threshold = num(budget.alertThreshold);
+      if (threshold === null) notes.push('`budget.alertThreshold` is missing or not a number');
+      else if (threshold < 0 || threshold > 1) {
+        notes.push('`budget.alertThreshold` is ' + threshold + ', outside 0..1 — it is read as a fraction of budget REMAINING');
       }
-    } catch (e) {
-      $configEditorStatus.textContent = 'Invalid JSON: ' + e.message;
-      $configEditorStatus.className = 'config-status error';
+      if (typeof budget.hardLimit !== 'boolean') notes.push('`budget.hardLimit` is missing or not a boolean');
+    }
+
+    var healing = asObject(parsed.selfHealing);
+    if (healing === null) {
+      notes.push('no `selfHealing` block reported');
+    } else {
+      if (typeof healing.enabled !== 'boolean') notes.push('`selfHealing.enabled` is missing or not a boolean');
+      var retries = num(healing.maxRetries);
+      if (retries === null) notes.push('`selfHealing.maxRetries` is missing or not a number');
+      else if (retries > 10) notes.push('`selfHealing.maxRetries` is ' + retries + ', which can mean many re-runs of a failing task');
+    }
+
+    if (asObject(parsed.models) === null) notes.push('no `models` map reported');
+
+    if (notes.length === 0) {
+      $configEditorStatus.textContent = 'Shape check passed: models, budget and selfHealing all carry the expected keys. '
+        + 'Read-only — nothing was sent to the server.';
+      $configEditorStatus.className = 'config-status success';
+    } else {
+      $configEditorStatus.textContent = notes.length + ' observation' + (notes.length === 1 ? '' : 's') + ': '
+        + notes.join('; ') + '. Read-only — nothing was sent to the server.';
+      $configEditorStatus.className = 'config-status';
+      $configEditorStatus.style.color = 'var(--yellow)';
     }
   });
 
   // ── Init ──
   setupLogFilters();
   setupActivityFilters();
+  setupSessionFilters();
+  refreshHealth();
+  refreshCostReport();
   addLog('system', '⚡', 'Nexus Dashboard initialized');
   addLogStream('system', 'SYS', 'Nexus Dashboard initialized');
+  // The snapshot age and the orchestrator pill both need a periodic tick: the
+  // socket pushes on change, but "how old is what you are looking at" is only
+  // knowable with a clock.
+  setInterval(renderSnapshotAge, 1000);
   connect();
 
 })();

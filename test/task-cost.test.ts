@@ -3,6 +3,7 @@ import * as realOs from 'node:os'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { DAG, TaskResult } from '../src/types'
 
 // `initialize` loads config from homedir(); sandbox it so this suite never
 // touches the developer's real global config. Must run before the import.
@@ -121,7 +122,7 @@ function makeCtx(opts: {
   }
   return {
     location: { directory: mkdtempSync(join(tmpdir(), 'nexus-project-')) },
-    model: { list: mock(() => Promise.resolve({ data: [] })) },
+    model: { list: mock((): Promise<{ data: unknown[] }> => Promise.resolve({ data: [] })) },
     session,
     storage: { get: mock(() => Promise.resolve(null)), set: mock(() => Promise.resolve()) },
     tool: { list: mock(() => Promise.resolve([])) },
@@ -163,14 +164,14 @@ async function runTask(
     pricing?: typeof SONNET_PER_1K | null
     /** A full tiered price list, written straight into `modelCosts`. */
     tiers?: { tiers: readonly { threshold?: number; rates: typeof SONNET_PER_1K }[] }
-    onReady?: (orchestrator: NexusOrchestrator) => void
+    onReady?: (orchestrator: InstanceType<typeof NexusOrchestrator>) => void
     /**
      * Runs after `executeTask` returns and before anything is read back. Gets
      * the node so a test can simulate what escalation does to it — replace
      * `node.result` — which is what the identity guard on the DAG correction
      * exists for.
      */
-    afterTask?: (orchestrator: NexusOrchestrator, node: TaskNode) => unknown
+    afterTask?: (orchestrator: InstanceType<typeof NexusOrchestrator>, node: TaskNode) => unknown
     /** Shut down BEFORE the task runs, so a late timeout has nothing to flush to. */
     preShutdown?: boolean
     settle?: 'none' | 'flush'
@@ -183,7 +184,7 @@ async function runTask(
   // Self-healing off: a retry would spawn a second session and re-enter
   // executeTask, which is a different test.
   const orchestrator = new NexusOrchestrator({
-    selfHealing: { enabled: selfHealing ?? false },
+    selfHealing: { enabled: selfHealing ?? false, maxRetries: 3, retryDelay: 0, backoffMultiplier: 2, contextTransfer: false },
     ...(graceMs === undefined ? {} : { cost: { timeoutDeltaGraceMs: graceMs } }),
   })
   await orchestrator.initialize(ctx as never)
@@ -207,13 +208,13 @@ async function runTask(
   let completed = false
   // Mirrors the real DAG: markComplete stores the result on the node, and
   // markFailed only sets status (executeTask assigns node.result itself).
-  orchestrator['dag'] = {
-    markComplete: (_id: string, result: NonNullable<TaskNode['result']>) => {
+  orchestrator['dag'] = stubDAG({
+    markComplete: (_id: string, result: TaskResult) => {
       node.result = result
       completed = true
     },
     markFailed: () => { completed = true },
-  }
+  })
 
   if (preShutdown) await orchestrator.shutdown()
   const agent = await orchestrator.spawnAgent({ role: 'coder', model }, { task: 'Do the thing' })
@@ -232,6 +233,25 @@ async function runTask(
   return { result, costReport, totalSpent, marked: completed, after, orchestrator, agent, node }
 }
 
+
+/**
+ * Minimal `DAG` double. These tests only exercise `markComplete`/`markFailed`,
+ * but `orchestrator.dag` is typed as the full `DAG` interface, so the
+ * remaining members have to be present. They are deliberately inert.
+ */
+function stubDAG(impl: Pick<DAG, 'markComplete' | 'markFailed'>): DAG {
+  return {
+    nodes: new Map(),
+    addNode() {},
+    addDependency() {},
+    removeNode() {},
+    getReadyNodes: () => [],
+    markComplete: impl.markComplete,
+    markFailed: impl.markFailed,
+    getParallelGroups: () => [],
+    isComplete: () => true,
+  }
+}
 describe('per-task cost from real session usage', () => {
   it('prices measured tokens at the per-1K rates, billing reasoning additively and cache on top of non-cached input', async () => {
     const usage: Tokens = { input: 1000, output: 2000, reasoning: 500, cache: { read: 10_000, write: 2000 } }
@@ -921,7 +941,7 @@ describe('the settled tier — pricing an increment, not a session', () => {
  * session settles, and awaited via `first` so nothing depends on a sleep
  * being long enough.
  */
-function watchDeltas(o: NexusOrchestrator) {
+function watchDeltas(o: InstanceType<typeof NexusOrchestrator>) {
   const deltas: Array<Record<string, unknown>> = []
   let resolveFirst: () => void = () => {}
   const first = new Promise<void>(r => { resolveFirst = r })
@@ -1185,7 +1205,7 @@ describe('the collection is idempotent, and reports what it could not collect', 
     // deadline probe finds nothing to reconcile and the collection is dropped.
     const atTimeout = usage({ input: 150_000, output: 10_000 })
     const atProbe = usage({ input: 400_000, output: 30_000 })
-    const { costReport, totalSpent, after, orchestrator } = await runTask(
+    const { costReport, totalSpent, after, orchestrator, agent } = await runTask(
       makeCtx({ tokenSequence: [atTimeout, atProbe], waitNever: true }),
       {
         pricing: null, tiers: DISCOUNTED, taskTimeoutMs: 30, graceMs: 40,
@@ -1225,6 +1245,24 @@ describe('the collection is idempotent, and reports what it could not collect', 
       observedUncollected: priceUsageAtSettledTier(
         usage({ input: 250_000, output: 20_000 }), DISCOUNTED, atProbe).total,
       taskIds: ['node-1'],
+      // The identity `taskIds` alone cannot carry. `agentId` is the agent the
+      // session HAD when we gave up on it — and this row is the case the whole
+      // `sessions` projection exists for, so the report now names the session
+      // that went on spending after its agent was terminated.
+      entries: [{
+        sessionID: 'ses_child',
+        taskId: 'node-1',
+        agentId: agent.id,
+        model: MODEL,
+        lastKnownTokens: 430_000,
+        observedUncollected: 0.27,
+      }],
+      // Nothing was dropped: the cap is 200 and there is one abandoned session,
+      // so the whole picture is still itemised and `evicted` is the zero
+      // receipt. It is in the `toEqual` rather than left out so that a build
+      // which stopped reporting the block entirely would fail here instead of
+      // passing by omission.
+      evicted: { sessions: 0, lastKnownTokens: 0, observedUncollected: 0, cap: 200 },
     })
     // 400k is over the 200k threshold, so the observed increment is priced at
     // the discounted tier: 250/1K * 0.001 + 20/1K * 0.001 = $0.27.
@@ -1410,7 +1448,10 @@ describe('only a timeout arms a collection', () => {
     expect(orchestrator['deltaLedgers'].size).toBe(0)
     expect(orchestrator['deltaTimers'].size).toBe(0)
     expect(costReport.uncollected).toEqual({
-      sessions: 0, lastKnownTokens: 0, observedUncollected: 0, taskIds: [],
+      sessions: 0, lastKnownTokens: 0, observedUncollected: 0, taskIds: [], entries: [],
+      // The cap's receipt, asserted at zero rather than omitted — see the same
+      // line in `test/state-sessions.test.ts`.
+      evicted: { sessions: 0, lastKnownTokens: 0, observedUncollected: 0, cap: 200 },
     })
     // The original charge is untouched by any of this.
     expect(costReport.totalSpent).toBeCloseTo(
@@ -1525,7 +1566,7 @@ describe('a timeout is typed, and the typing does not fork the learning store', 
         // records and then stops, rather than respawning a second session.
         onReady: (o) => {
           o['escalationPolicy'] = {
-            maxRetries: 0, retryDelay: 1, backoffMultiplier: 2,
+            maxRetries: 0, retryDelay: 1, alertOnFailure: false,
             enableRespawn: false, fallbackModels: [],
           }
         },

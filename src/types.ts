@@ -208,6 +208,29 @@ export interface CostTimeline {
  * total containing a guess can no longer be compared against a budget
  * honestly.
  */
+/**
+ * One abandoned session, identified. The `uncollected` block used to project
+ * only `taskIds`, which threw away the `sessionID`, `agentId` and `model` that
+ * `UncollectedSpend` had been storing all along — so the one place the
+ * orchestrator admits it is under-billing could not say WHICH session, and a
+ * user could not go and look at it.
+ *
+ * `agentId` is the id the session HAD when we gave up on it, and after a
+ * timeout that agent has usually been terminated and removed from
+ * `this.agents`, so this row is very often an orphan. That is the point: it is
+ * the trail from "we are under-billing" to a session id that can be inspected.
+ */
+export interface UncollectedSpendEntry {
+  sessionID: string
+  taskId: string
+  /** The agent that owned this session at abandonment; may no longer exist. */
+  agentId: string
+  model: string
+  lastKnownTokens: number
+  /** Lower bound on this session's unbilled spend. See above. */
+  observedUncollected: number
+}
+
 export interface CostReportUncollected {
   /** How many sessions are still uncollected. */
   sessions: number
@@ -220,6 +243,11 @@ export interface CostReportUncollected {
   observedUncollected: number
   /** The DAG node ids whose sessions were abandoned. */
   taskIds: string[]
+  /**
+   * The same sessions, identified. `taskIds` is a projection of this and stays
+   * because it is what the existing consumers read; this is the full record.
+   */
+  entries: UncollectedSpendEntry[]
 }
 
 export interface AgentMessage {
