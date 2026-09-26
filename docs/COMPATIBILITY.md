@@ -32,28 +32,50 @@ The TUI plugin registers these slash commands in OpenCode's command palette:
 | `/nexus` | Main entry point; with an argument, one of the subcommands below |
 | `/nexus config`, `/nexus-config` | Configure models and budget |
 | `/nexus status`, `/nexus-status` | Show the config summary |
-| `/nexus dashboard`, `/nexus-dashboard` | Show a config/budget/dashboard-status overview. **It does not start or open anything** — despite the name, it prints text |
-| `/nexus web [port] [host]`, `/nexus-web` | Open the web dashboard, if one is already running (see below) |
+| `/nexus dashboard [port] [host]`, `/nexus-dashboard` | Start the web dashboard and open it in a browser (see below) |
+| `/nexus web [port] [host]`, `/nexus-web` | Alias of `/nexus dashboard` |
+| `/nexus overview`, `/nexus-overview` | Show a config/budget/dashboard-status overview. **It does not start or open anything** — it prints text |
 | `/nexus model <role>`, `/nexus-model` | Select the model for a role |
 | `/nexus reset`, `/nexus-reset` | Reset configuration to defaults |
 
-**`/nexus web` does not start the dashboard, and cannot.** The dashboard server
-runs in the OpenCode *server* process, beside the orchestrator whose state it
-serves; the TUI plugin runs in the *TUI* process and has no handle on either. So
-`/nexus web` asks `http://host:port/api/health` whether a nexus dashboard is
-already serving there, and then either opens your browser, or — if the port is
-free, or held by something that is not a dashboard — opens nothing and tells you
-the one call that does work, `nexus.dashboard.start(port=…, host=…)`. It never
-opens a browser at an address it has not confirmed.
+**The TUI process cannot start the dashboard, but it can reach the process that
+can.** The dashboard server runs in the OpenCode *server* process, beside the
+orchestrator whose state it serves; the TUI plugin runs in the *TUI* process and
+has no orchestrator, no module registry and no way to invoke a tool. It does have
+the OpenCode client, which is an HTTP client to that same server process — so
+`/nexus dashboard` submits `/nexus dashboard [port] [host]` as a prompt, and the
+server's `session.prompt` hook routes it to `orchestrator.handleCommand()`, which
+starts the server there.
+
+The command then asks `http://host:port/api/health` and acts on the answer:
+
+| What it found | What it does |
+|---|---|
+| A nexus dashboard | Opens your browser there. Nothing is started a second time |
+| Another process on that port | Says so, opens nothing, suggests another port |
+| Nothing there | Submits the start, then polls `/api/health` for a confirmed listen and opens the browser |
+| Still nothing after ~3s | Reports that the start did not confirm; opens nothing and offers no URL |
+
+It never opens a browser at an address it has not confirmed is serving a nexus
+dashboard. A failure (port in use, `dashboard.enabled: false`) is reported as
+what it is, with no URL in the message.
 
 **There is a second, unrelated `/nexus` in the prompt.** A prompt beginning
 `/nexus …` is intercepted by a `session.prompt` hook and routed to
 `orchestrator.handleCommand()`, which supports a different and much smaller set:
-`status`, `agents`, `costs`, `pause`, `resume`, and `dashboard`. That last one
-returns the orchestrator state as JSON — a state dump, not a dashboard, and it
-starts nothing. Anything else, including `/nexus web` typed into the composer,
-returns `Unknown command. Available: status, agents, costs, pause, resume,
-dashboard`. Use the TUI's `/nexus-web` for the web dashboard.
+`status`, `agents`, `costs`, `pause`, `resume`, `dashboard [port] [host]`,
+`dashboard stop` and `dashboard state`. `dashboard` starts the server and reports
+the address it bound; `dashboard state` returns the orchestrator state as JSON, a
+state dump rather than a dashboard. Anything else, including `/nexus web` typed
+into the composer, answers `Unknown command. Available: status, agents, costs,
+pause, resume, dashboard [port] [host], dashboard stop, dashboard state`.
+
+That hook cannot cancel the prompt: in `@opencode/plugin` the `prompt` hook
+callback returns `void` and `SessionPrompt` has no `result`/`cancel` field, unlike
+the `compaction` and `title` hooks, which do. So the hook sets
+`event.metadata.nexusResult` and replaces the prompt text with the command's
+result — the model reports what happened instead of being handed a bare
+`/nexus dashboard` and an answer it has no reason to read.
 
 ### Skills
 Nexus agent prompts (nexus-orchestrator, nexus-coder, etc.) are registered as OpenCode agents which function like Claude Code skills. Each agent has a specialized system prompt and permissions.

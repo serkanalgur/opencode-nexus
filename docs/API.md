@@ -130,9 +130,9 @@ editing any level takes effect without a restart.
 ```
 
 `dashboard.enabled` is **honoured**: `NexusOrchestrator.startDashboard()` refuses
-to start and names the key when it is `false`, and the TUI's `/nexus web` command
-reports the same reason instead of probing a port that is switched off. The
-other `dashboard` fields are the defaults for `startDashboard()`; explicit
+to start and names the key when it is `false`, and the TUI's `/nexus dashboard`
+command reports the same reason instead of probing a port that is switched off.
+The other `dashboard` fields are the defaults for `startDashboard()`; explicit
 arguments to that method still win.
 
 `saveProjectConfig` and `saveGlobalConfig` write `models`, `budget`,
@@ -229,6 +229,19 @@ isRunning(): boolean
 Whether this module currently holds a bound server. `true` immediately after a
 successful `start()`, `false` after `stop()` and after a failed `start()`.
 
+#### getAddress(): DashboardAddress | null
+
+```typescript
+getAddress(): DashboardAddress | null   // { host: string; port: number; url: string }
+```
+
+Where this module is actually serving, or `null` when it is not serving. The
+address is recorded only on a successful bind, from the arguments that were
+bound rather than from a later config read, so it cannot name an address this
+server is not listening on. `startDashboardServer()` in `src/dashboard-control.ts`
+uses it to tell a first start from a second one and to report the address the
+server bound.
+
 #### getClientCount(): number
 
 ```typescript
@@ -259,7 +272,7 @@ returns the CORS preflight response with no body.
 | `/api/config` | GET | `NexusConfigManager.exportConfig()`: the resolved config file, i.e. `models`, `budget`, `selfHealing` and `dashboard`. This is the CONFIG FILE's resolved form; `state.config` below is the orchestrator's view, which can differ while a run is in progress |
 | `/api/agents` | GET | The `agents` array of `OrchestratorState` |
 | `/api/costs` | GET | The object form of `getCostReport()` (that method returns a JSON *string*; it is parsed before serialising, so callers get an object, not a double-encoded one) |
-| `/api/health` | GET | `{ ok: true, uptime: number }` — `uptime` is `process.uptime()` of the dashboard's own process. This is also the probe the TUI's `/nexus web` uses to tell a dashboard from any other process on the port |
+| `/api/health` | GET | `{ ok: true, uptime: number }` — `uptime` is `process.uptime()` of the dashboard's own process. This is also the probe the TUI's `/nexus dashboard` uses to tell a dashboard from any other process on the port, and the only thing it will open a browser at |
 | `/ws/events` | GET (upgrade) | WebSocket upgrade; see below |
 | anything else | GET | The dashboard single-page app (the inlined `dashboard/index.html`) |
 

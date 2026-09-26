@@ -1887,7 +1887,12 @@
       + ' (' + fmtElapsed(age) + ' ago)';
     $lastRefresh.textContent = text;
     $lastRefresh.className = 'last-refresh' + (age > STALE_AFTER_MS ? ' stale' : '');
-    $lastRefresh.title = 'Snapshot received at ' + fmtTime(new Date(lastStateReceivedAt).toISOString())
+    // The server's own stamp, verbatim, alongside the received-at time. The two
+    // are different claims — one is when the snapshot was made, the other when
+    // this page heard about it — and a `title` is where a raw timestamp belongs:
+    // the visible line stays readable while the exact value stays checkable.
+    $lastRefresh.title = 'state.lastUpdated ' + (lastStateUpdated || 'not reported')
+      + '; received at ' + fmtTime(new Date(lastStateReceivedAt).toISOString())
       + '. ' + (ws && ws.readyState === WebSocket.OPEN
           ? 'Auto-refresh asks the server every ' + (AUTO_REFRESH_INTERVAL / 1000) + 's.'
           : 'Not connected: this may be the last state the server sent.');
@@ -2091,6 +2096,24 @@
     return String(err);
   }
 
+  /**
+   * A frame's own type, for an error message about that frame.
+   *
+   * Deliberately TOTAL: it is called from the render-failure path, where the
+   * page has already thrown once, so it must not be the thing that throws
+   * second. `msg` may be a non-object — a bare number, a string, `null` — so
+   * every step is narrowed through the same `asObject`/`text` gates the rest of
+   * the page uses rather than assumed. Mirrors `handleMessage`'s own
+   * `msg.type || msg.event` so the two cannot disagree about a frame's name.
+   */
+  function frameType(msg) {
+    var obj = asObject(msg);
+    if (obj === null) return 'untyped';
+    var type = text(obj.type);
+    if (type === null) type = text(obj.event);
+    return type === null ? 'untyped' : type;
+  }
+
   // ── Connection ──
   function setConnState(state) {
     $connBadge.className = 'connection-badge ' + state;
@@ -2136,11 +2159,34 @@
       }
     };
 
+    // Parse and render are TWO failures with TWO owners, so they are caught
+    // separately and reported separately.
+    //
+    // A single `try` around both meant a `TypeError` thrown by this page's own
+    // renderer was reported as "Non-JSON frame from server" — which points a
+    // reader at the server for a bug that is entirely in this file, and does so
+    // with a message that is simply false about a frame that parsed perfectly
+    // well. That misdiagnosis is what sent the investigation the wrong way when
+    // `renderState` started throwing on every push.
+    //
+    // The render failure names the frame's own type, so a log line says which
+    // message could not be drawn, and it is logged as an error rather than as
+    // server-side information. The parse failure stays an `info` line: an
+    // unparseable frame IS news about the server.
     ws.onmessage = function(evt) {
+      var msg;
       try {
-        handleMessage(JSON.parse(evt.data));
+        msg = JSON.parse(evt.data);
       } catch (e) {
         addLog('info', '📩', 'Non-JSON frame from server: ' + errorText(e));
+        return;
+      }
+      try {
+        handleMessage(msg);
+      } catch (e) {
+        addLog('error', '⚠️', 'Page failed to render a ' + frameType(msg)
+          + ' frame (this is a bug in the page, not a bad frame from the server): '
+          + errorText(e));
       }
     };
 
@@ -2216,8 +2262,8 @@
         break;
 
       case 'task:failed':
-        addLog('error', '❌', 'Task failed: ' + taskLabel(data) + ' — ' + errorOf(data));
-        addLogStream('error', 'FAIL', 'Task failed: ' + taskLabel(data) + ' — ' + errorOf(data));
+        addLog('error', '❌', 'Task failed: ' + taskFailedText(data));
+        addLogStream('error', 'FAIL', 'Task failed: ' + taskFailedText(data));
         break;
 
       case 'cost:delta':
@@ -2300,6 +2346,32 @@
     return e === null ? 'no error message reported' : e;
   }
 
+  /**
+   * A `task:failed` line: which task, why, and how long it took.
+   *
+   * `duration` was on the event and unread. It is the one field that separates
+   * the two failures a reader has to tell apart — a task that failed
+   * immediately and one that ran for minutes and then failed are the same line
+   * of text without it, and only the second is a hang worth chasing. The
+   * spawn-failure emit site reports `duration: 0` and omits the agent, model and
+   * session entirely rather than fabricating them, so a zero here is a real
+   * "the spawn itself failed", not a missing reading; it is printed as such
+   * rather than as a dash that would read as unreported.
+   *
+   * The rest of the payload — `role`, `agentId`, `model`, `sessionID` — is
+   * deliberately not read here. It is all in the throttled state push within a
+   * second and rendered on the Tasks and Agents sections, so a log line
+   * repeating it would be a second, staler copy of the same numbers. The line's
+   * job is to name the task and the cause, which is what you act on.
+   */
+  function taskFailedText(d) {
+    var ms = num(d.duration);
+    return taskLabel(d) + ' — ' + errorOf(d)
+      + (ms === null ? '' : ms === 0
+          ? ' (failed before any work — the spawn itself did not complete)'
+          : ' (after ' + fmtMs(ms) + ')');
+  }
+
   function escalationText(d) {
     return taskLabel(d) + ' on agent ' + (text(d.agentId) || 'unreported') + ' — ' + errorOf(d)
       + ' (retries and model fallback are exhausted; notifying)';
@@ -2332,15 +2404,33 @@
   }
 
   /**
-   * `config:reloaded` carries `NexusConfigLoadInfo`, so the useful part is which
-   * files were consulted, whether a session override is layered on top of them,
-   * and how many times this has loaded.
+   * `config:reloaded` carries `NexusConfigLoadInfo`. The useful part is not the
+   * timestamps.
+   *
+   * The line already said how many times this has loaded, when, and which files
+   * were consulted — and none of those answer the question a reader actually
+   * has, which is WHY it reloaded. A reload you did not cause is exactly the one
+   * worth explaining: `initial` is the process starting up, `event` is the
+   * filesystem watch firing, `poll` is the interval check noticing the same
+   * files changed. Without the trigger, a line appearing that nobody asked for
+   * reads as the orchestrator having changed its own mind.
+   *
+   * So the trigger leads, and the count of resolved models comes with it: after
+   * a reload the next question is always "did it pick up my change?", and a
+   * number of roles is the one thing that can be compared against the Models
+   * panel without reading the whole map back out of the config viewer.
    */
   function configReloadText(d) {
     var parts = [];
+    var trigger = text(d.trigger);
+    parts.push('trigger ' + (trigger === null ? 'unreported' : trigger));
     var count = num(d.loadCount);
     parts.push(count === null ? 'load count unreported' : 'load #' + fmtInt(count));
-    parts.push('loaded ' + fmtDateTime(d.loadedAt));
+    // The raw ISO, not a locale-formatted time. Every other line on this page
+    // carries raw server values, and a log line whose one timestamp is the only
+    // one a reader has to interpret by eye is the one they cannot grep.
+    var loadedAt = text(d.loadedAt);
+    parts.push('loaded ' + (loadedAt === null ? 'unreported' : loadedAt));
     if (typeof d.sessionOverride === 'boolean') {
       parts.push(d.sessionOverride ? 'session override layered on top of disk' : 'no session override');
     }
@@ -2348,6 +2438,15 @@
     if (project !== null) parts.push('project ' + configFileText(project));
     var global = asObject(d.global);
     if (global !== null) parts.push('global ' + configFileText(global));
+    // The map itself is shown by the config viewer and the Models panel, so what
+    // the log line carries is its SIZE — the checkable figure — rather than a
+    // truncated copy of it.
+    var models = asObject(d.models);
+    if (models !== null) {
+      var roles = Object.keys(models);
+      parts.push(roles.length + ' role' + (roles.length === 1 ? '' : 's') + ' resolved'
+        + (roles.length === 0 ? ' (empty map)' : ''));
+    }
     return parts.join(' · ');
   }
 
@@ -2371,27 +2470,129 @@
     return 'success';
   }
 
+  /**
+   * Which table priced this line, and which tier of it was selected.
+   *
+   * `settledTier` is on every `cost:delta`, and the page read none of it: each
+   * line showed an amount with nothing at all about where the amount came from.
+   * That matters because `settledTier.pricing` is a `PricingSource` —
+   * `model-costs` (a published price list for this model), `fallback-table` (a
+   * generic table, because this model is not in the list) or `unknown-model`.
+   *
+   * It is worth being precise about what this is and is not, because the page
+   * already has a measured/estimated distinction and it is easy to conflate the
+   * two. `settledTier.pricing` is about where the PRICE came from, not where
+   * the TOKEN COUNTS came from. The orchestrator reads the counts off a real
+   * session for this event, so the usage here is measured; what varies is
+   * whether the number was multiplied by this model's real price or by a
+   * stand-in. So the honest label is "priced by", never "estimated" — calling a
+   * fallback-priced figure "estimated" would be a different and wrong claim,
+   * and a `$0.42` off a generic table wearing a real price's clothes is exactly
+   * the confusion the Accounting panel and the unbilled bound exist to prevent
+   * on the other half of the page.
+   *
+   * `threshold` is the prompt size at which the tier table switches, and
+   * `promptSizeAtSettlement` is the size that selected the tier. Both are
+   * printed so a reader can see WHICH tier the amount was priced at rather than
+   * trusting that it was a sensible one. A null `threshold` is a real value and
+   * not a missing one: it is the base tier, which has no threshold to switch
+   * at, so it is named rather than reported as unreported.
+   *
+   * When `settledTier` itself is absent the line says so. The field is on the
+   * event, so its absence is a fact about this line, and omitting the clause
+   * would let a reader assume every line carries a price source when some do
+   * not.
+   */
+  function settledTierText(d) {
+    var tier = asObject(d.settledTier);
+    if (tier === null) return ' · price source NOT reported';
+    var threshold = num(tier.threshold);
+    var size = num(tier.promptSizeAtSettlement);
+    return ' · priced by ' + pricingSourceText(text(tier.pricing))
+      + ' at ' + (threshold === null ? 'the base tier' : 'the ' + fmtInt(threshold) + '-token tier')
+      + ' (' + (size === null ? 'prompt size at settlement unreported'
+        : fmtInt(size) + ' prompt tokens at settlement') + ')';
+  }
+
+  /**
+   * Plain words for a `PricingSource`.
+   *
+   * The server's own token is kept inside the string for every branch, so a
+   * source this build has never heard of is reported as unrecognised AND quoted
+   * rather than being quietly described as something it is not. That is the
+   * same rule the rest of the page follows for a value it does not recognise.
+   */
+  function pricingSourceText(source) {
+    if (source === 'model-costs') return "the model's published price list (" + source + ')';
+    if (source === 'fallback-table') {
+      return 'a FALLBACK price table, because this model is not in it (' + source + ')';
+    }
+    if (source === 'unknown-model') return 'an UNKNOWN-MODEL fallback price (' + source + ')';
+    return 'an unrecognised price source (' + (source === null ? 'unreported' : source) + ')';
+  }
+
   function costDeltaText(d) {
     var session = text(d.sessionID);
     var reason = text(d.reason);
     var delta = num(d.deltaCost);
+    var agent = text(d.agentId);
+    var model = text(d.model);
+    var tokens = num(d.deltaTokens);
+    // `nodeId` is deliberately NOT read: every emit site sets it to the same
+    // value as `taskId` (`nodeId: ledger.taskId`), so it is an alias rather
+    // than a second fact, and printing both would put two ids for one task on
+    // the line whenever they ever disagreed.
     var head = 'Session ' + (session === null ? 'unreported' : session)
-      + ' (' + taskLabel(d) + ')';
+      + (agent === null ? ' (agent unreported)' : ' on ' + agent)
+      + ' · ' + taskLabel(d)
+      + ' · ' + (model === null ? 'model unreported' : model);
+
+    // A dollar amount with no token count says nothing about magnitude — $0.25
+    // over three tokens and $0.25 over three million are the same string. The
+    // count is on the event and it is the only thing on this line that says how
+    // big the increment was.
+    var amount = ' · ' + (tokens === null ? 'token delta unreported' : fmtInt(tokens) + ' tok');
+
+    // A settlement can also have MOVED money after the fact. `recordsAdjusted`
+    // names which of the per-agent, per-task, history and performance records
+    // the increment was written into. That is worth saying on this page
+    // specifically, because the agent cost bars and the Spend card are built
+    // from exactly those records — so a line that rewrote them is the reason a
+    // total can move without a bill appearing, and saying nothing about it
+    // leaves the reader to conclude the numbers were wrong.
+    var corrections = '';
+    var adjusted = asObject(d.recordsAdjusted);
+    if (adjusted !== null) {
+      var moved = ['history', 'performance', 'node', 'agent'].filter(function(k) {
+        return adjusted[k] === true;
+      });
+      corrections = moved.length === 0
+        ? ' · no records adjusted'
+        : ' · corrected the ' + moved.join(', ') + ' record' + (moved.length === 1 ? '' : 's');
+    }
+    // A settlement that threw still bills. The line has to say the charge was
+    // made and the bookkeeping failed, because a dollar figure printed with no
+    // mention of the error beside it reads as a clean one.
+    var fault = text(d.error);
+    if (fault !== null) corrections += ' · SETTLEMENT ERROR: ' + fault;
+
     if (reason === 'abandoned') {
       var uncollected = asObject(d.uncollected);
       var lower = uncollected === null ? null : num(uncollected.observedUncollected);
       return head + ' ABANDONED — stopped collecting while still running; at least '
-        + fmt$(lower) + ' unbilled (lower bound)';
+        + fmt$(lower) + ' unbilled (lower bound)' + amount + corrections + settledTierText(d);
     }
     if (reason === 'shutdown') {
-      return head + ' charged at teardown, settlement unverified: ' + fmt$(delta);
+      return head + ' charged at teardown, settlement unverified: ' + fmt$(delta)
+        + amount + corrections + settledTierText(d);
     }
     if (reason === 'session-idle') {
       return head + ' went idle; settled ' + fmt$(delta) + ' (session total '
-        + fmt$(d.sessionTotalCost) + ')';
+        + fmt$(d.sessionTotalCost) + ')' + amount + corrections + settledTierText(d);
     }
     return head + ' ' + (reason === null ? 'reason unreported' : reason) + ': '
-      + fmt$(delta) + ' (session total ' + fmt$(d.sessionTotalCost) + ')';
+      + fmt$(delta) + ' (session total ' + fmt$(d.sessionTotalCost) + ')'
+      + amount + corrections + settledTierText(d);
   }
 
   // ── Render State ──
@@ -2407,6 +2608,28 @@
     var totalSpent = num(state.totalSpent);
     var budgetRemaining = num(state.budgetRemaining);
 
+    // Every DERIVED list is declared here, with the other derived values, and
+    // not beside the line that consumes it. `var` hoists the declaration but not
+    // the assignment, so a derived list written just below its first use is
+    // `undefined` at the moment it is read — which is a `TypeError` on the first
+    // property access, thrown on every state push and every auto-refresh tick,
+    // and therefore a page that renders nothing at all rather than a wrong
+    // number. That is exactly how the `liveAgents` count below used to be
+    // written, and it is invisible to a grep: nothing type-checks this file, so
+    // `test/dashboard-page-execution.test.ts` runs the page instead of reading it.
+    var liveAgents = agents.filter(function(a) { return asObject(a) !== null; });
+    var activeCount = liveAgents.filter(function(a) { return a.status === 'working'; }).length;
+    var liveTasks = tasks.filter(function(t) { return asObject(t) !== null; });
+    var runningTasks = liveTasks.filter(function(t) {
+      return t.status === 'running' || t.status === 'queued';
+    }).length;
+    var completedTasks = liveTasks.filter(function(t) { return t.status === 'completed'; }).length;
+    var failedTasks = liveTasks.filter(function(t) { return t.status === 'failed'; }).length;
+    // Same derivation the Sessions section uses for its header and its orphan
+    // banner, so the overview card and the section cannot print two different
+    // answers to "how many sessions, and is any of them leaking".
+    var sessionTally = sessionCensus(sessions);
+
     renderLifecycle(state);
 
     // ── Overview Stats ──
@@ -2415,8 +2638,6 @@
     // so a total that included entries the page cannot render would contradict
     // the caveat printed directly beneath it.
     $statAgents.textContent = String(liveAgents.length);
-    var liveAgents = agents.filter(function(a) { return asObject(a) !== null; });
-    var activeCount = liveAgents.filter(function(a) { return a.status === 'working'; }).length;
     // Both figures from `liveAgents`, not one from `agents`: the count beside
     // the total has to be arithmetic the reader can do in their head, and
     // `agents.length - activeCount` mixing the two lists made the sub-line
@@ -2432,15 +2653,30 @@
     $statAgentsSub.textContent = activeCount + ' working · '
       + (liveAgents.length - activeCount) + ' not working (live agents only)';
 
-    var liveTasks = tasks.filter(function(t) { return asObject(t) !== null; });
-    var runningTasks = liveTasks.filter(function(t) {
-      return t.status === 'running' || t.status === 'queued';
-    }).length;
-    var completedTasks = liveTasks.filter(function(t) { return t.status === 'completed'; }).length;
-    var failedTasks = liveTasks.filter(function(t) { return t.status === 'failed'; }).length;
     $statTasks.textContent = String(tasks.length);
     $statTasksSub.textContent = runningTasks + ' running/queued · ' + completedTasks + ' done'
       + (failedTasks > 0 ? ' · ' + failedTasks + ' failed' : '');
+
+    // The Sessions card. It sat at `—` with "No sessions reported" printed
+    // beneath it for the whole life of the card, while the Sessions SECTION
+    // further down the same page rendered the same list perfectly well —
+    // `$statSessions` and `$statSessionsSub` were resolved by `getElementById`
+    // at load and never assigned by any render path.
+    //
+    // The reason it shipped is worth recording, because it is the same reason
+    // the `liveAgents` use-before-declaration shipped: a grep cannot tell "reads
+    // the field somewhere" from "fills this element". The static contract test's
+    // required-field list contains `sessions`, the page does read
+    // `state.sessions` (in `renderSessions`), so every source-level assertion
+    // passed over a card that never received a value. The assertion that was
+    // missing is a rendered-output one, and it now lives in
+    // `dashboard-page-execution.test.ts`: the card is checked for the VALUE the
+    // section shows, not for the absence of an exception.
+    //
+    // The headline is the raw array length — the same figure the section header
+    // prints — so the two can never disagree about how many sessions exist.
+    $statSessions.textContent = String(sessionTally.total);
+    $statSessionsSub.textContent = sessionsSub(sessionTally);
 
     $statSpent.textContent = fmt$(totalSpent);
     $statSpentSub.textContent = maxTotalCost === null
@@ -2539,6 +2775,94 @@
     return s.owned !== true || s.agentId === null;
   }
 
+  /**
+   * The session figures, derived ONCE per render and read by two surfaces.
+   *
+   * `$statSessions` (the overview card) and `renderOrphanBanner` (the section
+   * alarm) answer the same question — is any session spending with nobody
+   * watching it? — and they are printed on the same page. If each counted its
+   * own, a future edit to one would put "0 unowned" on the card above "3
+   * running with no owning agent" in the banner, and both halves would still
+   * look correct on their own. So they share a derivation.
+   *
+   * `total` is the RAW array length, deliberately, because that is exactly what
+   * the Sessions section header prints. The card and the section must not be
+   * able to disagree about how many sessions exist, and the entries that are
+   * not objects are therefore counted as `unreported` rather than quietly
+   * dropped from a partition — see `sessionsSub`.
+   */
+  function sessionCensus(sessions) {
+    var all = asArray(sessions);
+    var running = 0;
+    var abandoned = 0;
+    var unowned = 0;
+    var unownedRunning = 0;
+    var unownedRunningIds = [];
+    var live = 0;
+    for (var i = 0; i < all.length; i++) {
+      var s = asObject(all[i]);
+      if (s === null) continue;
+      live++;
+      if (s.state === 'running') running++;
+      if (s.state === 'abandoned') abandoned++;
+      if (sessionIsOrphan(s)) {
+        unowned++;
+        // The one combination the whole view exists for: still generating, and
+        // the agent that owned it has been deleted, so its spend is collected
+        // by nobody. Counted apart from `unowned` because "unowned" alone
+        // reads as a bookkeeping state and this is a leak.
+        if (s.state === 'running') {
+          unownedRunning++;
+          unownedRunningIds.push(text(s.id) || 'unreported');
+        }
+      }
+    }
+    return {
+      total: all.length,
+      live: live,
+      unreported: all.length - live,
+      running: running,
+      abandoned: abandoned,
+      unowned: unowned,
+      unownedRunning: unownedRunning,
+      unownedRunningIds: unownedRunningIds
+    };
+  }
+
+  /**
+   * The overview card's sub-line for Sessions.
+   *
+   * Two constraints, and the second is the one that is easy to get wrong:
+   *
+   *   1. Every clause must be arithmetic the reader can check against the
+   *      headline above it. `running` and `abandoned` are disjoint slices of
+   *      the live sessions, and the entries that are not objects are stated
+   *      rather than dropped, so the figure above is always reachable from the
+   *      clauses beneath it. The `unowned` count is the ONE overlapping clause
+   *      and says so in its own wording, because an abandoned session is also
+   *      unowned.
+   *   2. It must not imply a healthy fleet. `owned: false` on a RUNNING session
+   *      is not a session that finished — it is a session still generating with
+   *      the agent that owned it deleted. Rolling those into a bare "running"
+   *      total is exactly what would make a leaking fleet read as healthy, so
+   *      the still-running unowned count is a clause of its own and is placed
+   *      after the terminal-state counts rather than buried in a suffix.
+   */
+  function sessionsSub(census) {
+    if (census.total === 0) return 'No sessions reported';
+    var parts = [census.running + ' running', census.abandoned + ' abandoned'];
+    if (census.unowned > 0) {
+      parts.push(census.unowned + ' with no owning agent'
+        + (census.unownedRunning > 0
+            ? ' (' + census.unownedRunning + ' still running)'
+            : ' (all finished)'));
+    }
+    if (census.unreported > 0) {
+      parts.push(census.unreported + ' unreported');
+    }
+    return parts.join(' · ');
+  }
+
   function sessionPassesFilter(s) {
     if (s === null || s === undefined) return false;
     if (sessionFilter === 'all') return true;
@@ -2562,8 +2886,9 @@
 
   function renderSessions(sessions) {
     sessions = asArray(sessions);
-    $sessionCount.textContent = String(sessions.length);
-    renderOrphanBanner(sessions);
+    var census = sessionCensus(sessions);
+    $sessionCount.textContent = String(census.total);
+    renderOrphanBanner(census);
 
     if (sessions.length === 0) {
       $sessionsContainer.innerHTML = '<div class="empty-message">'
@@ -2587,7 +2912,8 @@
 
     var html = '<table class="session-table"><thead><tr>'
       + '<th>Session</th><th>Owner</th><th>Task</th><th>Role</th><th>Model</th>'
-      + '<th>State</th><th class="num">Last read tokens</th><th class="num">Unbilled (≥)</th>'
+      + '<th>State</th><th class="num">Age</th><th class="num">Last read tokens</th>'
+      + '<th class="num">Unbilled (≥)</th>'
       + '</tr></thead><tbody>';
     for (var i = 0; i < shown.length; i++) {
       html += sessionRow(asObject(shown[i]));
@@ -2636,6 +2962,7 @@
       + '<td class="mono">' + escHtml(text(s.model) || '—') + '</td>'
       + '<td><span class="session-state ' + escHtml(text(s.state) || 'unknown') + '">'
         + escHtml(text(s.state) || 'unreported') + '</span></td>'
+      + sessionAgeCell(s)
       + '<td class="num" title="The last token count actually observed for this session. Not a live reading.">'
         + (unread ? '—' : fmtInt(tokens)) + '</td>'
       + '<td class="num" title="Lower bound on what this session spent unbilled. A lower bound, not a total; excluded from Spend.">'
@@ -2644,37 +2971,81 @@
   }
 
   /**
+   * How long a session has existed, as its own cell.
+   *
+   * `SessionStateView.spawnedAt` is documented as "from the owning agent. null
+   * for an orphan" — and an unowned session is exactly the row this view exists
+   * for. So the cell reads `—` on precisely the sessions a user most needs
+   * dated. That is worth SHOWING rather than omitting: an undated leak is
+   * visible, and the banner above the table says why it is undated, so the
+   * absence cannot pass for "started a moment ago". Omitting the column would
+   * have left that gap invisible, which is how it survived in the first place.
+   *
+   * The agent grid already prints its own `spawnedAt`, so leaving this one out
+   * also made the two sections of the same page inconsistent about the same
+   * field of the same object.
+   *
+   * The cell shows ELAPSED time rather than a wall clock because what makes a
+   * session's age matter is how long it has outlived its agent — a five-minute
+   * leak and a five-hour one are different incidents, and only the elapsed
+   * figure answers that. The raw ISO is on the `title`, which is where an
+   * unambiguous value belongs and which is also what the execution test reads,
+   * since an elapsed duration is not a stable string to assert on.
+   */
+  function sessionAgeCell(s) {
+    var iso = text(s.spawnedAt);
+    if (iso === null) {
+      return '<td class="num" title="SessionStateView.spawnedAt was not reported for this session.'
+        + ' It comes from the owning agent, so it is null for an unowned session.">—</td>';
+    }
+    var at = new Date(iso);
+    if (isNaN(at.getTime())) {
+      return '<td class="num" title="SessionStateView.spawnedAt is not a readable timestamp: '
+        + escHtml(iso) + '">—</td>';
+    }
+    // A snapshot whose clock runs ahead of this one must not produce a negative
+    // age, which would read as a session from the future.
+    var age = Date.now() - at.getTime();
+    if (age < 0) age = 0;
+    return '<td class="num" title="state.sessions[].spawnedAt ' + escHtml(iso) + '">'
+      + escHtml(fmtElapsed(age)) + '</td>';
+  }
+
+  /**
    * The section-level alarm. It fires on the specific combination that is the
    * point of the whole view: a session that is still running, has no owning
    * agent, and is therefore spending into nothing.
+   *
+   * Takes the shared `sessionCensus` rather than the raw list, so this banner
+   * and the overview card are counting from one derivation and cannot drift
+   * apart.
    */
-  function renderOrphanBanner(sessions) {
-    var leaking = [];
-    var abandoned = 0;
-    for (var i = 0; i < sessions.length; i++) {
-      var s = asObject(sessions[i]);
-      if (s === null) continue;
-      if (s.state === 'abandoned') abandoned++;
-      if (sessionIsOrphan(s) && s.state === 'running') leaking.push(s);
-    }
+  function renderOrphanBanner(census) {
+    var leaking = census.unownedRunning;
+    var abandoned = census.abandoned;
 
-    if (leaking.length === 0 && abandoned === 0) {
+    if (leaking === 0 && abandoned === 0) {
       $orphanBanner.innerHTML = '';
       return;
     }
 
     var parts = [];
-    if (leaking.length > 0) {
-      var ids = leaking.map(function(s) { return text(s.id) || 'unreported'; });
+    if (leaking > 0) {
       parts.push(
         '<div class="orphan-banner">'
         + '<span class="icon">🔓</span><div>'
-        + '<div class="title">' + leaking.length + ' running session' + (leaking.length === 1 ? '' : 's')
+        + '<div class="title">' + leaking + ' running session' + (leaking === 1 ? '' : 's')
         + ' with no owning agent</div>'
         + '<div class="body">These sessions are still generating after the agent that owned '
         + 'them was terminated. Whatever they spend is not being collected, and the server '
-        + 'keeps them in view so you can terminate them.</div>'
-        + '<div class="detail">Session ids: <span class="mono">' + escHtml(ids.join(', ')) + '</span></div>'
+        + 'keeps them in view so you can terminate them. '
+        + '<strong>The Age column reads &mdash; for these rows:</strong> a session with no owning '
+        + 'agent has no owning agent to carry a spawn time, so <code>SessionStateView.spawnedAt</code> '
+        + 'is null for exactly the sessions whose age you most want. How long these have been '
+        + 'leaking is not on this snapshot.'
+        + '</div>'
+        + '<div class="detail">Session ids: <span class="mono">'
+        + escHtml(census.unownedRunningIds.join(', ')) + '</span></div>'
         + '</div></div>');
     }
     if (abandoned > 0) {
@@ -2733,7 +3104,8 @@
       html += '<div class="agent-meta" title="Resolved model">📦 ' + escHtml(text(a.model) || 'model unreported') + '</div>';
       html += '<div class="agent-meta"><span>🔗</span><span class="mono">'
         + (sessionId === null ? 'no session id reported' : escHtml(sessionId)) + '</span></div>';
-      html += '<div class="agent-meta" title="state.agents[].spawnedAt">🕑 spawned '
+      html += '<div class="agent-meta" title="state.agents[].spawnedAt '
+        + escHtml(text(a.spawnedAt) || 'not reported') + '">🕑 spawned '
         + escHtml(fmtDateTime(a.spawnedAt)) + '</div>';
 
       html += '<div class="agent-metrics">';

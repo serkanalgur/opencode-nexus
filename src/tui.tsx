@@ -229,7 +229,7 @@ export function mergeSidebarAgents(
 // having a test on has to be reachable without one.
 //
 // WHAT THIS CANNOT DO, and why that matters enough to be a design constraint
-// rather than a limitation to apologise for: it cannot start the server.
+// rather than a limitation to apologise for: it cannot start the server itself.
 //
 // The TUI plugin (`@opencode/plugin/tui`, shipped as `dist/tui.js`) runs in the
 // TUI process. The orchestrator, and therefore the only `DashboardModule` that
@@ -240,6 +240,14 @@ export function mergeSidebarAgents(
 // mean spawning a second, empty server in the TUI process, which would answer
 // `/api/state` with an orchestrator that does not exist and render an empty
 // dashboard on the very port the real one wants.
+//
+// What it CAN do is reach the server: the OpenCode client on the context is an
+// HTTP client to the same server process the orchestrator lives in, and
+// `session.prompt` on it lands in that process's prompt hook — which is
+// `orchestrator.handleCommand`. So `deps.submitCommand()` below submits
+// `/nexus dashboard [port] [host]` as one action, and the server starts the
+// server. The TUI's remaining job is the half only it can do: confirm the
+// listen happened before a browser is pointed at it.
 //
 // The previous behaviour was worse than doing nothing: it shelled out to
 // `open`/`start`/`xdg-open` unconditionally, so the browser was ALWAYS pointed
@@ -320,19 +328,28 @@ export async function probeDashboard(
   }
 }
 
-/** The address a `/nexus web [port] [host]` argument resolves to. */
+/** The address a `/nexus dashboard [port] [host]` argument resolves to. */
 export interface WebDashboardTarget {
   port: number
   host: string
 }
 
 /**
- * Parse a `/nexus web` argument against the configured defaults.
+ * Parse a `[port] [host]` argument against the configured defaults.
  *
  * Accepts a bare port, `port host`, or nothing. Returns an error string rather
  * than a coerced number for an unparseable port: `parseInt("abc")` is `NaN`,
  * and `NaN` used to reach a URL as the literal text `NaN`, which is a
  * connection failure whose cause is invisible in the address that failed.
+ *
+ * DELIBERATELY NOT THE SAME FUNCTION as `parseDashboardTarget()` in
+ * `src/dashboard.ts`, which parses the identical argument for
+ * `handleCommand("/nexus dashboard …")` on the server. Importing that module
+ * here would inline `dashboard/index.html` — 150 KB of page markup — into
+ * `dist/tui.js`, which serves no dashboard and would never read a byte of it.
+ * Fifteen lines of parser is a cheaper price than that, and the two are pinned
+ * by the same test so a change to one that is not made to the other is a
+ * failing test rather than a silent disagreement about what a port is.
  */
 export function parseWebDashboardTarget(
   input: string | undefined,
@@ -358,28 +375,74 @@ export function parseWebDashboardTarget(
   return { target: { port, host } }
 }
 
-/** What the TUI needs from its host to run the `web` command. */
+/**
+ * How long to wait for the server to confirm a listen before telling the user
+ * it did not, and how often to ask.
+ *
+ * Bounds matter here in both directions. Too short and a start that succeeded is
+ * reported as a failure the user then has to disbelieve; too long and a bind
+ * failure leaves the TUI looking hung for the whole window. A bind is
+ * sub-millisecond and the prompt that triggers it is a local HTTP call, so
+ * three seconds is generous for the success case and short enough that the
+ * failure case does not feel like a hang.
+ *
+ * WHAT THAT THREE SECONDS ASSUMES, because the number is only as good as it is.
+ * It assumes `submitCommand` resolves when the server has ACCEPTED the prompt,
+ * not when the model has finished answering it. That is the reading the API
+ * supports: `session.prompt` resolves with a `SessionInboxUser` — an inbox item
+ * carrying a `delivery` — which is an acknowledgement that the message is
+ * queued, and `SessionPromptInput` exposes no `await`/`async` flag for asking
+ * the model to block on the turn. If that reading is wrong and the promise in
+ * fact settles after the model turn, this window is not the whole cost: the
+ * `await` on the submit above then carries model latency, and the failure toast
+ * can appear minutes after the keystroke, with the ~3s in `README.md` and
+ * `docs/COMPATIBILITY.md` understating it. The window is a bound on the POLL,
+ * and only the poll.
+ */
+export const LISTEN_CONFIRM_ATTEMPTS = 15
+export const LISTEN_CONFIRM_INTERVAL_MS = 200
+
+/** What the TUI needs from its host to run the dashboard commands. */
 export interface WebDashboardDeps {
   /** The configured dashboard block — the same one the start gate reads. */
   dashboard: { enabled: boolean; port: number; host: string }
   showToast(options: { title: string; message: string; variant: "info" | "success" | "warning" | "error"; duration?: number }): void
   openBrowser(url: string): Promise<void> | void
+  /**
+   * Hand text to the OpenCode server process, where the plugin's prompt hook
+   * routes a `/nexus …` command to `orchestrator.handleCommand`. This is the
+   * only channel from the TUI to the orchestrator, and submitting the command
+   * is what makes one keystroke start the server instead of describing how to.
+   */
+  submitCommand(text: string): Promise<void> | void
   fetchImpl?: typeof fetch
+  /** Injected so a test does not have to wait three real seconds. */
+  waitImpl?: (ms: number) => Promise<void>
+  confirmAttempts?: number
+  confirmIntervalMs?: number
+}
+
+function defaultWait(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 /**
- * The one implementation behind both `/nexus web` entry points.
+ * The one implementation behind `/nexus dashboard` and `/nexus web`.
  *
  * Never opens a browser at an address it has not confirmed is serving a nexus
- * dashboard. The three refusals are all deliberate, and each says which of them
+ * dashboard. The four outcomes are all deliberate, and each says which of them
  * happened:
  *
  * 1. disabled by config — nothing will ever listen, so say which key says so
  *    and stop, rather than probing a port the user has switched off.
- * 2. something else on the port — a bind would fail, and opening a browser at
- *    the other process's page would be a worse answer than a clear error.
- * 3. nothing on the port — the ordinary case, and the one this command exists
- *    for: point the user at the single tool call that does work.
+ * 2. already serving a dashboard — the address is live, so open it, and say
+ *    that nothing was started a second time.
+ * 3. something else on the port — a bind would fail and the other process's
+ *    page is not the dashboard, so open nothing and say which of those it is.
+ * 4. nothing on the port — the ordinary case. Submit `/nexus dashboard [port]
+ *    [host]` to the server, then WAIT for a confirmed listen before opening a
+ *    browser. A start that fails comes back as "no dashboard within the
+ *    window", with no URL offered and no claim that anything opened.
  */
 export async function handleWebDashboard(
   input: string | undefined,
@@ -418,7 +481,7 @@ export async function handleWebDashboard(
     await deps.openBrowser(url)
     deps.showToast({
       title: "⚡ Nexus Web Dashboard",
-      message: `Opened ${url} — a dashboard is already running there.`,
+      message: `Opened ${url} — a dashboard is already running there, so nothing was started.`,
       variant: "success",
       duration: 6000,
     })
@@ -440,21 +503,69 @@ export async function handleWebDashboard(
     return
   }
 
+  // Nothing is listening and nothing is squatting, so this is the one case where
+  // a start is the right answer. The start itself happens in the server
+  // process, one command away; everything after this line is the TUI refusing
+  // to believe it until the port answers.
+  let submitted: string
+  try {
+    await deps.submitCommand(`/nexus dashboard ${port} ${host}`)
+    submitted = `/nexus dashboard ${port} ${host}`
+  } catch (error: unknown) {
+    const detail = error instanceof Error ? error.message : String(error)
+    deps.showToast({
+      title: "Nexus Web Dashboard — could not start",
+      message: [
+        `The dashboard start command never reached the OpenCode server: ${detail}`,
+        "",
+        "No server is listening on that port and no browser was opened.",
+        "The dashboard runs in the server process, so this needs the server's",
+        "HTTP endpoint to be reachable from the TUI.",
+      ].join("\n"),
+      variant: "error",
+      duration: 15000,
+    })
+    return
+  }
+
+  const wait = deps.waitImpl ?? defaultWait
+  const attempts = deps.confirmAttempts ?? LISTEN_CONFIRM_ATTEMPTS
+  const intervalMs = deps.confirmIntervalMs ?? LISTEN_CONFIRM_INTERVAL_MS
+
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (attempt > 0) await wait(intervalMs)
+    // A refusal here is the ordinary "not up yet" answer, so the loop asks
+    // again; anything else is a real transport problem and is reported as one
+    // rather than retried into a generic timeout.
+    const check = await probeDashboard(host, port, deps.fetchImpl)
+    if (check.isNexusDashboard) {
+      await deps.openBrowser(url)
+      deps.showToast({
+        title: "⚡ Nexus Web Dashboard",
+        message: `Started and opened ${url} — a dashboard is serving there now.`,
+        variant: "success",
+        duration: 8000,
+      })
+      return
+    }
+  }
+
   deps.showToast({
-    title: "⚡ Nexus Web Dashboard",
+    title: "Nexus Web Dashboard — not started",
     message: [
-      `No dashboard is running on ${url} (${probe.detail}), and no browser was opened.`,
+      `Ran \`${submitted}\`, but nothing is serving on ${host}:${port} after ${Math.round((attempts * intervalMs) / 1000)}s,`,
+      "so no browser was opened and there is no URL to give you.",
       "",
-      "The dashboard server cannot be started from the TUI: it runs in the OpenCode",
-      "server process, next to the orchestrator that feeds it, and the TUI has no",
-      "handle on either. So start it from the agent — this is the one call:",
-      "",
-      `  nexus.dashboard.start(port=${port}, host="${host}")`,
-      "",
-      `Then re-run /nexus web and it will open ${url} for you.`,
+      "The command runs in the OpenCode server process, which is the only place",
+      "the dashboard can start. If a Nexus plugin is active in that process, its",
+      `result is in this session as the reply to \`${submitted}\` — that text names`,
+      "the reason (a port already in use, or `dashboard.enabled: false`). If no",
+      "plugin is active there, the command was never handled at all. If the port",
+      "is held by another process, free it or pass a different one:",
+      "/nexus web 4748.",
     ].join("\n"),
-    variant: "info",
-    duration: 15000,
+    variant: "error",
+    duration: 20000,
   })
 }
 
@@ -587,27 +698,58 @@ export default Plugin.define({
       })
     }
 
-    // Web dashboard handler - probes, and opens a browser only against a
-    // confirmed dashboard. See the note above `handleWebDashboard` for why the
-    // TUI cannot start the server itself. The address it probes comes from the
-    // SAME config the start gate reads, so the TUI and the tool agree on the
-    // port, the host, and whether the dashboard is switched off at all.
+    // The session a command submitted from the TUI has to land in: the one the
+    // user is looking at. The route is the authority — it is what the TUI is
+    // showing — with the active tab as the fallback for the home screen, where
+    // there is no session route but there is still a session to submit to.
+    const activeSessionID = (): string | undefined => {
+      const route = context.ui.router.current()
+      if (route.type === "session") return route.sessionID
+      return context.ui.tabs.list().find(tab => tab.active)?.sessionID
+    }
+
+    /**
+     * Hand a `/nexus …` command to the OpenCode server, which is the process
+     * that owns the orchestrator. This is the whole reason `/nexus dashboard`
+     * can start the server: the TUI cannot, and the server's prompt hook routes
+     * the text to `orchestrator.handleCommand`.
+     *
+     * Throws on a missing session so the caller can say "the command never
+     * reached the server" rather than reporting a start that never happened.
+     */
+    const submitServerCommand = async (text: string) => {
+      const sessionID = activeSessionID()
+      if (!sessionID) {
+        throw new Error("no session is open to run the command in")
+      }
+      await context.client.session.prompt({ sessionID, text })
+    }
+
+    // Web dashboard handler - starts the server through the server process, and
+    // opens a browser only against a confirmed listen. See the note above
+    // `handleWebDashboard` for why the TUI cannot start the server itself and
+    // what it uses instead. The address it probes comes from the SAME config
+    // the start gate reads, so the TUI and the tool agree on the port, the
+    // host, and whether the dashboard is switched off at all.
     const runWebDashboard = async (input?: string) => {
       await handleWebDashboard(input, {
         dashboard: configManager.getConfig().dashboard,
         showToast: options => context.ui.toast.show(options),
         openBrowser: openInBrowser,
+        submitCommand: submitServerCommand,
       })
     }
 
     // Config summary handler.
     //
-    // Renamed from `handleDashboard`, and the toast title with it: it prints
-    // the resolved config, and nothing about it starts, serves or connects to a
-    // dashboard. Calling that a "Dashboard" is the same false promise as the
-    // old `web` behaviour, one layer over — a user who runs it expecting a
-    // window has been told the feature exists when it has not been invoked.
-    const handleDashboard = async () => {
+    // Renamed twice over, and both renames are the same fix. It used to be
+    // `handleDashboard` printing a config summary, and calling that a
+    // "Dashboard" was the old `web` behaviour one layer over — a user who runs
+    // it expecting a window has been told the feature exists when it has not
+    // been invoked. It is `handleOverview` now, and `/nexus dashboard` is spent
+    // on the command that starts one, because a name that means two things
+    // resolves to whichever the user happened to try first.
+    const handleOverview = async () => {
       const config = configManager.getConfig()
       const lines = [
         "⚡ Nexus Overview",
@@ -636,7 +778,9 @@ export default Plugin.define({
       lines.push("  /nexus status   - Show config summary")
       lines.push("  /nexus config   - Configure models & budget")
       lines.push("  /nexus model    - Select model for role")
-      lines.push("  /nexus web      - Open the web dashboard, if one is running")
+      lines.push("  /nexus dashboard - Start the web dashboard and open it")
+      lines.push("  /nexus web      - Same: start it if needed, then open it")
+      lines.push("  /nexus overview - Show this overview")
       lines.push("  /nexus reset    - Reset to defaults")
       lines.push("")
       lines.push("🔧 Tools (use in agent prompt):")
@@ -649,7 +793,7 @@ export default Plugin.define({
       lines.push("📊 Web Dashboard:")
       lines.push(`  Enabled: ${config.dashboard.enabled ? '✅' : '❌'}`)
       lines.push(`  Address: http://${config.dashboard.host}:${config.dashboard.port} (when running)`)
-      lines.push("  Not running? Ask the agent for nexus.dashboard.start, then /nexus web.")
+      lines.push("  Not running? /nexus dashboard starts it and opens it.")
 
       context.ui.toast.show({
         title: "Nexus Overview",
@@ -696,15 +840,21 @@ export default Plugin.define({
                       break
                     case 'dashboard':
                     case 'd':
-                      await handleDashboard()
+                      // Start it and open it. The start is the server's; see
+                      // `handleWebDashboard`.
+                      await runWebDashboard(parts.slice(1).join(' '))
+                      break
+                    case 'overview':
+                      await handleOverview()
                       break
                     case 'web':
                     case 'w':
                       // A delegate, not a second implementation. `/nexus web
-                      // [port] [host]` and the `/nexus-web` palette command used
-                      // to be two code paths that disagreed — this one shelled
-                      // out to `open` and the other only showed a toast, and
-                      // neither started anything. One behaviour, one place.
+                      // [port] [host]`, `/nexus dashboard [port] [host]` and the
+                      // palette commands used to be code paths that disagreed
+                      // — one shelled out to `open`, another only showed a
+                      // toast, and none started anything. One behaviour, one
+                      // place.
                       await runWebDashboard(parts.slice(1).join(' '))
                       break
                     case 'model':
@@ -743,7 +893,7 @@ export default Plugin.define({
                     default:
                       context.ui.toast.show({
                         title: "Nexus",
-                        message: "Commands: config, status, dashboard, web [port], model <role>, reset",
+                        message: "Commands: config, status, dashboard [port], web [port], overview, model <role>, reset",
                         variant: "info"
                       })
                   }
@@ -765,21 +915,34 @@ export default Plugin.define({
               }
             },
             {
-              id: "nexus.dashboard",
+              id: "nexus.overview",
               title: "Nexus Overview (config, budget, dashboard status)",
+              group: "Nexus",
+              palette: true,
+              slash: { name: "nexus-overview", aliases: ["no"], arguments: true },
+              enabled: () => true,
+              suggested: true,
+              run: async () => {
+                await handleOverview()
+              }
+            },
+            {
+              id: "nexus.dashboard",
+              title: "Start the Nexus Web Dashboard",
+              description: "Starts the dashboard server if it is not already running, then opens it in your browser",
               group: "Nexus",
               palette: true,
               slash: { name: "nexus-dashboard", aliases: ["nd"], arguments: true },
               enabled: () => true,
               suggested: true,
-              run: async () => {
-                await handleDashboard()
+              run: async (input?: string) => {
+                await runWebDashboard(input)
               }
             },
             {
               id: "nexus.web",
               title: "Open the Nexus Web Dashboard",
-              description: "Open the dashboard in your browser if one is already serving; otherwise say how to start it",
+              description: "Alias of Nexus Dashboard: starts it if needed, then opens it in your browser",
               group: "Nexus",
               palette: true,
               slash: { name: "nexus-web", aliases: ["nw"], arguments: true },

@@ -15,6 +15,7 @@ mock.module('node:os', () => ({ ...realOs, default: realOs, homedir: () => SANDB
 
 const { NexusOrchestrator } = await import('../src/orchestrator')
 const { NexusConfigManager } = await import('../src/config')
+const { parseDashboardTarget } = await import('../src/dashboard')
 const { DASHBOARD_START_DESCRIPTION, DASHBOARD_STOP_DESCRIPTION, runDashboardStart, runDashboardStop } =
   await import('../src/index')
 const { handleWebDashboard, parseWebDashboardTarget, probeDashboard } = await import('../src/tui')
@@ -184,6 +185,177 @@ describe('dashboard entry points', () => {
     })
   })
 
+  describe('handleCommand("/nexus dashboard") — the server-side start', () => {
+    // This is the surface the TUI's `/nexus-dashboard` reaches: it submits this
+    // text to the server process, and the server's prompt hook calls
+    // `handleCommand`. So "does this start anything" is a public-ish behaviour,
+    // not an internal detail of a tool.
+    it('starts a server and prints the address it bound', async () => {
+      const dir = projectWithDashboard({ enabled: true, port: 14991, host: '127.0.0.1' })
+      cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+      const orchestrator = makeOrchestrator(dir)
+
+      try {
+        const result = orchestrator.handleCommand('/nexus dashboard')
+
+        expect(result).toContain('Dashboard started at http://127.0.0.1:14991')
+        expect(orchestrator.dashboard?.isRunning()).toBe(true)
+        // Started means serving, not merely constructed: this is the same
+        // property the TUI waits on before it opens a browser.
+        expect((await probeDashboard('127.0.0.1', 14991, fetch)).isNexusDashboard).toBe(true)
+      } finally {
+        orchestrator.shutdown()
+      }
+    })
+
+    it('takes an explicit port and host', async () => {
+      const dir = projectWithDashboard({ enabled: true, port: 14990, host: '127.0.0.1' })
+      cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+      const orchestrator = makeOrchestrator(dir)
+
+      try {
+        const result = orchestrator.handleCommand('/nexus dashboard 14989 127.0.0.1')
+        expect(result).toContain('http://127.0.0.1:14989')
+        expect(orchestrator.dashboard?.getAddress()?.port).toBe(14989)
+      } finally {
+        orchestrator.shutdown()
+      }
+    })
+
+    it('says a second start did not start a second server', async () => {
+      const dir = projectWithDashboard({ enabled: true, port: 14988, host: '127.0.0.1' })
+      cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+      const orchestrator = makeOrchestrator(dir)
+
+      try {
+        orchestrator.handleCommand('/nexus dashboard')
+        const first = orchestrator.dashboard
+        const again = orchestrator.handleCommand('/nexus dashboard')
+
+        expect(again).toContain('already running at http://127.0.0.1:14988')
+        expect(again).toContain('nothing was started a second time')
+        // Not a port-conflict error: the port is in use by us.
+        expect(again).not.toContain('NOT started')
+        expect(orchestrator.dashboard).toBe(first)
+      } finally {
+        orchestrator.shutdown()
+      }
+    })
+
+    it('reports a bind failure with no URL and no claim of a browser', () => {
+      const dir = projectWithDashboard({ enabled: true, port: 14987, host: '127.0.0.1' })
+      cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+      const orchestrator = makeOrchestrator(dir)
+
+      const squatter = Bun.serve({ port: 14987, hostname: '127.0.0.1', fetch: () => new Response('nope') })
+      cleanups.push(() => squatter.stop(true))
+
+      const result = orchestrator.handleCommand('/nexus dashboard 14987 127.0.0.1')
+
+      expect(result).toContain('Dashboard NOT started')
+      expect(result).toContain('14987')
+      expect(result).toContain('no browser was opened')
+      expect(result).not.toContain('http://')
+      expect(orchestrator.dashboard).toBeNull()
+
+      orchestrator.shutdown()
+    })
+
+    it('reports a config-disabled start as the config refusal it is', () => {
+      const dir = projectWithDashboard({ enabled: false, port: 14986, host: '127.0.0.1' })
+      cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+      const orchestrator = makeOrchestrator(dir)
+
+      const result = orchestrator.handleCommand('/nexus dashboard')
+
+      expect(result).toContain('Dashboard NOT started')
+      expect(result).toContain('dashboard.enabled')
+      expect(result).not.toContain('http://')
+      expect(orchestrator.dashboard).toBeNull()
+
+      orchestrator.shutdown()
+    })
+
+    it('rejects an unparseable port without starting anything', () => {
+      const dir = projectWithDashboard({ enabled: true, port: 14985, host: '127.0.0.1' })
+      cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+      const orchestrator = makeOrchestrator(dir)
+
+      const result = orchestrator.handleCommand('/nexus dashboard 4747abc')
+
+      expect(result).toContain('is not a port number')
+      expect(orchestrator.dashboard).toBeNull()
+
+      orchestrator.shutdown()
+    })
+
+    it('keeps the state dump, under a name that says what it is', () => {
+      const dir = projectWithDashboard({ enabled: true, port: 14984, host: '127.0.0.1' })
+      cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+      const orchestrator = makeOrchestrator(dir)
+
+      try {
+        const state = orchestrator.handleCommand('/nexus dashboard state')
+        expect(state).toContain('running')
+        expect(state).toContain('agents')
+        // A state dump starts nothing, and says nothing about a dashboard.
+        expect(orchestrator.dashboard).toBeNull()
+      } finally {
+        orchestrator.shutdown()
+      }
+    })
+
+    it('stops a running dashboard, and says so when there was none', () => {
+      const dir = projectWithDashboard({ enabled: true, port: 14983, host: '127.0.0.1' })
+      cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+      const orchestrator = makeOrchestrator(dir)
+
+      try {
+        expect(orchestrator.handleCommand('/nexus dashboard stop')).toContain('No dashboard was running')
+        orchestrator.handleCommand('/nexus dashboard')
+        expect(orchestrator.handleCommand('/nexus dashboard stop')).toContain('Dashboard stopped')
+        expect(orchestrator.dashboard).toBeNull()
+      } finally {
+        orchestrator.shutdown()
+      }
+    })
+
+    it('lists the subcommands it actually answers to', () => {
+      const dir = projectWithDashboard({ enabled: true, port: 14982, host: '127.0.0.1' })
+      cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+      const orchestrator = makeOrchestrator(dir)
+
+      const result = orchestrator.handleCommand('/nexus nonsense')
+      expect(result).toContain('dashboard [port] [host]')
+      expect(result).toContain('dashboard stop')
+      expect(result).toContain('dashboard state')
+
+      orchestrator.shutdown()
+    })
+
+    it('never throws, for a command the prompt hook runs on any prompt', async () => {
+      // The prompt hook wraps this call, but the contract is worth having here:
+      // every outcome is text, including the ones with no address to report.
+      const dir = projectWithDashboard({ enabled: true, port: 14981, host: '127.0.0.1' })
+      cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+      const orchestrator = makeOrchestrator(dir)
+
+      try {
+        for (const text of [
+          '/nexus dashboard',
+          '/nexus dashboard stop',
+          '/nexus dashboard state',
+          '/nexus dashboard 0',
+          '/nexus dashboard 14981',
+        ]) {
+          expect(typeof orchestrator.handleCommand(text)).toBe('string')
+        }
+      } finally {
+        orchestrator.shutdown()
+      }
+    })
+  })
+
   describe('dashboard.start / dashboard.stop tool text', () => {
     it('states the port must be free, the defaults, the config gate and the URL', () => {
       // A model decides whether to call this from the description and nothing
@@ -212,31 +384,69 @@ describe('dashboard entry points', () => {
 
       orchestrator.shutdown()
     })
+
+    it('a second start is not reported as a port conflict', () => {
+      // The bind would fail — against ourselves. "already running" is the only
+      // true description, and it is what the caller needs to decide not to
+      // retry on another port.
+      const dir = projectWithDashboard({ enabled: true })
+      cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+      const orchestrator = makeOrchestrator(dir)
+
+      try {
+        expect(runDashboardStart(orchestrator, 14997, '127.0.0.1')).toContain('Dashboard started at')
+        const again = runDashboardStart(orchestrator, 14997, '127.0.0.1')
+        expect(again).toContain('already running at http://127.0.0.1:14997')
+        expect(again).not.toContain('NOT started')
+      } finally {
+        orchestrator.shutdown()
+      }
+    })
   })
 
-  describe('TUI /nexus web', () => {
+  describe('TUI /nexus dashboard', () => {
     interface Harness {
       toasts: Array<{ title: string; message: string; variant: string }>
       opened: string[]
+      submitted: string[]
     }
 
     function harness(
       enabled: boolean,
       fetchImpl: typeof fetch,
-      port = 14992
+      port = 14992,
+      submitCommand?: (text: string) => Promise<void> | void
     ): Harness & { deps: Parameters<typeof handleWebDashboard>[1] } {
       const toasts: Harness['toasts'] = []
       const opened: string[] = []
+      const submitted: string[] = []
       return {
         toasts,
         opened,
+        submitted,
         deps: {
           dashboard: { enabled, port, host: '127.0.0.1' },
           showToast: options => { toasts.push(options) },
           openBrowser: url => { opened.push(url) },
+          submitCommand: submitCommand ?? (text => { submitted.push(text) }),
           fetchImpl,
+          // No real waiting: the loop's correctness is what is under test, and
+          // 15 real 200ms sleeps would cost three seconds per case.
+          waitImpl: async () => {},
         },
       }
+    }
+
+    /** Answers `/api/health` only from the `n`-th call onwards. */
+    function healthFromCall(n: number): typeof fetch {
+      let calls = 0
+      return (async () => {
+        calls += 1
+        if (calls < n) throw new Error('fetch failed')
+        return new Response(JSON.stringify({ ok: true, uptime: 1 }), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }) as unknown as typeof fetch
     }
 
     it('says why and opens nothing when the dashboard is disabled by config', async () => {
@@ -252,13 +462,16 @@ describe('dashboard entry points', () => {
       // Not even a probe: the user has switched the thing off, so a request to
       // a port that is guaranteed to refuse is noise, not diagnosis.
       expect(calls).toEqual([])
+      // And no command submitted: the server would refuse it with the same
+      // message, having spent a prompt to say so.
+      expect(h.submitted).toEqual([])
       expect(h.toasts).toHaveLength(1)
       expect(h.toasts[0]?.variant).toBe('error')
       expect(h.toasts[0]?.message).toContain('dashboard.enabled')
       expect(h.toasts[0]?.message).toContain('no browser was opened')
     })
 
-    it('opens the browser against a confirmed dashboard', async () => {
+    it('opens the browser against a confirmed dashboard, and starts nothing', async () => {
       const h = harness(true, (async () =>
         new Response(JSON.stringify({ ok: true, uptime: 12.5 }), {
           headers: { 'Content-Type': 'application/json' },
@@ -267,7 +480,11 @@ describe('dashboard entry points', () => {
       await handleWebDashboard('14996', h.deps)
 
       expect(h.opened).toEqual(['http://127.0.0.1:14996'])
+      // A second `/nexus dashboard` on a live dashboard must not ask the server
+      // for another one: it would be refused as a port conflict, by us.
+      expect(h.submitted).toEqual([])
       expect(h.toasts[0]?.variant).toBe('success')
+      expect(h.toasts[0]?.message).toContain('already running')
     })
 
     it('opens nothing and says so when a DIFFERENT process holds the port', async () => {
@@ -284,20 +501,106 @@ describe('dashboard entry points', () => {
       await handleWebDashboard('14995', h.deps)
 
       expect(h.opened).toEqual([])
+      // No start is even attempted: the bind cannot succeed, and asking anyway
+      // would report a failure the user could have been told up front.
+      expect(h.submitted).toEqual([])
       expect(h.toasts[0]?.variant).toBe('error')
       expect(h.toasts[0]?.message).toContain('not a nexus dashboard')
       expect(h.toasts[0]?.message).toContain('No browser was opened')
     })
 
-    it('opens nothing and routes through the one working call when nothing is listening', async () => {
-      // 14992 is bound by nothing, so the probe must come back empty.
+    it('starts it through the server command and opens the browser once the listen is confirmed', async () => {
+      // The first probe finds nothing, the server starts the dashboard on the
+      // submitted command, and the loop's second probe finds it.
+      const h = harness(true, healthFromCall(2))
+
+      await handleWebDashboard(undefined, h.deps)
+
+      // ONE action, and it is the command the server's prompt hook routes to
+      // `handleCommand` — not a description of how the user might start it.
+      expect(h.submitted).toEqual(['/nexus dashboard 14992 127.0.0.1'])
+      expect(h.opened).toEqual(['http://127.0.0.1:14992'])
+      expect(h.toasts[0]?.variant).toBe('success')
+      expect(h.toasts[0]?.message).toContain('Started and opened http://127.0.0.1:14992')
+    })
+
+    it('opens nothing and claims nothing when the start never confirmed a listen', async () => {
+      // The bind-failure shape: the command ran, the server refused, and the
+      // only honest thing the TUI can say is that nothing is serving.
       const h = harness(true, fetch)
+
+      await handleWebDashboard(undefined, h.deps)
+
+      expect(h.submitted).toEqual(['/nexus dashboard 14992 127.0.0.1'])
+      expect(h.opened).toEqual([])
+      expect(h.toasts[0]?.variant).toBe('error')
+      expect(h.toasts[0]?.message).toContain('no browser was opened')
+      // A URL in a failure message is indistinguishable from a working one.
+      expect(h.toasts[0]?.message).not.toContain('http://')
+    })
+
+    it('gives up after a bounded number of attempts rather than polling forever', async () => {
+      let probes = 0
+      const h = harness(true, (async () => {
+        probes += 1
+        throw new Error('fetch failed')
+      }) as unknown as typeof fetch)
+      h.deps.confirmAttempts = 3
+
+      await handleWebDashboard(undefined, h.deps)
+
+      // One probe to decide, then three confirm attempts — and no more.
+      expect(probes).toBe(4)
+      expect(h.opened).toEqual([])
+    })
+
+    it('does not promise a reply it may never get when the start is not confirmed', async () => {
+      // The message names where the reason is, and that was stated too strongly:
+      // "its result is in this session as the reply to …" is only true when a
+      // Nexus plugin is registered in the server process, because that hook is
+      // what routes the command to `handleCommand`. With no plugin there the
+      // command is never handled, the confirm poll times out, and the one reply
+      // in the session is the model's own unprompted answer — which is exactly
+      // the confusing case this toast exists for, and pointing at it is worse
+      // than saying nothing. Asserted on the conditional phrasing so it cannot
+      // quietly go back to being a promise.
+      const h = harness(true, (async () => {
+        throw new Error('fetch failed')
+      }) as unknown as typeof fetch)
+      h.deps.confirmAttempts = 2
+
+      await handleWebDashboard(undefined, h.deps)
+
+      const message = h.toasts[0]?.message ?? ''
+      expect(h.toasts[0]?.variant).toBe('error')
+      expect(message).toContain('If a Nexus plugin is active in that process')
+      expect(message).toContain('was never handled at all')
+      // Still actionable, and still offering the other thing to try.
+      expect(message).toContain('/nexus web 4748')
+      expect(h.opened).toEqual([])
+    })
+
+    it('reports a command that never reached the server, and opens nothing', async () => {
+      const h = harness(true, fetch, 14992, () => {
+        throw new Error('no session is open to run the command in')
+      })
+
       await handleWebDashboard(undefined, h.deps)
 
       expect(h.opened).toEqual([])
-      expect(h.toasts[0]?.variant).toBe('info')
-      // The promise this command makes: name the call that works.
-      expect(h.toasts[0]?.message).toContain('nexus.dashboard.start(port=14992, host="127.0.0.1")')
+      expect(h.toasts[0]?.variant).toBe('error')
+      expect(h.toasts[0]?.message).toContain('never reached the OpenCode server')
+      expect(h.toasts[0]?.message).toContain('no browser was opened')
+    })
+
+    it('rejects a non-numeric port before submitting anything', async () => {
+      const h = harness(true, fetch)
+
+      await handleWebDashboard('not-a-port', h.deps)
+
+      expect(h.submitted).toEqual([])
+      expect(h.opened).toEqual([])
+      expect(h.toasts[0]?.variant).toBe('error')
     })
   })
 
@@ -321,6 +624,18 @@ describe('dashboard entry points', () => {
       expect(parseWebDashboardTarget('70000', fallback)).toHaveProperty('error')
       // `parseInt` would have accepted this as 4747.
       expect(parseWebDashboardTarget('4747abc', fallback)).toHaveProperty('error')
+    })
+
+    it('agrees with the server-side parser about every input', () => {
+      // The TUI cannot import `parseDashboardTarget` from `src/dashboard.ts`
+      // without inlining 150 KB of page markup into `dist/tui.js`, so the two
+      // are separate functions resolving the same argument. They disagree, the
+      // TUI asks the server to start a port the server then refuses — which
+      // looks exactly like a bind failure, so the divergence has to be a
+      // failing test rather than something a user finds out.
+      for (const input of [undefined, '', '  ', '4748', '4748 0.0.0.0', 'abc', '0', '70000', '4747abc', '-1', '4748.5']) {
+        expect(parseWebDashboardTarget(input, fallback)).toEqual(parseDashboardTarget(input, fallback))
+      }
     })
   })
 

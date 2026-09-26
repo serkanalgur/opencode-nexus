@@ -249,8 +249,13 @@ describe('NexusOrchestrator', () => {
       expect(status).toContain('paused')
     })
 
-    it('should handle dashboard command', () => {
-      const result = orchestrator.handleCommand('/nexus dashboard')
+    it('should handle the dashboard state command', () => {
+      // `/nexus dashboard` now STARTS the server — see
+      // `test/dashboard-entrypoints.test.ts`, which covers that surface. The
+      // state dump this assertion is about survives under a name that says what
+      // it is. Same assertions, same strength: the output is still a JSON dump
+      // carrying the run state and the agent list.
+      const result = orchestrator.handleCommand('/nexus dashboard state')
       expect(result).toContain('running')
       expect(result).toContain('agents')
     })
