@@ -4,7 +4,7 @@ import type {
   AgentRole, ComplexityScore, ModelSelection, BudgetConstraint,
   CostReport, AgentMessage, MemoryEntry, MemoryScope,
   SpawnConfig, RecoveryAction, HealthStatus, NexusConfig, TaskResult,
-  CostProvenance, SpendSplit
+  CostProvenance, SpendSplit, CostReportUncollected
 } from "./types"
 import { NexusConfigManager, type NexusConfigLoadInfo, type NexusConfigReloadTrigger } from "./config"
 import { StateBroadcaster } from "./broadcast"
@@ -24,6 +24,9 @@ import { CustomRoleManager } from "./custom-roles"
 import {
   CostForecaster,
   bareModelId,
+  priceUsage,
+  priceUsageAtSettledTier,
+  promptSizeOf,
   selectTier,
   totalTokens,
   type ModelPricingTiers,
@@ -124,6 +127,22 @@ interface TaskCost {
   cost: number
   tokensUsed: number
   provenance: CostProvenance
+  /**
+   * The session usage this charge was derived from, or `null` when the charge
+   * is a fallback estimate.
+   *
+   * Carried so the timeout path can tell "we measured this session and here is
+   * the snapshot we billed" from "we never managed to read it". Only the first
+   * can be corrected: a delta needs a measured baseline to subtract from, and
+   * arming one against a predicted charge would bill a correction to a guess.
+   */
+  usage: TokenUsage | null
+  /**
+   * `time.idle` as of the same read, or 0 when there was none. Carried so the
+   * timeout path has a settlement threshold that genuinely predates its own
+   * deadline, without spending a second `session.get` to look it up.
+   */
+  idleAt: number
 }
 
 /** Per-model accounting provenance, so a model with mixed charges is legible. */
@@ -134,6 +153,143 @@ interface ModelProvenance {
   estimatedEntries: number
   measuredSpend: number
   estimatedSpend: number
+}
+
+/**
+ * The timeout of `executeTask`, typed.
+ *
+ * `handleFailure` records `error.message` as the learning store's failure
+ * pattern, and that message is the KEY those patterns are stored and looked up
+ * under. So `message` is fixed at exactly `"Task timed out"` and this class
+ * adds no `cause`, no subclass-specific prefix and no `name`-derived
+ * decoration: giving a timeout a distinct TYPE is worth doing (a caller can
+ * tell "this task ran out of budget" from "this task threw"), and forking the
+ * learning store's keys is not. `test/task-cost.test.ts` pins the key.
+ */
+export class TaskTimeoutError extends Error {
+  constructor(message: string = 'Task timed out') {
+    super(message)
+    this.name = 'TaskTimeoutError'
+  }
+}
+
+/**
+ * Backoff between retries of the DELTA read, in ms.
+ *
+ * Three rungs, so three attempts. Only the first two are ever used by three
+ * attempts; the third is what a fourth attempt would wait, kept in the same
+ * array so the escalation shape is legible in one place.
+ *
+ * A failed delta read is a RETRYABLE CONDITION, not a failed charge. It is also
+ * why the delta path does not go through `safeAccountTaskCost`, whose
+ * estimate-on-read-failure fallback is right for the initial charge and wrong
+ * here: a delta whose read failed is not a delta, it is an abandoned
+ * collection, and laundering it through `forecastTask` would report a guess as
+ * though it were a correction to a measurement.
+ */
+const DELTA_READ_BACKOFF_MS: readonly number[] = [1000, 2000, 4000]
+
+/**
+ * One outstanding "bill the rest of this session" obligation, keyed by
+ * SESSION id.
+ *
+ * KEYED ON `sessionID`, NOT `nodeId`, and the reason is load-bearing: every
+ * escalation step (retry, respawn, fallback model) spawns a NEW session, so a
+ * node that times out four times produces four independent deltas. Keyed on
+ * `nodeId`, those four attempts would fight over one entry and three of them
+ * would compute a zero delta against a snapshot the others had already moved
+ * past.
+ *
+ * `charged` is a CUMULATIVE snapshot of what has been billed for this session,
+ * not a running sum of increments, so the next delta is simply
+ * `max(0, now - charged)` componentwise. Cumulative is what makes the invariant
+ * below expressible at all: with a running sum there is no state to compare
+ * `now` against, and a second caller's only way to avoid a double bill would be
+ * to trust that nobody else got there first.
+ *
+ * IDEMPOTENCY INVARIANT: a second caller for a session already being settled
+ * bills nothing, because `pending` is set synchronously before the first
+ * `await` and spans the whole body, and the settled ledger is then deleted in
+ * the `finally`. A naive second `trackCost` would be a straight double bill,
+ * which is strictly worse than the under-bill this whole mechanism exists to
+ * fix, and there is no idempotency key anywhere else in the plugin that would
+ * have caught it.
+ *
+ * `charged` is written back before the charge. That is the SECOND layer, and it
+ * is a real one rather than a redundant one: with `pending` removed, re-entry
+ * from a `budget:alert` subscriber bills the same increment twice, because that
+ * subscriber fires from inside `trackCost` — after the charge, before this
+ * method's `finally` — and so computes its delta against the stale snapshot.
+ * Swapping the two statements ALONE, with `pending` intact, is caught by no
+ * test; that is measured, and it is the honest limit of what the suite pins.
+ * The ordering is kept because it makes `charged` a single local source of
+ * truth written by the same method that reads it. See `settleTimeoutDelta` for
+ * the three-block analysis.
+ */
+interface TimeoutDeltaLedger {
+  sessionID: string
+  /** DAG node id. Reported so an abandoned session can be traced to its task. */
+  taskId: string
+  agentId: string
+  /**
+   * The agent whose session this is, retained so `agent.metrics.totalCost` can
+   * be corrected on settlement. It is a per-AGENT figure that `getState()` and
+   * `listAgents()` publish and the dashboard charts, and leaving it at the
+   * timeout snapshot made it the one per-agent cost that disagreed with its
+   * two corrected siblings (`costByAgent` via `trackCost`, and the history
+   * record via `adjust`).
+   *
+   * Retaining the object is safe where retaining `node` is not: escalation
+   * spawns a NEW agent per attempt, so this reference is unambiguous. It may
+   * point at an agent already removed from `this.agents` by `terminateAgent`,
+   * which is exactly the case worth correcting — a terminated agent's late spend
+   * is otherwise visible nowhere at all.
+   */
+  agent: Agent
+  /**
+   * The DAG node, and the exact `result` object this attempt produced, so
+   * `node.result.cost` can be corrected — but ONLY while it is still the
+   * current result. Escalation re-enters `executeTask` with the SAME node and
+   * overwrites `node.result`, so a late delta from attempt 1 must not be added
+   * to attempt 2's figure. The identity check at the correction site is what
+   * makes this safe, and a node whose result has moved on is reported as
+   * uncorrected rather than silently mis-added.
+   */
+  node: DAGNode
+  result: CostedTaskResult
+  /** "providerID/model" — the `trackCost` key and the `modelCosts` key. */
+  model: string
+  provider: string
+  /** Cumulative session usage already billed. See the note above. */
+  charged: TokenUsage
+  /** `time.idle` observed at the timeout snapshot. The settlement threshold. */
+  idleAtTimeout: number
+  /** Re-entrancy guard. Set synchronously, before any `await`. */
+  pending: boolean
+  /** The `ExecutionHistory` record id, so the record is adjusted in place. */
+  historyId: string
+  /** The `PerformanceTracker` entry id, likewise. */
+  performanceId: string
+  /** Aborts the abandoned `session.wait` long-poll once we are done with it. */
+  abort: AbortController
+}
+
+/** A session we stopped collecting from while it was still running. */
+interface UncollectedSpend {
+  sessionID: string
+  taskId: string
+  agentId: string
+  model: string
+  /** The most recent token count we actually read for this session. */
+  lastKnownTokens: number
+  /**
+   * Priced value of the increment observed between the last charge and the
+   * last read, which is spend that happened and was not billed. A LOWER BOUND
+   * on the under-count, NOT an upper bound on it: everything the session spends
+   * after that read is also unbilled and, for a session abandoned while still
+   * generating, is unbounded. See `CostReportUncollected`.
+   */
+  observedUncollected: number
 }
 
 /**
@@ -404,6 +560,48 @@ export class NexusOrchestrator {
   // Cleanup interval handle
   private cleanupInterval: ReturnType<typeof setInterval> | null = null
 
+  // === Timed-out cost deltas ===
+  //
+  // One live obligation per timed-out session whose cost is still being
+  // collected, and the sessions we gave up on. Both maps are self-bounding: an
+  // entry is removed the moment its collection settles, independently of
+  // whether the timer that drove it has fired.
+  private deltaLedgers: Map<string, TimeoutDeltaLedger> = new Map()
+  private uncollected: Map<string, UncollectedSpend> = new Map()
+
+  /**
+   * Every live delta timer. `unref`'d on creation so a pending collection can
+   * never hold the event loop open, removed in the timer's own `finally`, and
+   * the whole set cleared in `shutdown()`.
+   *
+   * NOT a `setInterval`, deliberately. There is one deadline per timed-out
+   * task and then a single probe: a poller would keep re-reading sessions for
+   * as long as the process lived, and the signal that ends the obligation is
+   * already in hand — the `session.wait` promise that the timeout already left
+   * dangling.
+   *
+   * Also NOT in `HealthMonitor`. It has no session handle, and a terminated
+   * agent is removed from `this.agents` while its session is still running, so
+   * a monitor that walks `this.agents` structurally cannot see the sessions
+   * most likely to still be spending.
+   */
+  private deltaTimers: Set<ReturnType<typeof setTimeout>> = new Set()
+
+  /**
+   * Set at the top of `shutdown()` and never cleared. `running` is NOT the
+   * signal for this: it is false whenever a task was reached by any route other
+   * than `execute()` — a bare `spawnAndExecute`, a delegated task, a test
+   * driving `executeTask` — and those are all legitimate, flushable situations.
+   * What matters is only whether teardown has already been and gone.
+   */
+  private shuttingDown = false
+
+  /**
+   * Backoff schedule for the delta read, as a field rather than a constant so a
+   * test can shrink it. Production values are `DELTA_READ_BACKOFF_MS`.
+   */
+  private deltaReadBackoffMs: readonly number[] = DELTA_READ_BACKOFF_MS
+
   // Lazy-initialized health monitor
   get healthMonitor(): HealthMonitor | null {
     return this._healthMonitor
@@ -549,10 +747,15 @@ export class NexusOrchestrator {
    *     the real relation — verified against the real sonnet and opus entries —
    *     but they are not what the provider would bill, and a provider that
    *     does not bill cache writes separately is approximated outright.
-   *   - a timed-out task is billed at the instant of the timeout, while its
-   *     session keeps running, so the rest of its consumption is never billed.
-   *     Correctly labelled `measured` (it is a real reading), but it means the
-   *     most expensive case — a runaway task — is the most under-counted.
+   *   - a timed-out task WAS billed at the instant of the timeout, while its
+   *     session kept running, so the rest of its consumption went unbilled —
+   *     which made the most expensive case, a runaway task, the most
+   *     under-counted. That is no longer the whole story: the remainder is now
+   *     collected once the session goes idle, or reported as a bound under the
+   *     cost report's `uncollected` block if it never does. What remains
+   *     unfixed is the tier granularity of that correction — see
+   *     `priceUsageAtSettledTier` for the residual it leaves and why it cannot
+   *     be removed at session-total granularity.
    */
   private async loadModelCosts(): Promise<void> {
     try {
@@ -838,11 +1041,25 @@ export class NexusOrchestrator {
         enabled: true,
         patternStorage: 'memory',
         minConfidence: 0.7
-      }
+      },
+      // Present only so an explicit override has a base to spread over. This
+      // number is NOT the default window: with no override the block is dropped
+      // entirely and `armTimeoutDelta` derives the window from the task's own
+      // timeout.
+      cost: {
+        timeoutDeltaGraceMs: 60_000
+      },
     }
 
+    // `cost` is held back from the blanket spread on purpose. Spreading
+    // `defaults` wholesale would put the block back on every config, and
+    // `armTimeoutDelta`'s `??` would never fall through to the derived window —
+    // which is exactly the dead code this shape is fixing: a flat 60s for every
+    // task regardless of its own budget, behind a doc claiming "roughly half
+    // the task's own budget, clamped to [30s, 180s]".
+    const { cost: defaultCost, ...restDefaults } = defaults
     return {
-      ...defaults,
+      ...restDefaults,
       ...partial,
       budget: { ...defaults.budget, ...partial?.budget },
       agents: { ...defaults.agents, ...partial?.agents },
@@ -851,7 +1068,10 @@ export class NexusOrchestrator {
       memory: { ...defaults.memory, ...partial?.memory },
       dashboard: { ...defaults.dashboard, ...partial?.dashboard },
       security: { ...defaults.security, ...partial?.security },
-      learning: { ...defaults.learning, ...partial?.learning }
+      learning: { ...defaults.learning, ...partial?.learning },
+      // Present only when the caller supplied it; see the note on
+      // `restDefaults` above and `NexusConfig.cost`.
+      ...(partial?.cost ? { cost: { ...defaultCost, ...partial.cost } } : {}),
     }
   }
 
@@ -1176,6 +1396,13 @@ export class NexusOrchestrator {
     const startTime = Date.now()
     const timeout = node.task.timeout || this.config.defaultTimeout
 
+    // Hoisted out of the `try` so the `finally` can clear the timeout handle and
+    // so the catch block can reach the `session.wait` guard when arming the
+    // cost delta. See the notes at the `Promise.race` below.
+    let timeoutTimer: ReturnType<typeof setTimeout> | null = null
+    let waitGuard: Promise<{ outcome: 'idle' | 'poll-failed' }> | null = null
+    let waitAbort: AbortController | null = null
+
     try {
       // Build the prompt for the agent
       const rolePrompt = this.buildRolePrompt(node.task.requiredRole)
@@ -1197,10 +1424,35 @@ export class NexusOrchestrator {
       })
 
       // Wait for completion (with timeout)
-      const waitPromise = this.ctx.session.wait({ sessionID: agent.sessionID })
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Task timed out")), timeout)
+      //
+      // LEAK 1, CLOSED: the timeout handle is kept and cleared in the `finally`
+      // below. Nothing cleared it before, so on the overwhelmingly common
+      // success path a 5-minute `setTimeout` stayed referenced after every
+      // successful task and kept the event loop alive.
+      //
+      // LEAK 2, CLOSED: `waitPromise` is OWNED, not merely handed to a race.
+      // `Promise.race` does not cancel its loser, so this long-poll is still
+      // open after the timeout — and `Promise.race` attaching a rejection
+      // handler is the only reason that has been safe. The moment a `.then()`
+      // is added for the delta below, a mid-poll `SessionNotFoundError` becomes
+      // a real unhandled rejection. So a guard that cannot reject is attached
+      // now, and an `AbortSignal` is passed down so the poll can actually be
+      // closed rather than merely ignored.
+      waitAbort = new AbortController()
+      const waitPromise = this.ctx.session.wait(
+        { sessionID: agent.sessionID },
+        { signal: waitAbort.signal }
       )
+      // Never rejects: the delta path races this, and a rejection here has
+      // nowhere useful to go. A poll that DIES is not a session that went idle,
+      // so it resolves to its own outcome and takes the probe path below.
+      waitGuard = waitPromise.then(
+        () => ({ outcome: 'idle' as const }),
+        () => ({ outcome: 'poll-failed' as const })
+      )
+      const timeoutPromise = new Promise((_, reject) => {
+        timeoutTimer = setTimeout(() => reject(new TaskTimeoutError()), timeout)
+      })
 
       await Promise.race([waitPromise, timeoutPromise])
 
@@ -1327,7 +1579,7 @@ export class NexusOrchestrator {
       })
 
       // Record performance metrics for failed task
-      this.performanceTracker.record({
+      const performanceId = this.performanceTracker.record({
         model: agent.model.model,
         role: node.task.requiredRole,
         success: result.success,
@@ -1338,7 +1590,7 @@ export class NexusOrchestrator {
       })
 
       // Record failed execution to history (with session ID for traceability)
-      this.executionHistory.record({
+      const historyId = this.executionHistory.record({
         taskId: node.id,
         taskName: node.task.name,
         role: node.task.requiredRole,
@@ -1351,7 +1603,34 @@ export class NexusOrchestrator {
         startedAt: new Date(startTime),
         completedAt: new Date(),
         error: errorMessage
-      })
+      }).id
+
+      // ARM THE COST DELTA HERE, and the ordering is LOAD-BEARING: the ledger
+      // needs the history record id and the performance entry id, both of
+      // which are created by the two `record` calls above. Moving this block
+      // above them — or moving `handleFailure` above the accounting, which is
+      // the refactor most likely to happen to this function — silently breaks
+      // the update path, and it breaks SILENTLY: the delta still prices and
+      // charges correctly, and only the history/performance records stop
+      // reflecting it.
+      //
+      // ONLY ON TIMEOUT, and only on a MEASURED charge. A non-timeout failure
+      // has no dangling session to collect from, and a timeout whose initial
+      // read FAILED has no measured baseline to subtract from — arming one
+      // against a predicted charge would bill a correction to a guess, which is
+      // the same laundering the delta path refuses to do anywhere else.
+      if (error instanceof TaskTimeoutError && cost.usage && waitGuard && agent.sessionID) {
+        this.armTimeoutDelta(agent, node, {
+          usage: cost.usage,
+          idleAt: cost.idleAt,
+          result,
+          waitGuard,
+          abort: waitAbort,
+          historyId,
+          performanceId,
+          timeout,
+        })
+      }
 
       // Notify on task failure
       if (this.notifications?.isEnabled()) {
@@ -1363,12 +1642,522 @@ export class NexusOrchestrator {
         await this.handleFailure(agent, node, new Error(errorMessage))
       }
     } finally {
+      // LEAK 1, CLOSED: see the note at the `Promise.race`. The handle is
+      // cleared on EVERY path, so a successful task no longer leaves a
+      // five-minute timer referenced behind it.
+      if (timeoutTimer) {
+        clearTimeout(timeoutTimer)
+        timeoutTimer = null
+      }
       // Only reset to idle if agent is still in a non-terminal state
       if (agent.status !== 'terminated' && agent.status !== 'failed') {
         agent.status = 'idle'
       }
       node.task.status = node.status === 'completed' ? 'completed' : 'failed'
       this.notifyStateChange()
+    }
+  }
+
+  // === Timed-out cost deltas ===
+  //
+  // A timed-out task is billed at the instant of the timeout, while its session
+  // is never aborted and keeps generating and keeps spending. The most
+  // expensive case — a hung or slow task — was therefore the most
+  // under-counted, billed the cheapest possible snapshot.
+  //
+  // THE SIGNAL WAS ALREADY IN HAND. `Promise.race` does not cancel its loser, so
+  // the `session.wait` promise is still live after the timeout and still
+  // resolves later, at exactly the moment wanted: `session.wait` is documented
+  // server-side as "wait for a session agent loop to become idle", and the TUI
+  // uses it as its "the turn is over" primitive. So this is not new plumbing; it
+  // is not throwing the signal away.
+  //
+  // NOT the tool `progress` callback. There is exactly one call site invoking a
+  // tool's `progress` in the installed server and it carries exactly one status
+  // literal — `progress({sessionID, status: "running"})`, once, at spawn,
+  // before the prompt. There is no terminal status, and the channel is wired
+  // only on the subagent-tool spawn path, so it cannot express settlement.
+  //
+  // NOT the event bus either. The installed SDK's `@opencode/protocol` does
+  // define `session.idle`, but the running V2 server does not publish it — the
+  // literal appears only in the V1 legacy event table — and the V2 bus expresses
+  // settlement as `session.execution.succeeded | failed | interrupted`.
+  // `session.wait` plus `SessionInfo.time.idle` is simpler, per-session by
+  // construction, and cannot be missed, because neither is an ephemeral
+  // notification racing a subscription.
+  //
+  // `ctx.session.interrupt` is deliberately NOT called on timeout. It would make
+  // the session idle immediately and collapse the grace window, but it throws
+  // away the partial work: for a task that timed out at 299s of a 300s budget
+  // that is nearly everything. The goal here is to BILL the remainder, not to
+  // kill the run. Whether a runaway task should be killed is a different
+  // question, and conflating the two would discard work to improve a report.
+
+  /**
+   * Register the obligation to bill the rest of a timed-out session's cost, and
+   * schedule the single timer that will discharge it.
+   */
+  private armTimeoutDelta(agent: Agent, node: DAGNode, args: {
+    usage: TokenUsage
+    idleAt: number
+    result: CostedTaskResult
+    waitGuard: Promise<{ outcome: 'idle' | 'poll-failed' }>
+    abort: AbortController | null
+    historyId: string
+    performanceId: string
+    timeout: number
+  }): void {
+    const sessionID = agent.sessionID
+    if (!sessionID) return
+    const model = `${agent.model.provider}/${agent.model.model}`
+
+    // A task can time out AFTER `shutdown()` has already run — an in-flight
+    // `executeTask` outlives the call that started it. Arming here would
+    // register a ledger and an `unref`'d timer that nothing will ever flush,
+    // because the flush is the one thing `shutdown` does and it has been and
+    // gone. Dropping the obligation loses that session's remaining cost
+    // entirely, which is the under-count this whole feature exists to remove,
+    // so the arm is refused and the timeout is billed at its snapshot as before.
+    if (this.shuttingDown) return
+
+    // One ledger per session. A second arm for the same session — which the
+    // race below makes impossible today, but which is exactly what the
+    // idempotency invariant has to survive — replaces nothing and charges
+    // nothing.
+    if (this.deltaLedgers.has(sessionID)) return
+
+    const ledger: TimeoutDeltaLedger = {
+      sessionID,
+      taskId: node.id,
+      agentId: agent.id,
+      agent,
+      node,
+      result: args.result,
+      model,
+      provider: agent.model.provider,
+      charged: args.usage,
+      idleAtTimeout: args.idleAt,
+      pending: false,
+      historyId: args.historyId,
+      performanceId: args.performanceId,
+      abort: args.abort ?? new AbortController(),
+    }
+    this.deltaLedgers.set(sessionID, ledger)
+
+    // ONE TIMER, NO INTERVAL. The session going idle settles the obligation;
+    // the deadline is the single fallback that probes once and then abandons.
+    //
+    // The window is HALF the task's own budget, clamped to [30s, 180s], unless
+    // `cost.timeoutDeltaGraceMs` was set explicitly — in which case that
+    // number is the window outright. The clamp used to be dead code: `cost` was
+    // a required config block, so `mergeConfig` always populated it and the
+    // `??` never fell through to the derived value. `cost` is optional now, and
+    // `mergeConfig` leaves it absent unless the caller supplied it, so the
+    // derived window is what actually runs by default.
+    const graceMs = this.config.cost?.timeoutDeltaGraceMs
+      ?? Math.min(180_000, Math.max(30_000, args.timeout / 2))
+    const timer = setTimeout(() => {
+      // First statement of the callback, not a `finally` — an earlier version of
+      // this comment claimed a `finally` that was not there. It does not need
+      // one: `settleTimeoutDelta` is not called in a way that can throw
+      // synchronously (it is `async`, so it returns a rejected promise at
+      // worst), and the rejection is handled on the next line.
+      this.deltaTimers.delete(timer)
+      // `.catch`, not `void`. A `void`-ed promise that rejects is an unhandled
+      // rejection in the host process, and this detached call is one of three
+      // this feature introduced. A settlement that throws is reported through
+      // the `cost:delta` event; swallowing it here as well is deliberate, since
+      // there is no caller left to propagate to.
+      this.settleTimeoutDelta(ledger, 'deadline').catch(() => {})
+    }, graceMs)
+    // A pending collection must never be the reason the process cannot exit.
+    timer.unref?.()
+    this.deltaTimers.add(timer)
+
+    void (async () => {
+      try {
+        const { outcome } = await args.waitGuard
+        if (outcome === 'idle') await this.settleTimeoutDelta(ledger, 'session-idle')
+        else await this.settleTimeoutDelta(ledger, 'poll-failed')
+      } catch {
+        // Swallowed deliberately, and see the note on the deadline call above.
+        // The abort below is what matters on this path, and it is in a
+        // `finally`, so it still runs.
+      }
+    })()
+  }
+
+  /**
+   * Discharge one obligation: read the session, bill what it did since the last
+   * charge, correct every figure that recorded the old total, and report
+   * whatever could not be collected.
+   *
+   * This method is the only writer of `ledger.charged` and the only caller of
+   * `trackCost` on this path. It used to take an `observed?: TokenUsage` to
+   * skip the read; no caller ever passed it, and it was the one route through
+   * this method with no `await` before the charge, so a re-entrant caller
+   * supplying it would have priced against the pre-write-back snapshot and
+   * double-billed. Removed rather than documented.
+   */
+  private async settleTimeoutDelta(
+    ledger: TimeoutDeltaLedger,
+    trigger: 'session-idle' | 'deadline' | 'poll-failed' | 'shutdown'
+  ): Promise<void> {
+    // ONE WRITER. A second caller for a session that is already being settled,
+    // or already settled, calls NOTHING — it does not charge $0, it does not
+    // touch `costHistory`, does not record provenance and does not emit. Those
+    // are all observable, and a $0 that moves four of them is not a no-op.
+    if (ledger.pending) return
+    if (this.deltaLedgers.get(ledger.sessionID) !== ledger) return
+    // Set SYNCHRONOUSLY, before the first `await`, so re-entrancy cannot slip
+    // in behind it.
+    ledger.pending = true
+
+    try {
+      // The reason the event will carry. The deadline and a dead poll are both
+      // "we stopped watching", not "it stopped running" — so they start as
+      // `abandoned`, and only the probe below can turn that into
+      // `session-idle`, because that is the only way a session that was still
+      // running at the deadline can turn out to have settled.
+      let reason: 'session-idle' | 'abandoned' | 'shutdown' =
+        trigger === 'shutdown' ? 'shutdown' : trigger === 'session-idle' ? 'session-idle' : 'abandoned'
+
+      let now: TokenUsage
+      if (trigger === 'deadline' || trigger === 'poll-failed') {
+        // ONE final probe, and it answers a different question from the one a
+        // read would. A session CAN settle after the deadline — the timer and
+        // the wait are two independent observations of the same fact, and
+        // losing that race is not evidence the session never settled. If the
+        // server says the loop went idle after the timeout snapshot did, the
+        // collection is completed for free from the reading already in hand.
+        const probe = await this.readSessionTokens(ledger.sessionID)
+        if (!probe.read || probe.idleAt <= ledger.idleAtTimeout) {
+          this.abandonTimeoutDelta(ledger, probe.read ? probe.usage : undefined, reason)
+          return
+        }
+        now = probe.usage
+        reason = 'session-idle'
+      } else {
+        // Retried: a failed read here is a RETRYABLE CONDITION, not a failed
+        // charge, and there is grace-window time left to spend on it. The
+        // estimate fallback that `safeAccountTaskCost` uses would be wrong
+        // here — a delta whose read failed is an abandoned collection, and
+        // laundering it through `forecastTask` as `estimated` would report a
+        // guess as a correction to a measurement.
+        //
+        // `shutdown` is not granted retries: the process is going away.
+        const read = trigger === 'shutdown'
+          ? await this.readSessionTokens(ledger.sessionID)
+          : await this.readSessionTokensWithRetry(ledger.sessionID)
+        if (!read.read) {
+          this.abandonTimeoutDelta(ledger, undefined, reason)
+          return
+        }
+        now = read.usage
+      }
+
+      // Componentwise, and PER FIELD rather than on the total. Clamping a
+      // summed total would swallow a genuine reallocation between `input` and
+      // `cache.read` — a session whose uncached prompt shrinks as its prefix
+      // becomes cacheable is a real and common shape, and the sum of its two
+      // fields barely moves while both of them do.
+      const delta: TokenUsage = {
+        input: Math.max(0, now.input - ledger.charged.input),
+        output: Math.max(0, now.output - ledger.charged.output),
+        reasoning: Math.max(0, now.reasoning - ledger.charged.reasoning),
+        cache: {
+          read: Math.max(0, now.cache.read - ledger.charged.cache.read),
+          write: Math.max(0, now.cache.write - ledger.charged.cache.write),
+        },
+      }
+      const deltaTokens = totalTokens(delta)
+
+      // NOTHING MOVED — call NOTHING. Not "charge $0": `trackCost` would grow
+      // `costHistory`, add a provenance entry, run the budget check and fire a
+      // state change for a difference that does not exist. An idle reported
+      // twice, or an idle before the next model call billed, is a real state
+      // and the right response to it is silence.
+      if (deltaTokens === 0) {
+        this.emit('cost:delta', {
+          taskId: ledger.taskId,
+          nodeId: ledger.taskId,
+          agentId: ledger.agentId,
+          sessionID: ledger.sessionID,
+          model: ledger.model,
+          deltaCost: 0,
+          deltaTokens: 0,
+          sessionTotalCost: priceUsage(ledger.charged, this.forecaster.tiersFor(ledger.model, ledger.provider).pricing).total,
+          reason,
+          settledTier: this.settledTierOf(ledger, ledger.charged),
+        })
+        return
+      }
+
+      const { pricing, source } = this.forecaster.tiersFor(ledger.model, ledger.provider)
+      // THE SETTLED TIER, not `priceUsage(delta)`. See `priceUsageAtSettledTier`
+      // for why the increment's own prompt size is a meaningless number here,
+      // and for the worked numbers in both directions.
+      const deltaCost = priceUsageAtSettledTier(delta, pricing, now).total
+      // Always `measured`: these token counts came out of a real session
+      // through the same `ctx.session.get` that produced the original charge.
+      // `CostProvenance` has no temporal field and does not need one —
+      // provenance describes HOW a number was arrived at, not WHEN it was
+      // observed.
+      const provenance: CostProvenance = { usage: 'measured', pricing: source }
+
+      // WRITE THE NEW SNAPSHOT BACK BEFORE THE CHARGE, and be precise about
+      // what that buys, because two earlier versions of this comment
+      // overclaimed in opposite directions.
+      //
+      // Three blocks stand between a re-entrant caller and a double bill, and
+      // MEASURED they are not equally important:
+      //
+      //   1. `pending`, set synchronously before the first `await` and cleared
+      //      only in the `finally`. It spans the whole body, so it intercepts
+      //      every re-entrant caller BEFORE a delta is computed. This is the
+      //      one that holds the line on its own: removing it turns the
+      //      re-entrancy test red.
+      //   2. THIS write-back. It is the backstop for (1), and it is genuinely
+      //      load-bearing in that role rather than decorative. With `pending`
+      //      removed, re-entry from a `budget:alert` subscriber — which fires
+      //      from inside `trackCost`, before this method's `finally`, while the
+      //      ledger is still in the map — computes its delta against the
+      //      pre-write-back snapshot and bills the same increment a second
+      //      time. MEASURED: under `pending`-removed plus write-back-swapped
+      //      that path emits a spurious second `cost:delta` carrying
+      //      `deltaCost: 0` after the real one.
+      //   3. The ledger deletion in the `finally`, ordered before `pending` is
+      //      cleared, so it blocks a caller arriving after the body even if the
+      //      flag were false.
+      //
+      // Swapping (2) ALONE, with `pending` intact, is caught by NO test. That
+      // is measured, and it is the honest limit of what this suite pins.
+      //
+      // The ordering is kept because (2) is what makes `charged` a single local
+      // source of truth written by this same method — every delta here is
+      // `max(0, now - charged)` against a snapshot this method produced — and
+      // because it is the only thing between (1) and a double bill if (1) is
+      // ever broken.
+      ledger.charged = now
+
+      // CHARGE AND CORRECT, CONTAINED.
+      //
+      // `trackCost` ends in `checkBudget()`, which `emit`s `budget:alert` and
+      // `budget:exceeded`, and `emit` is a bare `forEach` with no try/catch. A
+      // throwing subscriber therefore used to land the charge, skip every
+      // correction below it, emit nothing, and propagate out — leaving
+      // `totalSpent` carrying the delta while the history record, the
+      // performance entry, the agent metrics and the DAG result all still held
+      // the old figure, with no event to say so. The money was wrong AND
+      // unreported. Reproduced: totalSpent 1.80 against history 1.50 and
+      // performance 1.50.
+      //
+      // So the whole sequence is contained, the event fires on every outcome
+      // with whatever state was reached, and the error is reported in the
+      // payload rather than thrown. Throwing would be worse than useless on the
+      // teardown path: there is no caller left to propagate to, and an
+      // exception escaping `shutdown()` would abandon the agents-clear and
+      // every remaining ledger behind it.
+      let historyAdjusted = false
+      let performanceAdjusted = false
+      let nodeAdjusted = false
+      let agentAdjusted = false
+      let error: string | undefined
+      try {
+        // `trackCost` also runs `checkBudget` and `notifyStateChange`, so
+        // `totalSpent`, the budget alert, `getStatus()`, `getCostReport()`, the
+        // dashboard and the TUI sidebar all pick the delta up from this one
+        // call. Every figure below is a SECOND place that recorded the old
+        // total, and each is reported individually so a partial correction is
+        // visible rather than something a reader has to infer from a total.
+        this.trackCost(ledger.agentId, ledger.model, deltaCost, deltaTokens, provenance)
+
+        // `false` means the record was evicted (history trims to 500,
+        // performance to 1000), which is why these are reported rather than
+        // assumed.
+        historyAdjusted = this.executionHistory.adjust(ledger.historyId, {
+          cost: deltaCost,
+          tokensUsed: deltaTokens,
+        })
+        performanceAdjusted = this.performanceTracker.adjust(ledger.performanceId, { cost: deltaCost })
+
+        // `agent.metrics.totalCost` / `totalTokens`, which `getState()` and
+        // `listAgents()` publish and the dashboard charts per agent. It cannot
+        // come back false — there is no trim to evict it — so leaving it
+        // uncorrected would have made this the one per-agent figure that
+        // disagreed with its corrected siblings.
+        ledger.agent.metrics.totalCost += deltaCost
+        ledger.agent.metrics.totalTokens += deltaTokens
+        agentAdjusted = true
+
+        // `node.result.cost`, but ONLY while it is still this attempt's result.
+        // Escalation re-enters `executeTask` with the SAME node and overwrites
+        // `node.result`, so attempt 1's late delta must not be added to
+        // attempt 2's figure. Object identity is the cheap test; a node whose
+        // result has moved on is reported as uncorrected rather than
+        // mis-added, which is the honest outcome — the cost is in `totalSpent`
+        // either way, and `costByAgent` attributes it to the right agent.
+        if (ledger.node.result === ledger.result) {
+          ledger.result.cost += deltaCost
+          ledger.result.tokensUsed += deltaTokens
+          nodeAdjusted = true
+        }
+        // This session is no longer abandoned — it settled.
+        this.uncollected.delete(ledger.sessionID)
+      } catch (thrown) {
+        error = thrown instanceof Error ? thrown.message : String(thrown)
+      }
+
+      this.emit('cost:delta', {
+        taskId: ledger.taskId,
+        nodeId: ledger.taskId,
+        agentId: ledger.agentId,
+        sessionID: ledger.sessionID,
+        model: ledger.model,
+        deltaCost,
+        deltaTokens,
+        sessionTotalCost: priceUsage(now, pricing).total,
+        // `shutdown` here means CHARGED AT TEARDOWN, SETTLEMENT UNVERIFIED: the
+        // flush is the last chance to read a session that may already be gone.
+        // `abandonTimeoutDelta` rewrites `shutdown` to `abandoned` for the
+        // opposite reason — there it sits beside a `deltaCost` of 0, where
+        // "shutdown" would read as "it settled and we billed it", whereas here
+        // the `deltaCost` is non-zero and the charge really was made.
+        reason,
+        settledTier: this.settledTierOf(ledger, now),
+        recordsAdjusted: { history: historyAdjusted, performance: performanceAdjusted, node: nodeAdjusted, agent: agentAdjusted },
+        ...(error === undefined ? {} : { error }),
+      })
+    } finally {
+      // ALWAYS, on every path including the ones that returned above. A settled
+      // entry is deleted, which bounds the map independently of the timers:
+      // the timer set and the ledger set are cleaned up by different code and
+      // neither can be relied on to clean up the other.
+      this.deltaLedgers.delete(ledger.sessionID)
+      ledger.pending = false
+      // Close the long-poll HERE, not in the wait guard's `finally`. That
+      // `finally` only runs when `waitGuard` settles, and on the
+      // deadline-abandon path — a session that never goes idle, which is the
+      // case abandon exists for — the wait never settles, so the abort never
+      // fired and the server-side poll stayed open for the life of the
+      // process. Aborting an already-aborted signal is a no-op, so this is safe
+      // when the wait did settle normally.
+      ledger.abort.abort()
+    }
+  }
+
+  /**
+   * Give up on a session that is still running, and record the part of its cost
+   * we will never read.
+   *
+   * RECORDED AND NOT CHARGED, deliberately. Charging a mid-flight reading would
+   * put a number in `totalSpent` that is not a settled figure and is not known
+   * to be final, which is the conflation `CostProvenance` exists to prevent.
+   * Dropping it silently would be the original bug at a smaller scale.
+   *
+   * WHAT THE REPORTED FIGURE IS, precisely, because an earlier version of this
+   * called it an upper bound and had the direction backwards:
+   * `observedUncollected` is the priced value of the increment seen between the
+   * last charge and the last read — spend that demonstrably happened and was
+   * demonstrably not billed. It is a LOWER BOUND ON THE UNDER-COUNT. Everything
+   * the session spends after that last read is also unbilled, and a session
+   * abandoned while still generating has no reason to stop, so the true
+   * under-count is unbounded above and this figure is only where it is known to
+   * begin. There is no upper bound derivable from a single observation, and
+   * claiming one would be the same class of error as the bug this change fixes.
+   */
+  private abandonTimeoutDelta(
+    ledger: TimeoutDeltaLedger,
+    probeUsage: TokenUsage | undefined,
+    reason: 'session-idle' | 'abandoned' | 'shutdown'
+  ): void {
+    // Whatever prompted the give-up — a deadline, a dead poll, or a read that
+    // failed every retry — the collection was ABANDONED and nothing was
+    // collected. `session-idle` would read as "it settled and we billed it"
+    // next to a `deltaCost` of 0, which is the opposite of what happened. The
+    // `uncollected` block in the report is the other discriminator; the reason
+    // says the same thing for anyone reading only the event.
+    const eventReason = reason === 'shutdown' ? 'shutdown' : 'abandoned'
+    const known = probeUsage ?? ledger.charged
+    const { pricing } = this.forecaster.tiersFor(ledger.model, ledger.provider)
+    const observedIncrement: TokenUsage = {
+      input: Math.max(0, known.input - ledger.charged.input),
+      output: Math.max(0, known.output - ledger.charged.output),
+      reasoning: Math.max(0, known.reasoning - ledger.charged.reasoning),
+      cache: {
+        read: Math.max(0, known.cache.read - ledger.charged.cache.read),
+        write: Math.max(0, known.cache.write - ledger.charged.cache.write),
+      },
+    }
+    // Zero when the last read showed no growth at all, and that zero is
+    // CORRECT rather than a missing value: it says the observed-but-uncharged
+    // spend is nothing we can see. An earlier version fell back to
+    // `lastDeltaCost` here, which was dead — a ledger settles at most once
+    // because the `finally` deletes it, so that field was always 0 — and a
+    // test then pinned that coincidental 0 as a policy. Field and branch both
+    // deleted.
+    const observedUncollected = totalTokens(observedIncrement) > 0
+      ? priceUsageAtSettledTier(observedIncrement, pricing, known).total
+      : 0
+
+    this.uncollected.set(ledger.sessionID, {
+      sessionID: ledger.sessionID,
+      taskId: ledger.taskId,
+      agentId: ledger.agentId,
+      model: ledger.model,
+      lastKnownTokens: totalTokens(known),
+      observedUncollected,
+    })
+
+    this.emit('cost:delta', {
+      taskId: ledger.taskId,
+      nodeId: ledger.taskId,
+      agentId: ledger.agentId,
+      sessionID: ledger.sessionID,
+      model: ledger.model,
+      deltaCost: 0,
+      deltaTokens: 0,
+      sessionTotalCost: priceUsage(known, pricing).total,
+      reason: eventReason,
+      settledTier: this.settledTierOf(ledger, known),
+      uncollected: { lastKnownTokens: totalTokens(known), observedUncollected },
+    })
+  }
+
+  /** Which table priced the delta, and the prompt size that selected the tier. */
+  private settledTierOf(ledger: TimeoutDeltaLedger, usage: TokenUsage): {
+    pricing: PricingSource
+    promptSizeAtSettlement: number
+    threshold: number | null
+  } {
+    const { pricing, source } = this.forecaster.tiersFor(ledger.model, ledger.provider)
+    const promptSize = promptSizeOf(usage)
+    return {
+      pricing: source,
+      promptSizeAtSettlement: promptSize,
+      threshold: selectTier(pricing.tiers, promptSize).threshold ?? null,
+    }
+  }
+
+  /**
+   * Discharge every outstanding obligation at once, with a single read each.
+   *
+   * Used by `shutdown` — a session that settles after the orchestrator has gone
+   * is still spending, and the one-shot flush is the last chance to bill it. A
+   * session that has not settled is recorded as uncollected with a `shutdown`
+   * reason, which is a true statement: we stopped looking because the process
+   * is ending, not because the session stopped.
+   */
+  private async flushTimeoutDeltas(): Promise<void> {
+    // Timers first, so nothing re-arms a collection we are about to discharge.
+    for (const timer of this.deltaTimers) clearTimeout(timer)
+    this.deltaTimers.clear()
+    for (const ledger of [...this.deltaLedgers.values()]) {
+      // Contained per ledger, not per loop. One settlement that throws must not
+      // abandon the ledgers after it, nor propagate out of `shutdown()` and
+      // leave `agents.clear()` unrun. The failure is already reported through
+      // that ledger's own `cost:delta`.
+      await this.settleTimeoutDelta(ledger, 'shutdown').catch(() => {})
     }
   }
 
@@ -2185,6 +2974,8 @@ export class NexusOrchestrator {
       cost: 0,
       tokensUsed: 0,
       provenance: { usage: 'estimated', pricing: 'unknown-model' },
+      usage: null,
+      idleAt: 0,
     }))
   }
 
@@ -2226,6 +3017,8 @@ export class NexusOrchestrator {
         cost: measured.cost,
         tokensUsed: measured.tokens,
         provenance: { usage: 'measured', pricing: measured.pricingSource },
+        usage: read.usage,
+        idleAt: read.idleAt,
       }
     }
 
@@ -2234,6 +3027,8 @@ export class NexusOrchestrator {
       cost: predicted.estimatedCost,
       tokensUsed: predicted.estimatedInputTokens + predicted.estimatedOutputTokens,
       provenance: { usage: 'estimated', pricing: predicted.pricingSource },
+      usage: null,
+      idleAt: 0,
     }
   }
 
@@ -2253,7 +3048,7 @@ export class NexusOrchestrator {
    * reported cost reads `NaN`. A wrong-but-finite number is strictly better
    * than a poisoned total.
    */
-  private async readSessionTokens(sessionID: string): Promise<{ read: true; usage: TokenUsage } | { read: false }> {
+  private async readSessionTokens(sessionID: string): Promise<{ read: true; usage: TokenUsage; idleAt: number } | { read: false }> {
     // Non-negative as well as finite: a token count cannot be negative, and
     // letting one through would SUBTRACT from reported spend.
     const finite = (value: unknown): number =>
@@ -2264,6 +3059,14 @@ export class NexusOrchestrator {
       if (!tokens) return { read: false }
       return {
         read: true,
+        // `time.idle` is the server's own "this session's agent loop went idle"
+        // stamp, and it is what makes settlement detectable from a plain poll
+        // rather than only from a live subscription. Absent for a session that
+        // has never been idle, which is the case this comparison must read as
+        // "not settled" — 0 is below every real stamp.
+        idleAt: typeof session?.time?.idle === 'number' && Number.isFinite(session.time.idle)
+          ? session.time.idle
+          : 0,
         usage: {
           input: finite(tokens.input),
           output: finite(tokens.output),
@@ -2274,6 +3077,22 @@ export class NexusOrchestrator {
     } catch {
       return { read: false }
     }
+  }
+
+  /**
+   * `readSessionTokens` with retries, for the DELTA read only.
+   *
+   * Three attempts, backing off between them, all of it inside the grace
+   * window. Returns `read: false` only when every attempt failed — at which
+   * point the collection is abandoned and reported, never estimated.
+   */
+  private async readSessionTokensWithRetry(sessionID: string): Promise<{ read: true; usage: TokenUsage; idleAt: number } | { read: false }> {
+    for (let attempt = 0; attempt < this.deltaReadBackoffMs.length; attempt++) {
+      if (attempt > 0) await this.sleep(this.deltaReadBackoffMs[attempt] ?? 0)
+      const read = await this.readSessionTokens(sessionID)
+      if (read.read) return read
+    }
+    return { read: false }
   }
 
   private checkBudget(): void {
@@ -2415,8 +3234,27 @@ export class NexusOrchestrator {
       // `byModel[model]` can be read without assuming all of it is billed.
       provenance: Object.fromEntries(this.costProvenance),
       measuredEntries: sumBy(this.costProvenance, p => p.measuredEntries),
-      estimatedEntries: sumBy(this.costProvenance, p => p.estimatedEntries)
+      estimatedEntries: sumBy(this.costProvenance, p => p.estimatedEntries),
+      // Sessions still running after we stopped charging for them.
+      // `observedUncollected` is deliberately NOT in `totalSpent`: adding an
+      // estimate to a measured total is the conflation `CostProvenance` exists
+      // to prevent. It is a LOWER BOUND on the under-count, not an upper one —
+      // everything those sessions spend after our last read is unbilled too —
+      // so a reader learns "we are under-counting by at least $X, and by an
+      // unknown amount on top", which is the true shape of the gap.
+      uncollected: this.uncollectedSummary()
     }, null, 2)
+  }
+
+  /** The `uncollected` block of the cost report. See `CostReportUncollected`. */
+  private uncollectedSummary(): CostReportUncollected {
+    const all = [...this.uncollected.values()]
+    return {
+      sessions: all.length,
+      lastKnownTokens: all.reduce((sum, u) => sum + u.lastKnownTokens, 0),
+      observedUncollected: all.reduce((sum, u) => sum + u.observedUncollected, 0),
+      taskIds: all.map(u => u.taskId),
+    }
   }
 
   // === Control ===
@@ -2442,6 +3280,11 @@ export class NexusOrchestrator {
   }
 
   async shutdown(): Promise<void> {
+    // FIRST, before anything that can await: an in-flight `executeTask` can
+    // reach its timeout during the teardown below, and must not arm a ledger
+    // after the flush that is supposed to discharge every ledger has run.
+    this.shuttingDown = true
+
     // Tear down all modules before stopping orchestrator components
     await this.moduleRegistry.teardownAll()
 
@@ -2456,6 +3299,15 @@ export class NexusOrchestrator {
       clearTimeout(this.stateChangeTimer)
       this.stateChangeTimer = null
     }
+    // BEFORE `agents.clear()`, and for two reasons that are both about the
+    // agent map rather than the ledgers. A terminated agent is removed from
+    // `this.agents` while its session keeps running, so after a step-2 or
+    // step-3 respawn the abandoned session is reachable from nowhere except
+    // this ledger — this flush is the only mechanism that will ever account
+    // for the sessions escalation itself creates. And it is the last chance to
+    // bill them: a session that settles after the orchestrator has gone is
+    // still spending.
+    await this.flushTimeoutDeltas()
     this.agents.forEach((agent) => {
       agent.status = 'terminated'
     })

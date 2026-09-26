@@ -50,6 +50,60 @@ export class ExecutionHistory {
     return full
   }
 
+  /**
+   * Add to an already-recorded entry's COST fields, in place.
+   *
+   * THE ARGUMENTS ARE INCREMENTS, not replacements. A record's `cost` is what
+   * its task cost; when a late correction arrives, the task's real total is the
+   * old figure plus the increment, and a record that ends up holding only the
+   * increment is worse than one that was never touched. The invariant this
+   * gives is the one worth having: after a timed-out task's session settles,
+   * `getStats().totalCost` for that task equals its share of `totalSpent`,
+   * because `trackCost` added the same number.
+   *
+   * WHY ADJUST AND NOT A SECOND `record`. Both this class and
+   * `PerformanceTracker` are append-only, and both `record` call sites in
+   * `executeTask` discarded the return value — so an append-based correction
+   * would double `getStats().totalCost`, show the user two history rows for one
+   * task, double `totalTasks` in `getScores` (halving every mean and putting a
+   * phantom task into the success-rate denominator), and overstate
+   * `measuredTasks`. Adjusting is the only version of this that keeps every
+   * count honest.
+   *
+   * ONLY `cost` and `tokensUsed` ARE TOUCHED. `status`, `duration`,
+   * `completedAt` and `error` describe what the task DID, and the task really
+   * did complete, or really did fail, at the moment it did. A late cost
+   * correction is accounting, not progress: a timed-out task stays `failed`
+   * however much it went on to spend afterwards.
+   *
+   * `costProvenance` is not adjusted either, deliberately. The entry keeps the
+   * provenance of the ORIGINAL charge, which is what the entry is a record of;
+   * the correction is applied to `trackCost` as its own `measured` entry, so
+   * the measured/estimated split of `totalSpent` still accounts for the whole
+   * amount. Rewriting the record's provenance instead would make
+   * `costSplit` (which sums these records) disagree with `spendSplit` (which
+   * sums `trackCost` entries) for no gain.
+   *
+   * CHANGELOG NOTE, and it is a real one: this makes `ExecutionRecord` values
+   * MUTABLE where they were previously write-once, which is a change to the
+   * mutability contract of an exported class in the package's public surface.
+   * A caller holding a record from `getAll()` will now observe its `cost`
+   * change underneath them. `getAll()` already returned the live objects
+   * (a shallow copy of the array, not of the records), so the aliasing is not
+   * new — but before this, nothing ever wrote through it.
+   *
+   * Returns `false` for an unknown id. `records` trims to `maxRecords`
+   * (500 by default), so eviction is a real possibility and a caller must be
+   * able to tell "corrected" from "not there" rather than assume the first.
+   */
+  adjust(id: string, { cost, tokensUsed }: { cost?: number; tokensUsed?: number }): boolean {
+    const record = this.records.find(r => r.id === id)
+    if (!record) return false
+    if (cost !== undefined) record.cost += cost
+    if (tokensUsed !== undefined) record.tokensUsed += tokensUsed
+    return true
+  }
+
   getAll(): ExecutionRecord[] {
     return [...this.records]
   }

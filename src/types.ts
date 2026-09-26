@@ -181,6 +181,47 @@ export interface CostTimeline {
   agent?: string
 }
 
+/**
+ * Sessions whose cost stopped being collected while they were still running.
+ *
+ * A timed-out task is not aborted, so its session keeps spending after the
+ * orchestrator has given up on it. Some of that spend is recovered — the
+ * remainder is billed when the session goes idle — but a session that never
+ * settles in the grace window is abandoned, and the part of its cost that was
+ * never read is reported HERE rather than silently dropped. Dropping it would
+ * be the original bug at a smaller scale.
+ *
+ * `observedUncollected` is a LOWER BOUND ON THE UNDER-COUNT, and the direction
+ * matters. It is the priced value of the increment seen between the last
+ * charge and the last read — spend that demonstrably happened and was
+ * demonstrably not billed. Everything the session spends AFTER that last read
+ * is also unbilled, and on a session abandoned while still generating that
+ * remainder grows without limit, so the true under-count is unbounded above
+ * and this figure is only where it is known to start. An earlier version of
+ * this field was called `upperBound` and described as "we are under-counting by
+ * at most $X", which asserts the opposite of what is knowable from a single
+ * observation; there is no upper bound derivable here, because the session may
+ * never stop.
+ *
+ * It is deliberately NOT added to `totalSpent`: adding an estimate to a
+ * measured total is the conflation `CostProvenance` exists to prevent, and a
+ * total containing a guess can no longer be compared against a budget
+ * honestly.
+ */
+export interface CostReportUncollected {
+  /** How many sessions are still uncollected. */
+  sessions: number
+  /** Sum of each session's last successfully read token count. */
+  lastKnownTokens: number
+  /**
+   * Priced value of the increment observed but not charged, in USD. A LOWER
+   * bound on the under-count, and not part of `totalSpent`. See above.
+   */
+  observedUncollected: number
+  /** The DAG node ids whose sessions were abandoned. */
+  taskIds: string[]
+}
+
 export interface AgentMessage {
   id: string
   from: string
@@ -250,6 +291,22 @@ export interface SpendSplit {
 export interface ExecutionResult {
   success: boolean
   tasks: TaskResult[]
+  /**
+   * A LOWER BOUND, and deliberately not a live object and not a promise.
+   *
+   * It is `totalSpent` at the instant `execute` returned. A task that timed out
+   * has already been charged at the instant of its timeout, but its session is
+   * NOT aborted: it keeps generating and keeps spending after the run returns,
+   * and the remainder is billed later, when the session finally goes idle
+   * (`cost:delta`) or is reported as an uncollected bound
+   * (`CostReport.uncollected`).
+   *
+   * A caller that needs the final figure must read `getCostReport()` after
+   * settlement has had a chance to happen, or subscribe to `cost:delta`. A
+   * figure that included a not-yet-observed increment would be a prediction
+   * wearing a measured number's clothes, which is the one thing
+   * `CostProvenance` exists to prevent.
+   */
   totalCost: number
   /**
    * Split of `totalCost`. Required rather than optional: `totalCost` is the
@@ -332,5 +389,34 @@ export interface NexusConfig {
     enabled: boolean
     patternStorage: 'sqlite' | 'memory'
     minConfidence: number
+  }
+  /**
+   * Cost-accounting knobs.
+   *
+   * OPTIONAL, deliberately: `NexusConfig` is an exported type, and a new
+   * REQUIRED block would stop every external `NexusConfig` literal from
+   * compiling for a field those callers never set. `mergeConfig` fills in the
+   * defaults, so an omitted block behaves exactly as a configured one.
+   *
+   * NOT REACHABLE FROM A CONFIG FILE. `NexusConfigManager` models only
+   * `models`, `budget` and `selfHealing` — the same short list that excludes
+   * `memory`, `security` and `learning`. This block is settable through the
+   * `NexusOrchestrator` constructor only, and it is documented that way rather
+   * than as user-configurable, because it is not.
+   */
+  cost?: {
+    /**
+     * How long after a task's timeout the orchestrator keeps waiting for that
+     * task's session to go idle before abandoning collection of its remaining
+     * cost.
+     *
+     * OMIT THIS to get the derived default, which is roughly HALF the task's
+     * own budget clamped to [30s, 180s] — by the time the clock runs out the
+     * session is already one model call past a limit that was generous, and a
+     * session that still has not settled within half of its own budget again is
+     * pathological rather than slow. Setting it to a number replaces the
+     * derived window outright rather than adjusting it.
+     */
+    timeoutDeltaGraceMs: number
   }
 }
