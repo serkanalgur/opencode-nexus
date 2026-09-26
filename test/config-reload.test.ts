@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, afterAll, mock } from 'bun:test'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, statSync, utimesSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, statSync, utimesSync, chmodSync } from 'node:fs'
 import * as realOs from 'node:os'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -782,6 +782,170 @@ describe('config reload — mtime polling (the guaranteed trigger)', () => {
 
     await waitFor('the poll to notice the length change', () => w.status().loadCount === 2)
     expect(w.status().models.reviewer).toBe('opencode/a-much-longer-model-id')
+  })
+
+  // ---------------------------------------------------------------------------
+  // The content signal. mtime+size is a proxy for "the file changed", and a
+  // proxy that a filesystem is free to get wrong: coarse timestamp granularity
+  // (two edits in the same tick), a network mount serving a cached mtime, or any
+  // filesystem that does not reliably update it. Every one of those leaves
+  // mtimeMs:size byte-identical while the content differs, so the poll would
+  // never fire and the config would go silently stale — the one failure this
+  // feature exists to prevent. These tests pin that the gap is closed, and
+  // that closing it did not cost the cheap path.
+  // ---------------------------------------------------------------------------
+
+  /** Two model ids of identical length, so only the content differs. */
+  const SAME_LEN_A = 'opencode/same-length-a'
+  const SAME_LEN_B = 'opencode/same-length-b'
+
+  /**
+   * Pin a file's mtime, so the tests below can prove mtime is *not* the signal
+   * that caught the change. A stat-only signature would miss these edits.
+   */
+  function pinMtime(file: string, seconds = 1_700_000_000) {
+    utimesSync(file, seconds, seconds)
+    return seconds * 1000
+  }
+
+  it('detects a content change that leaves mtime AND size identical', async () => {
+    const dir = makeProjectDir()
+    const file = projectConfigPath(dir)
+    writeConfig(file, { reviewer: SAME_LEN_A })
+    const pinnedMtime = pinMtime(file)
+    const statBefore = statSync(file)
+
+    const w = await startWatching(dir)
+    expect(w.status().loadCount).toBe(1)
+    expect(w.status().models.reviewer).toBe(SAME_LEN_A)
+
+    // The blind spot: same length, and mtime forced back to the value the
+    // signature was seeded with. mtimeMs:size is now bit-for-bit what it was.
+    const contentBefore = readFileSync(file, 'utf-8')
+    writeConfig(file, { reviewer: SAME_LEN_B })
+    pinMtime(file)
+    const statAfter = statSync(file)
+    expect(statAfter.mtimeMs).toBe(statBefore.mtimeMs)
+    expect(statAfter.size).toBe(statBefore.size)
+    // Same size, different bytes: the only thing left to tell them apart.
+    expect(readFileSync(file, 'utf-8')).not.toBe(contentBefore)
+
+    await waitFor('the poll to notice a content-only change', () => w.status().loadCount === 2)
+    expect(w.status().models.reviewer).toBe(SAME_LEN_B)
+    expect(w.status().trigger).toBe('poll')
+
+    // And it settles: the digest is compared against the new baseline, not
+    // against the seed, so the change is not reported on every tick.
+    await sleep(QUIET_MS)
+    expect(w.status().loadCount).toBe(2)
+  })
+
+  it('detects a revert to earlier content, which mtime:size cannot see', async () => {
+    const dir = makeProjectDir()
+    const file = projectConfigPath(dir)
+    writeConfig(file, { reviewer: SAME_LEN_A })
+    const pinnedMtime = pinMtime(file)
+
+    const w = await startWatching(dir)
+    expect(w.status().loadCount).toBe(1)
+
+    // A, then B, then back to A — all under one mtime. A stat-only signature
+    // sees one state and cannot tell it from any other; the digest sees each
+    // one, and the settle back onto A is a real change to load.
+    writeConfig(file, { reviewer: SAME_LEN_B })
+    pinMtime(file)
+    await waitFor('the change to B', () => w.status().loadCount === 2)
+    expect(w.status().models.reviewer).toBe(SAME_LEN_B)
+
+    writeConfig(file, { reviewer: SAME_LEN_A })
+    pinMtime(file)
+    expect(statSync(file).mtimeMs).toBe(pinnedMtime)
+    await waitFor('the revert back to A', () => w.status().loadCount === 3)
+    expect(w.status().models.reviewer).toBe(SAME_LEN_A)
+
+    await sleep(QUIET_MS)
+    expect(w.status().loadCount).toBe(3)
+  })
+
+  it('reads the content on every tick, and still does not reload an untouched file', async () => {
+    const dir = makeProjectDir()
+    const file = projectConfigPath(dir)
+    writeConfig(file, { reviewer: SAME_LEN_A })
+    pinMtime(file)
+
+    const w = await startWatching(dir)
+    expect(w.status().loadCount).toBe(1)
+
+    // The content read happens every tick for an existing file — that is the
+    // price of the guarantee, and `test/config-reload-content-signal.test.ts`
+    // counts the reads to pin it. What matters here is that paying it does not
+    // cause a reload: a stable digest must compare equal to its own baseline,
+    // on every tick, indefinitely.
+    await sleep(QUIET_MS)
+    expect(w.status().loadCount).toBe(1)
+    expect(w.status().trigger).toBe('initial')
+    expect(loadLogs).toHaveLength(1)
+
+    // A real edit still lands immediately afterwards, so the quiet period is
+    // not the poller having gone to sleep.
+    writeConfig(file, { reviewer: SAME_LEN_B })
+    await waitFor('the poll to still work after a quiet stretch', () => w.status().loadCount === 2)
+    expect(w.status().models.reviewer).toBe(SAME_LEN_B)
+  })
+
+  it('cannot fire a spurious reload on the first tick, digest included', async () => {
+    const dir = makeProjectDir()
+    const file = projectConfigPath(dir)
+    writeConfig(file, { reviewer: SAME_LEN_A })
+    pinMtime(file)
+
+    // Seeded with a full signature, so the first tick compares stat-to-stat
+    // *and* digest-to-digest. A seed carrying only the cheap half would report
+    // a change on tick one for every file that exists.
+    const w = await startWatching(dir)
+    expect(w.status().loadCount).toBe(1)
+    await sleep(QUIET_MS)
+    expect(w.status().loadCount).toBe(1)
+    expect(w.status().trigger).toBe('initial')
+    expect(loadLogs).toHaveLength(1)
+
+    // Same for a file that does not exist yet: both watched paths start as the
+    // stable 'absent' stamp, so their creation is the one change to report.
+    const absent = await startWatching(makeProjectDir())
+    await sleep(QUIET_MS)
+    expect(absent.status().loadCount).toBe(1)
+  })
+
+  it('collapses an unreadable file to a stable stamp instead of spinning', async () => {
+    const dir = makeProjectDir()
+    const file = projectConfigPath(dir)
+    writeConfig(file, { reviewer: SAME_LEN_A })
+    pinMtime(file)
+
+    const w = await startWatching(dir)
+    expect(w.status().loadCount).toBe(1)
+
+    // `statSync` succeeds and reports a regular file, but the read cannot
+    // succeed. The digest must resolve to a stable value, not a throw: a throw
+    // would kill the interval and silently void the guarantee, and a varying
+    // value would spin the poller.
+    chmodSync(file, 0o000)
+    try {
+      // One reload, and only one: the effective config really did change (the
+      // level stops contributing), so reporting it is correct. The stamp is
+      // then stable, which is the part under test.
+      await waitFor('the unreadable file to be reported once', () => w.status().loadCount === 2)
+      await sleep(QUIET_MS)
+      expect(w.status().loadCount).toBe(2)
+
+      // Still alive after the read failure — the interval was not killed.
+      chmodSync(file, 0o644)
+      writeConfig(file, { reviewer: SAME_LEN_B })
+      await waitFor('the poller to survive an unreadable file', () => w.status().loadCount === 3)
+      expect(w.status().models.reviewer).toBe(SAME_LEN_B)
+    } finally {
+      chmodSync(file, 0o644)
+    }
   })
 
   it('coalesces a second change landing while a reload is already pending', async () => {
