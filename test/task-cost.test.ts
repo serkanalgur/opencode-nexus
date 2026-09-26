@@ -76,6 +76,9 @@ function makeCtx(opts: {
   waitRejectsAfterMs?: number
 } = {}) {
   let gets = 0
+  // The `AbortSignal` handed to `session.wait`, so a test can assert the
+  // long-poll was actually CLOSED rather than merely forgotten.
+  let waitSignal: AbortSignal | undefined
   /** The `n`th value of `seq`, holding the last one once exhausted. */
   const at = <T>(seq: T[] | undefined, n: number, fallback: T): T =>
     seq && seq.length > 0 ? (seq[Math.min(n, seq.length - 1)] as T) : fallback
@@ -83,7 +86,8 @@ function makeCtx(opts: {
   const session: Record<string, unknown> = {
     create: mock(() => Promise.resolve({ id: 'ses_child' })),
     prompt: mock(() => opts.promptThrows ? Promise.reject(new Error('provider refused')) : Promise.resolve()),
-    wait: mock((): Promise<void> => {
+    wait: mock((_input: unknown, requestOptions?: { signal?: AbortSignal }): Promise<void> => {
+      waitSignal = requestOptions?.signal
       if (opts.waitNever) return new Promise<void>(() => {})
       if (opts.waitRejectsAfterMs !== undefined) {
         return new Promise<void>((_, reject) =>
@@ -122,6 +126,7 @@ function makeCtx(opts: {
     storage: { get: mock(() => Promise.resolve(null)), set: mock(() => Promise.resolve()) },
     tool: { list: mock(() => Promise.resolve([])) },
     getCalls: () => gets,
+    waitSignal: () => waitSignal,
   }
 }
 
@@ -153,14 +158,21 @@ interface TaskNode {
  */
 async function runTask(
   ctx: ReturnType<typeof makeCtx>,
-  { model = MODEL, pricing = SONNET_PER_1K, tiers, onReady, afterTask, settle = 'none', taskTimeoutMs = 1000, graceMs, selfHealing }: {
+  { model = MODEL, pricing = SONNET_PER_1K, tiers, onReady, afterTask, settle = 'none', taskTimeoutMs = 1000, graceMs, selfHealing, preShutdown }: {
     model?: string
     pricing?: typeof SONNET_PER_1K | null
     /** A full tiered price list, written straight into `modelCosts`. */
     tiers?: { tiers: readonly { threshold?: number; rates: typeof SONNET_PER_1K }[] }
     onReady?: (orchestrator: NexusOrchestrator) => void
-    /** Runs after `executeTask` returns and before anything is read back. */
-    afterTask?: (orchestrator: NexusOrchestrator) => unknown
+    /**
+     * Runs after `executeTask` returns and before anything is read back. Gets
+     * the node so a test can simulate what escalation does to it — replace
+     * `node.result` — which is what the identity guard on the DAG correction
+     * exists for.
+     */
+    afterTask?: (orchestrator: NexusOrchestrator, node: TaskNode) => unknown
+    /** Shut down BEFORE the task runs, so a late timeout has nothing to flush to. */
+    preShutdown?: boolean
     settle?: 'none' | 'flush'
     taskTimeoutMs?: number
     graceMs?: number
@@ -203,10 +215,11 @@ async function runTask(
     markFailed: () => { completed = true },
   }
 
+  if (preShutdown) await orchestrator.shutdown()
   const agent = await orchestrator.spawnAgent({ role: 'coder', model }, { task: 'Do the thing' })
   await orchestrator['executeTask'](agent, node as never)
 
-  const after = await afterTask?.(orchestrator)
+  const after = await afterTask?.(orchestrator, node)
   if (settle === 'flush') await orchestrator['flushTimeoutDeltas']()
 
   // Read every assertion target BEFORE the shutdown, so `afterTask` is free to
@@ -216,7 +229,7 @@ async function runTask(
   const result = node.result
   const totalSpent = orchestrator.totalSpent
   await orchestrator.shutdown()
-  return { result, costReport, totalSpent, marked: completed, after, orchestrator, agent }
+  return { result, costReport, totalSpent, marked: completed, after, orchestrator, agent, node }
 }
 
 describe('per-task cost from real session usage', () => {
@@ -745,32 +758,32 @@ const usage = (n: Partial<Tokens>): Tokens => ({
   input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, ...n,
 })
 
-  // A DISCOUNTED long-context tier: base {0.01,0.01} per 1K, and anything over
-  // a 200k prompt bills at {0.001,0.001}. This is Gemini's published shape and
-  // it is the one that inverts the direction of the error.
-  //
-  // UNITS: `modelCosts` and `priceTokens` are USD per 1K, so the design's
-  // worked figures (a base of "10", an increment of "$1.10") are per-MILLION
-  // rates — OpenCode's own unit — and are reproduced here 1000x smaller. The
-  // dollars are identical either way; only the scale of the rate differs.
-  const DISCOUNTED = {
-    tiers: [
-      { rates: { input: 0.01, output: 0.01, cacheRead: 0, cacheWrite: 0 } },
-      { threshold: 200_000, rates: { input: 0.001, output: 0.001, cacheRead: 0, cacheWrite: 0 } },
-    ],
-  }
-  // A MONOTONE price list: base {0.001,0.001}, premium {0.006,0.006} above
-  // 200k. The common case, where the arithmetic telescopes exactly.
-  const MONOTONE = {
-    tiers: [
-      { rates: { input: 0.001, output: 0.001, cacheRead: 0, cacheWrite: 0 } },
-      { threshold: 200_000, rates: { input: 0.006, output: 0.006, cacheRead: 0, cacheWrite: 0 } },
-    ],
-  }
+// A DISCOUNTED long-context tier: base {0.01,0.01} per 1K, and anything over
+// a 200k prompt bills at {0.001,0.001}. This is Gemini's published shape and
+// it is the one that inverts the direction of the error.
+//
+// UNITS: `modelCosts` and `priceTokens` are USD per 1K, so the design's
+// worked figures (a base of "10", an increment of "$1.10") are per-MILLION
+// rates — OpenCode's own unit — and are reproduced here 1000x smaller. The
+// dollars are identical either way; only the scale of the rate differs.
+const DISCOUNTED = {
+  tiers: [
+    { rates: { input: 0.01, output: 0.01, cacheRead: 0, cacheWrite: 0 } },
+    { threshold: 200_000, rates: { input: 0.001, output: 0.001, cacheRead: 0, cacheWrite: 0 } },
+  ],
+}
+// A MONOTONE price list: base {0.001,0.001}, premium {0.006,0.006} above
+// 200k. The common case. Exact under the settled rule ONLY when the increment
+// does not cross 200k — see the crossing fixtures below, which it does not.
+const MONOTONE = {
+  tiers: [
+    { rates: { input: 0.001, output: 0.001, cacheRead: 0, cacheWrite: 0 } },
+    { threshold: 200_000, rates: { input: 0.006, output: 0.006, cacheRead: 0, cacheWrite: 0 } },
+  ],
+}
 
 describe('the settled tier — pricing an increment, not a session', () => {
-
-  it('bills a $1.10 increment at $0.11, not at the base rate it appears to be', () => {
+  it('bills a $1.10 increment at $0.11, not at the base rate its own size appears to select', () => {
     // The two readings, side by side. `promptSizeOf(increment)` is a
     // meaningless number: the increment's tokens were generated by calls whose
     // prompt was the FULL context at that moment, not the increment.
@@ -779,44 +792,126 @@ describe('the settled tier — pricing an increment, not a session', () => {
     const increment = usage({ input: 100_000, output: 10_000 })
 
     // What the timeout charge was: 150k at the base rate plus 10k out.
-    //   150/1K * 10 + 10/1K * 10 = 1.50 + 0.10 = $1.60
+    //   150/1K * 0.01 + 10/1K * 0.01 = 1.50 + 0.10 = $1.60
     expect(priceUsage(atTimeout, DISCOUNTED).total).toBeCloseTo(1.60, 12)
-    // The ideal, for reference: one selection over the whole settled session.
-    //   250/1K * 1 + 20/1K * 1 = 0.25 + 0.20 = $0.27
-    expect(priceUsage(atSettlement, DISCOUNTED).total).toBeCloseTo(0.27, 12)
-    // The trap: the increment's own prompt size is 100k, under the threshold,
-    // so `priceUsage` selects the BASE row and prices it at $1.10.
+    // Pricing the increment by its own prompt size: 100k is under the 200k
+    // threshold, so `priceUsage` selects the BASE row and charges
+    //   100/1K * 0.01 + 10/1K * 0.01 = 1.00 + 0.10 = $1.10
     expect(promptSizeOf(increment)).toBe(100_000)
     expect(priceUsage(increment, DISCOUNTED).total).toBeCloseTo(1.10, 12)
     // The rule: the tier comes from the CUMULATIVE usage at settlement.
-    //   100/1K * 1 + 10/1K * 1 = 0.10 + 0.01 = $0.11
+    //   100/1K * 0.001 + 10/1K * 0.001 = 0.10 + 0.01 = $0.11
     expect(priceUsageAtSettledTier(increment, DISCOUNTED, atSettlement).total).toBeCloseTo(0.11, 12)
   })
 
-  it('is EXACT on a monotone price list: the increment plus the timeout charge re-sums to the session', () => {
-    // The same shape with rates that do not invert. Here the arithmetic
-    // telescopes, and the correction is exact to the cent.
+  it('re-sums to the one-shot figure exactly when the increment does not cross a tier boundary', () => {
+    // 250k and 300k are BOTH over the 200k threshold, so both halves are
+    // priced at {0.006} and the two independently-tiered sums telescope.
+    //
+    // The name matters: this is exact BECAUSE 250k and 300k sit in the same
+    // tier, and an earlier version of this test claimed exactness for the rule
+    // in general. It is not exact in general — the two crossing fixtures below
+    // are where it breaks, and they are the reason the next test exists.
     const atTimeout = usage({ input: 250_000 })
     const atSettlement = usage({ input: 300_000 })
     const increment = usage({ input: 50_000 })
 
-    // 250k is over the 200k threshold, so even the TIMEOUT charge is at {6,6}.
-    //   250/1K * 6 = $1.50
     expect(priceUsage(atTimeout, MONOTONE).total).toBeCloseTo(1.50, 12)
-    //   300/1K * 6 = $1.80
     expect(priceUsage(atSettlement, MONOTONE).total).toBeCloseTo(1.80, 12)
-    // The trap: the increment's own prompt size is 50k, under the threshold, so
-    //   50/1K * 1 = $0.05 — off by 6x on a $0.30 correction.
+    // Naive: the increment's own 50k is under the threshold, so
+    //   50/1K * 0.001 = $0.05 — off by 6x on a $0.30 correction.
     expect(priceUsage(increment, MONOTONE).total).toBeCloseTo(0.05, 12)
-    // The rule, at the settled tier:
-    //   50/1K * 6 = $0.30
+    // The rule, at the settled tier: 50/1K * 0.006 = $0.30
     const delta = priceUsageAtSettledTier(increment, MONOTONE, atSettlement).total
     expect(delta).toBeCloseTo(0.30, 12)
-    // EXACTLY the whole session, to the cent. This is the property that makes
-    // the rule right rather than merely better: on a monotone price list the
-    // two independently-tiered halves re-sum to a single-tiered total.
+    // EXACTLY the whole session priced in one selection, to the cent.
     expect(priceUsage(atTimeout, MONOTONE).total + delta)
       .toBeCloseTo(priceUsage(atSettlement, MONOTONE).total, 12)
+  })
+
+  it('does NOT re-sum to the one-shot figure when the increment crosses a boundary, and says by how much', () => {
+    // The residual, measured rather than asserted away. Both fixtures cross
+    // 200k, so the increment is priced entirely at the settled (premium) tier
+    // while part of it was really generated under a sub-threshold prompt.
+    for (const [atTimeoutIn, atSettledIn] of [[150_000, 250_000], [190_000, 260_000]] as const) {
+      const atTimeout = usage({ input: atTimeoutIn })
+      const atSettlement = usage({ input: atSettledIn })
+      const increment = usage({ input: atSettledIn - atTimeoutIn })
+      const timeoutCharge = priceUsage(atTimeout, MONOTONE).total
+      const settledDelta = priceUsageAtSettledTier(increment, MONOTONE, atSettlement).total
+      const naiveDelta = priceUsage(increment, MONOTONE).total
+      const sum = timeoutCharge + settledDelta
+
+      // 150k -> 250k: base 0.15, settled delta 0.60, sum 0.75, one-shot 1.50.
+      // 190k -> 260k: base 0.19, settled delta 0.42, sum 0.61, one-shot 1.56.
+      expect(timeoutCharge).toBeCloseTo(atTimeoutIn * 0.001 / 1000, 12)
+      expect(settledDelta).toBeCloseTo((atSettledIn - atTimeoutIn) * 0.006 / 1000, 12)
+      expect(sum).not.toBeCloseTo(priceUsage(atSettlement, MONOTONE).total, 6)
+
+      // The settled rule is still the better of the two, and by a factor that
+      // does not depend on how long the task ran: it prices at the rate the
+      // session ENDED on rather than the rate its smallest prompt would imply.
+      expect(settledDelta).toBeGreaterThan(naiveDelta)
+      expect(settledDelta / naiveDelta).toBeCloseTo(6, 6)
+    }
+  })
+
+  it('has a residual that is INTRODUCED, not inherited, when a discounted tier is crossed', () => {
+    // The flagship discounted fixture, stated honestly. 150k is below the
+    // threshold, so the timeout charge of $1.60 is EXACT — there is no
+    // mis-tiering here to inherit a residual from.
+    //
+    // WHAT THE TRUE COST OF THE INCREMENT IS, and the limits of saying so: the
+    // increment's 100k of input was produced by calls whose prompts ran from
+    // 150k up to 250k, so some were billed at the base rate and some at the
+    // discounted one, in a proportion we cannot observe from session totals.
+    // $2.16 below is the case where the split is EVEN — 50k at base and 50k at
+    // the premium rate. It is a mid-point model, not a measurement, and it is
+    // the number to compare against only with that caveat: a session that
+    // finished most of its growth after crossing would have a higher true cost,
+    // and one that crossed late a lower one. The per-call breakdown is the only
+    // thing that would settle it, and it is not what we are given.
+    //
+    // What does NOT depend on the split is the comparison that matters: the
+    // settled rule prices the increment at the rate the session ENDED on, the
+    // naive rule at the rate its SMALLEST prompt implies, and the truth is
+    // somewhere between them. So the settled rule is closer for every split, and
+    // the timeout charge is exact either way.
+    const atTimeout = usage({ input: 150_000, output: 10_000 })
+    const atSettlement = usage({ input: 250_000, output: 20_000 })
+    const increment = usage({ input: 100_000, output: 10_000 })
+    const timeoutCharge = priceUsage(atTimeout, DISCOUNTED).total
+    const settledDelta = priceUsageAtSettledTier(increment, DISCOUNTED, atSettlement).total
+    const naiveDelta = priceUsage(increment, DISCOUNTED).total
+    //   50/1K * 0.01 + 50/1K * 0.001 + 10/1K * 0.001 = 0.50 + 0.05 + 0.01
+    const evenSplitTotal = 1.60 + (50_000 * 0.01 / 1000 + 50_000 * 0.001 / 1000 + 10_000 * 0.001 / 1000)
+
+    // The timeout charge is right, and so is the one-shot figure for the whole
+    // settled session.
+    expect(timeoutCharge).toBeCloseTo(1.60, 12)
+    expect(priceUsage(atSettlement, DISCOUNTED).total).toBeCloseTo(0.27, 12)
+    // NEITHER scheme reaches the truth: 1.71 and 2.70 against 2.16 on an even
+    // split. An earlier version of this comment claimed the settled rule's
+    // residual was "bounded by the timeout snapshot's own mis-tiering" — and
+    // for THIS fixture the snapshot is exact, so the whole shortfall is
+    // introduced by the choice, not inherited.
+    expect(evenSplitTotal).toBeCloseTo(2.16, 12)
+    expect(timeoutCharge + settledDelta).toBeCloseTo(1.71, 12)
+    expect(timeoutCharge + naiveDelta).toBeCloseTo(2.70, 12)
+    expect(Math.abs(evenSplitTotal - (timeoutCharge + settledDelta)))
+      .toBeLessThan(Math.abs(evenSplitTotal - (timeoutCharge + naiveDelta)))
+
+    // The split-independence claim above, as an assertion: bracket the true cost
+    // over every possible split of the increment's input across the threshold.
+    // The low end is all-base (1.60 + 1.00 + 0.10 = 2.70) and the high end is
+    // all-premium (1.60 + 0.10 + 0.01 = 1.71), and the settled figure is the
+    // high end — so it is the closer of the two for every split in between.
+    const allBase = 1.60 + (100_000 * 0.01 / 1000 + 10_000 * 0.01 / 1000)
+    const allPremium = 1.60 + (100_000 * 0.001 / 1000 + 10_000 * 0.001 / 1000)
+    expect(allPremium).toBeLessThan(evenSplitTotal)
+    expect(evenSplitTotal).toBeLessThan(allBase)
+    expect(Math.abs(evenSplitTotal - allPremium))
+      .toBeLessThan(Math.abs(evenSplitTotal - allBase))
   })
 })
 
@@ -899,9 +994,32 @@ describe('a timed-out task is billed for what its session did afterwards', () =>
     expect(deltas[0].deltaTokens).toBe(50_000)
     expect(totalSpent).toBeCloseTo(1.80, 12)
     // EXACTLY the whole session priced in one selection. On a monotone price
-    // list the two independently-tiered halves telescope, and this is the
-    // assertion that says so to the cent.
+    // list, and only while the increment stays inside one tier, the two
+    // independently-priced halves telescope — which is the assertion that says
+    // so to the cent. The crossing fixtures above are where it stops holding.
     expect(costReport.totalSpent).toBeCloseTo(priceUsage(atSettlement, MONOTONE).total, 12)
+
+    // The event fields that were emitted but never checked.
+    expect(deltas[0].taskId).toBe('node-1')
+    expect(deltas[0].nodeId).toBe('node-1')
+    expect(deltas[0].agentId).toBeTruthy()
+    expect(deltas[0].sessionID).toBeTruthy()
+    expect(deltas[0].model).toBe(MODEL)
+    expect(deltas[0].sessionTotalCost).toBeCloseTo(priceUsage(atSettlement, MONOTONE).total, 12)
+    // `settledTierOf` was entirely untested. The settled usage is 300k, which is
+    // over the threshold, so the threshold that selected the tier is 200000 and
+    // the prompt size that selected it is 300000.
+    expect(deltas[0].settledTier).toEqual({
+      pricing: 'model-costs',
+      promptSizeAtSettlement: 300_000,
+      threshold: 200_000,
+    })
+    // All four correction targets reported, not just the two the first version
+    // of this event carried.
+    expect(deltas[0].recordsAdjusted).toEqual({ history: true, performance: true, node: true, agent: true })
+    // No error, and nothing uncollected.
+    expect(deltas[0].error).toBeUndefined()
+    expect(deltas[0].uncollected).toBeUndefined()
   })
 
   it('never reports less than the charge already taken at the timeout', async () => {
@@ -945,11 +1063,17 @@ describe('a timed-out task is billed for what its session did afterwards', () =>
 })
 
 describe('the collection is idempotent, and reports what it could not collect', () => {
-  it('changes NOTHING at all when the session is reported idle again having spent nothing more', async () => {
+  it('calls NOTHING when the session goes idle without having been billed for anything more', async () => {
     // NOT "charge $0". A $0 charge is not a no-op: `trackCost` would grow
     // `costHistory`, add a provenance entry, run the budget check and fire a
     // state change. So the assertion is that none of those moved, which is what
     // proves `trackCost` was never called.
+    //
+    // The fixture idles EXACTLY ONCE. An earlier version of this test was named
+    // "when the session is reported idle again", which described an idempotency
+    // the fixture never produced — there was no second idle. The genuinely
+    // idempotent second handler is provoked deliberately at the end of this
+    // test instead, by calling the flush a second time.
     const atTimeout = usage({ input: 40_000, output: 2_000 })
     const { costReport, totalSpent, after, orchestrator } = await runTask(
       // The session idles late, and has not been billed for anything since the
@@ -987,6 +1111,18 @@ describe('the collection is idempotent, and reports what it could not collect', 
     expect(deltas[0].deltaCost).toBe(0)
     expect(deltas[0].deltaTokens).toBe(0)
     expect(deltas[0].reason).toBe('session-idle')
+    // Even on the nothing-to-do path the event says WHICH tier the session was
+    // last seen at, so a caller can tell "measured nothing new" from "could not
+    // read it at all". Here nothing moved and the last snapshot is the
+    // timeout one: 40k in / 2k out, 42k of prompt size, no threshold crossed.
+    expect(deltas[0].settledTier).toEqual({
+      pricing: 'model-costs',
+      promptSizeAtSettlement: 40_000,
+      threshold: null,
+    })
+    // No corrections, and nothing uncollected — this is not an abandonment.
+    expect(deltas[0].recordsAdjusted).toBeUndefined()
+    expect(deltas[0].uncollected).toBeUndefined()
     // And the ledger is gone, so a second handler — a duplicate event, a late
     // timer, the shutdown flush — has nothing to charge even if it fires.
     expect(orchestrator['deltaLedgers'].size).toBe(0)
@@ -1044,7 +1180,7 @@ describe('the collection is idempotent, and reports what it could not collect', 
     expect(record.costProvenance).toEqual({ usage: 'measured', pricing: 'model-costs' })
   })
 
-  it('reports an abandoned session as a BOUND, charges nothing for it, and leaves no timer behind', async () => {
+  it('reports an abandoned session as observed-uncharged spend, charges nothing for it, and leaves no timer behind', async () => {
     // The session never goes idle and `time.idle` never advances, so the
     // deadline probe finds nothing to reconcile and the collection is dropped.
     const atTimeout = usage({ input: 150_000, output: 10_000 })
@@ -1072,26 +1208,48 @@ describe('the collection is idempotent, and reports what it could not collect', 
     expect(totalSpent).toBeCloseTo(priceUsage(atTimeout, DISCOUNTED).total, 12)
     expect(costReport.totalSpent).toBeCloseTo(1.60, 12)
 
-    // But the remainder is RECORDED rather than dropped. `upperBound` is the
-    // priced increment between the last charge and the last read, and it is
-    // deliberately NOT in `totalSpent`: adding an estimate to a measured total
-    // is the conflation `CostProvenance` exists to prevent. A reader gets "we
-    // are under-counting by at most $X", not a total containing a guess.
+    // But the remainder is RECORDED rather than dropped. `observedUncollected`
+    // is the priced increment between the last charge and the last read, and it
+    // is deliberately NOT in `totalSpent`: adding an estimate to a measured
+    // total is the conflation `CostProvenance` exists to prevent.
+    //
+    // IT IS A LOWER BOUND ON THE UNDER-COUNT, not an upper bound on it, and the
+    // direction is the point. This session was still generating when we gave up
+    // on it, so everything it spent after this last read is unbilled too, and
+    // the real figure is unbounded above. What the number supports is "we are
+    // under-counting by AT LEAST $X, and by an unknown amount on top" — which
+    // is still worth having, because silence is what made this a defect.
     expect(costReport.uncollected).toEqual({
       sessions: 1,
       lastKnownTokens: 430_000,
-      upperBound: priceUsageAtSettledTier(
+      observedUncollected: priceUsageAtSettledTier(
         usage({ input: 250_000, output: 20_000 }), DISCOUNTED, atProbe).total,
       taskIds: ['node-1'],
     })
-    // 400k is over the 200k threshold, so the bound is priced at the
-    // discounted tier: 250/1K * 0.001 + 20/1K * 0.001 = $0.27.
-    expect(costReport.uncollected.upperBound).toBeCloseTo(0.27, 12)
-    expect(totalSpent).toBeLessThan(1.60 + costReport.uncollected.upperBound)
+    // 400k is over the 200k threshold, so the observed increment is priced at
+    // the discounted tier: 250/1K * 0.001 + 20/1K * 0.001 = $0.27.
+    expect(costReport.uncollected.observedUncollected).toBeCloseTo(0.27, 12)
+    expect(totalSpent).toBeLessThan(1.60 + costReport.uncollected.observedUncollected)
 
     expect(deltas).toHaveLength(1)
     expect(deltas[0].reason).toBe('abandoned')
     expect(deltas[0].deltaCost).toBe(0)
+    // The event carries the same observed-uncharged figure as the report, so a
+    // subscriber sees the gap without polling `getCostReport()`.
+    expect(deltas[0].uncollected).toEqual({
+      lastKnownTokens: 430_000,
+      observedUncollected: 0.27,
+    })
+    // The last read was 400k, over the threshold, so the tier that priced the
+    // observed increment is the discounted one.
+    expect(deltas[0].settledTier).toEqual({
+      pricing: 'model-costs',
+      promptSizeAtSettlement: 400_000,
+      threshold: 200_000,
+    })
+    // Nothing was charged, so nothing was corrected and no error is reported.
+    expect(deltas[0].recordsAdjusted).toBeUndefined()
+    expect(deltas[0].error).toBeUndefined()
 
     // THE LEAK ASSERTION. One timer per timed-out task, removed in its own
     // `finally`, and one ledger per session, removed when its collection
@@ -1210,9 +1368,13 @@ describe('a delta read that fails is retried, and never becomes an estimate', ()
     expect(totalSpent).toBeCloseTo(priceUsage(atTimeout, MONOTONE).total, 12)
     expect(costReport.uncollected.sessions).toBe(1)
     expect(costReport.uncollected.taskIds).toEqual(['node-1'])
-    // No increment was ever observed, so there is no observed increment to
-    // bound by, and the bound says so rather than inventing a figure.
-    expect(costReport.uncollected.upperBound).toBe(0)
+    // The last read showed no growth at all, so there is no observed-uncharged
+    // spend to report and the figure is an honest 0 — NOT a fallback and NOT a
+    // bound. An earlier version fell back to `lastDeltaCost` here, which was
+    // dead code (a ledger settles at most once, so the field was always 0), and
+    // this assertion then pinned that coincidental zero as designed policy.
+    // The field and the branch are gone.
+    expect(costReport.uncollected.observedUncollected).toBe(0)
     // The deadline timer had not fired yet, so it is the SHUTDOWN sweep that has
     // to clear it — and the sweep runs before anything is read back here.
     expect(timers).toBe(1)
@@ -1248,7 +1410,7 @@ describe('only a timeout arms a collection', () => {
     expect(orchestrator['deltaLedgers'].size).toBe(0)
     expect(orchestrator['deltaTimers'].size).toBe(0)
     expect(costReport.uncollected).toEqual({
-      sessions: 0, lastKnownTokens: 0, upperBound: 0, taskIds: [],
+      sessions: 0, lastKnownTokens: 0, observedUncollected: 0, taskIds: [],
     })
     // The original charge is untouched by any of this.
     expect(costReport.totalSpent).toBeCloseTo(
@@ -1326,7 +1488,13 @@ describe('teardown between the timeout and the idle', () => {
       expect(ledgers).toBe(0)
       expect(totalSpent).toBeCloseTo(1.80, 12)
       expect(deltas).toHaveLength(1)
+      // `shutdown` on a CHARGED delta means "charged at teardown, settlement
+      // unverified" — the opposite of the abandon path, where the same reason
+      // sits beside a `deltaCost` of 0 and is rewritten to `abandoned` so it
+      // cannot read as "it settled and we billed it". The non-zero deltaCost is
+      // what distinguishes the two.
       expect(deltas[0].reason).toBe('shutdown')
+      expect(deltas[0].deltaCost).toBeCloseTo(0.30, 12)
       // And nothing is left registered on the orchestrator itself.
       expect(orchestrator['deltaTimers'].size).toBe(0)
     } finally {
@@ -1547,5 +1715,284 @@ describe('a re-entrant collection attempt bills nothing', () => {
     // And the session is finished with: both blocks are down, so a further
     // attempt from anywhere has nothing left to bill against.
     expect(orchestrator['deltaLedgers'].size).toBe(0)
+  })
+})
+
+describe('a correction that fails part-way is reported, not half-applied silently', () => {
+  it('still bills, still emits, and does not throw when a budget:alert subscriber throws', async () => {
+    // `trackCost` ends in `checkBudget()`, which `emit`s `budget:alert`, and
+    // `emit` is a bare `forEach` with no try/catch. Both `adjust` calls used to
+    // sit AFTER `trackCost`, so a throwing subscriber landed the charge, skipped
+    // every correction, emitted nothing, and propagated out — leaving
+    // `totalSpent` carrying the delta while history, performance, the agent
+    // metrics and the DAG result all still held the old figure, with no event
+    // to say so. The money was wrong AND unreported.
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      const atTimeout = usage({ input: 250_000 })
+      const atSettlement = usage({ input: 300_000 })
+      const deltas: Array<Record<string, unknown>> = []
+      const { totalSpent, costReport, after, orchestrator } = await runTask(
+        makeCtx({ tokenSequence: [atTimeout, atSettlement], waitResolvesAfterMs: 60 }),
+        {
+          pricing: null, tiers: MONOTONE, taskTimeoutMs: 30, graceMs: 400, settle: 'flush',
+          onReady: (o) => {
+            // remainingPercent is 0.25 after the 1.50 initial charge and 0.10
+            // after the 1.80 delta, so with maxTotalCost 2.00 this fires ONLY
+            // from inside the delta's `trackCost`.
+            o.budget = { ...o.budget, maxTotalCost: 2.00, hardLimit: false }
+            o.on('budget:alert', () => { throw new Error('subscriber exploded') })
+            o.on('cost:delta', (d: Record<string, unknown>) => deltas.push(d))
+          },
+          afterTask: async () => { await Bun.sleep(150) },
+        }
+      )
+
+      // The money moved. `trackCost` applies every mutation before its only
+      // throw site, so a subscriber that throws from inside `checkBudget`
+      // leaves the charge in place.
+      expect(totalSpent).toBeCloseTo(1.80, 12)
+      expect(costReport.totalSpent).toBeCloseTo(1.80, 12)
+
+      // The event fired, and it says the corrections did not happen. The
+      // `recordsAdjusted` field exists precisely so this is visible.
+      expect(deltas).toHaveLength(1)
+      expect(deltas[0].deltaCost).toBeCloseTo(0.30, 12)
+      expect(deltas[0].recordsAdjusted)
+        .toEqual({ history: false, performance: false, node: false, agent: false })
+      expect(deltas[0].error).toBe('subscriber exploded')
+
+      // And the records really were left alone, rather than the event lying.
+      expect(orchestrator.executionHistory.getAll()[0].cost).toBeCloseTo(1.50, 12)
+      expect(orchestrator.performanceTracker.getScores()[0].avgCost).toBeCloseTo(1.50, 12)
+      // `shutdown()` did not throw, and the ledger was still cleaned up.
+      expect(after).toBeUndefined()
+      expect(orchestrator['deltaLedgers'].size).toBe(0)
+    } finally {
+      await Bun.sleep(50)
+      process.off('unhandledRejection', onUnhandled)
+    }
+    expect(unhandled).toEqual([])
+  })
+
+  it('surfaces an evicted history record as recordsAdjusted.history false, end to end', async () => {
+    // `ExecutionHistory` trims to 500 records, so by the time a long overrun
+    // settles its record can be GONE. The only test of this was a unit-level
+    // `adjust('exec-does-not-exist')`, which never exercised the thing the
+    // design called the point: the orchestrator SURFACING the false. Eviction
+    // is reproduced with the real trim rather than a stub — 500 further records
+    // push the timeout's record out of the window.
+    const atTimeout = usage({ input: 250_000 })
+    const atSettlement = usage({ input: 300_000 })
+    const deltas: Array<Record<string, unknown>> = []
+    const { totalSpent, after, orchestrator } = await runTask(
+      makeCtx({ tokenSequence: [atTimeout, atSettlement], waitResolvesAfterMs: 60 }),
+      {
+        pricing: null, tiers: MONOTONE, taskTimeoutMs: 30, graceMs: 400, settle: 'flush',
+        afterTask: async (o) => {
+          const filler = {
+            taskId: 'filler', taskName: 'filler', role: 'coder', model: 'x', status: 'success' as const,
+            cost: 0, costProvenance: { usage: 'measured' as const, pricing: 'model-costs' as const },
+            duration: 0, tokensUsed: 0, startedAt: new Date(), completedAt: new Date(),
+          }
+          for (let i = 0; i < 500; i++) o.executionHistory.record(filler)
+          // The record the ledger holds is now outside the 500-record window.
+          expect(o.executionHistory.getAll().some(r => r.taskId === 'node-1')).toBe(false)
+          const w = watchDeltas(o)
+          o.on('cost:delta', (d: Record<string, unknown>) => deltas.push(d))
+          await w.settle()
+          return w
+        },
+      }
+    )
+
+    expect(deltas).toHaveLength(1)
+    // History reports the eviction; the other three corrections still landed,
+    // because they are bounded by nothing that trims.
+    expect(deltas[0].recordsAdjusted)
+      .toEqual({ history: false, performance: true, node: true, agent: true })
+    // The charge is unaffected — an evicted record is a reporting gap, not a
+    // lost payment.
+    expect(totalSpent).toBeCloseTo(1.80, 12)
+    expect(orchestrator.performanceTracker.getScores()[0].avgCost).toBeCloseTo(1.80, 12)
+    void after
+  })
+})
+
+describe('the two per-agent and per-task figures the settlement has to correct', () => {
+  it('corrects agent.metrics and node.result, so getState and collectResults agree with totalSpent', async () => {
+    // `agent.metrics.totalCost` is what `getState()` and `listAgents()` publish
+    // and what the dashboard charts per agent, and `node.result.cost` is what
+    // `collectResults` hands back as `TaskResult.cost`. Leaving both at the
+    // timeout snapshot made them the two figures that disagreed with
+    // `costByAgent` and the history record, which the settlement corrects.
+    const atTimeout = usage({ input: 250_000 })
+    const atSettlement = usage({ input: 300_000 })
+    const { totalSpent, after, orchestrator, agent, node } = await runTask(
+      makeCtx({ tokenSequence: [atTimeout, atSettlement], waitResolvesAfterMs: 60 }),
+      {
+        pricing: null, tiers: MONOTONE, taskTimeoutMs: 30, graceMs: 400, settle: 'flush',
+        // `getState()` is read HERE, while the agent is still registered:
+        // `runTask` shuts the orchestrator down afterwards, which clears
+        // `this.agents` and would leave the list empty.
+        afterTask: async (o) => {
+          const w = watchDeltas(o)
+          await w.settle()
+          return { ...w, state: JSON.parse(JSON.stringify(o.getState())) }
+        },
+      }
+    )
+    const { state } = after as { state: { agents: Array<{ totalCost: number }> } }
+
+    // The agent figure `getState()` publishes, now equal to `totalSpent`.
+    expect(agent.metrics.totalCost).toBeCloseTo(totalSpent, 12)
+    expect(agent.metrics.totalTokens).toBe(300_000)
+    expect(state.agents[0].totalCost).toBeCloseTo(totalSpent, 12)
+
+    // The DAG node result `collectResults` returns.
+    expect(node.result?.cost).toBeCloseTo(totalSpent, 12)
+    expect(node.result?.tokensUsed).toBe(300_000)
+    // And every figure now agrees, which is the whole point of correcting four
+    // places rather than one.
+    expect(orchestrator.executionHistory.getAll()[0].cost).toBeCloseTo(totalSpent, 12)
+    expect(orchestrator.performanceTracker.getScores()[0].avgCost).toBeCloseTo(totalSpent, 12)
+    // Still a failed task. The correction is accounting, not progress.
+    expect(node.result?.success).toBe(false)
+  })
+
+  it('leaves node.result alone when escalation has replaced it, and says so', async () => {
+    // Every escalation step re-enters `executeTask` with the SAME node, so
+    // attempt 1's late delta must not be added to attempt 2's result. Object
+    // identity is the test, and a node whose result has moved on is reported
+    // as uncorrected rather than mis-added.
+    const atTimeout = usage({ input: 250_000 })
+    const atSettlement = usage({ input: 300_000 })
+    const deltas: Array<Record<string, unknown>> = []
+    const { totalSpent, after, node } = await runTask(
+      makeCtx({ tokenSequence: [atTimeout, atSettlement], waitResolvesAfterMs: 60 }),
+      {
+        pricing: null, tiers: MONOTONE, taskTimeoutMs: 30, graceMs: 400, settle: 'flush',
+        afterTask: async (o, n) => {
+          // Stand in for escalation: a different result object on the same node.
+          n.result = { ...(n.result as NonNullable<TaskNode['result']>) }
+          const w = watchDeltas(o)
+          o.on('cost:delta', (d: Record<string, unknown>) => deltas.push(d))
+          await w.settle()
+          return w
+        },
+      }
+    )
+    void after
+
+    expect(deltas).toHaveLength(1)
+    // Only `node` is refused. Replacing `node.result` evicts nothing: the
+    // history record and performance entry are keyed by their own ids and the
+    // agent is keyed by its own, so all three still take the correction.
+    expect(deltas[0].recordsAdjusted)
+      .toEqual({ history: true, performance: true, node: false, agent: true })
+    // The replacement result was not touched: it still holds attempt 1's
+    // timeout figure and not attempt 1's delta. Counter-intuitive, and correct
+    // — the delta is in `totalSpent` and attributed to the right agent, and
+    // adding it to a result belonging to a different attempt would be worse
+    // than leaving the figure visibly stale.
+    expect(node.result?.cost).toBeCloseTo(1.50, 12)
+    expect(totalSpent).toBeCloseTo(1.80, 12)
+  })
+})
+
+describe('a task that times out after teardown', () => {
+  it('arms nothing, because there is no longer anything that would flush it', async () => {
+    // An in-flight `executeTask` outlives the `shutdown()` that started it, so
+    // it can reach its timeout after the flush has already run. Arming then
+    // would register a ledger and an `unref`'d timer that nothing will ever
+    // discharge, and that session's remaining cost would be lost silently —
+    // the under-count this whole feature exists to remove. So the arm is
+    // refused and the task is billed at its snapshot, as it was before.
+    const deltas: Array<Record<string, unknown>> = []
+    const atTimeout = usage({ input: 250_000 })
+    const { totalSpent, costReport, after, orchestrator } = await runTask(
+      makeCtx({ tokenSequence: [atTimeout], waitNever: true }),
+      {
+        pricing: null, tiers: MONOTONE, taskTimeoutMs: 30, graceMs: 40, preShutdown: true,
+        afterTask: async (o) => {
+          o.on('cost:delta', (d: Record<string, unknown>) => deltas.push(d))
+          await Bun.sleep(120)
+          return { timers: o['deltaTimers'].size, ledgers: o['deltaLedgers'].size }
+        },
+      }
+    )
+    const { timers, ledgers } = after as { timers: number; ledgers: number }
+
+    expect(deltas).toEqual([])
+    expect(ledgers).toBe(0)
+    expect(timers).toBe(0)
+    expect(orchestrator['deltaLedgers'].size).toBe(0)
+    expect(orchestrator['deltaTimers'].size).toBe(0)
+    // The timeout still cost what it had spent by then, and it is still a real
+    // measurement — refusing the arm does not make the charge an estimate.
+    expect(costReport.provenance[MODEL].usage).toBe('measured')
+    expect(totalSpent).toBeCloseTo(1.50, 12)
+    expect(costReport.uncollected.sessions).toBe(0)
+  })
+})
+
+describe('the abandoned long-poll is closed, not just forgotten', () => {
+  it('aborts the session.wait even on the path where the wait never settles', async () => {
+    // The abort used to live in the wait guard's `finally`, which only runs when
+    // `waitGuard` settles. On the deadline-abandon path the session never goes
+    // idle, so the wait never settles, so the abort never fired and the
+    // server-side long-poll stayed open for the life of the process — on the
+    // one path whose whole subject is a session that is not responding.
+    const atTimeout = usage({ input: 150_000, output: 10_000 })
+    const atProbe = usage({ input: 400_000, output: 30_000 })
+    const ctx = makeCtx({ tokenSequence: [atTimeout, atProbe], waitNever: true })
+    await runTask(ctx, {
+      pricing: null, tiers: DISCOUNTED, taskTimeoutMs: 30, graceMs: 40,
+      afterTask: async (o) => { const w = watchDeltas(o); await w.settle(); return w },
+    })
+
+    // The signal was passed down in the first place...
+    const signal = ctx.waitSignal()
+    expect(signal).toBeDefined()
+    // ...and it is aborted, even though `wait` never resolved. Aborting a
+    // signal twice is a no-op, so this is also safe on the path where the wait
+    // did settle normally.
+    expect(signal?.aborted).toBe(true)
+  })
+
+  it('aborts on the settlement path too, where the wait did resolve', async () => {
+    const atTimeout = usage({ input: 250_000 })
+    const atSettlement = usage({ input: 300_000 })
+    const ctx = makeCtx({ tokenSequence: [atTimeout, atSettlement], waitResolvesAfterMs: 60 })
+    await runTask(ctx, {
+      pricing: null, tiers: MONOTONE, taskTimeoutMs: 30, graceMs: 400, settle: 'flush',
+      afterTask: async (o) => { const w = watchDeltas(o); await w.settle(); return w },
+    })
+    expect(ctx.waitSignal()?.aborted).toBe(true)
+  })
+})
+
+describe('the grace window is derived, not a flat default', () => {
+  it('leaves cost unset when the caller supplies none, so the derived clamp actually runs', () => {
+    // This is the regression guard for dead code rather than a test of the
+    // window itself. `mergeConfig` used to ALWAYS populate
+    // `cost.timeoutDeltaGraceMs`, so `armTimeoutDelta`'s
+    // `Math.min(180_000, Math.max(30_000, timeout / 2))` could never be reached
+    // and every task got a flat 60s regardless of its own budget — while the
+    // doc claimed "roughly half the task's own budget, clamped to [30s, 180s]".
+    // A 600s task got 60s, not 180s, and a 10s task got 60s, not 30s.
+    //
+    // The clamp's own arithmetic is not asserted here because observing it
+    // would mean waiting 30s. What is asserted is the MECHANISM: with no
+    // override the block is absent from the merged config, so the `??` in
+    // `armTimeoutDelta` falls through to the derived value. An override, by
+    // contrast, replaces the window outright.
+    const bare = new NexusOrchestrator()
+    expect(bare['config'].cost).toBeUndefined()
+
+    const configured = new NexusOrchestrator({ cost: { timeoutDeltaGraceMs: 1234 } })
+    expect(configured['config'].cost).toEqual({ timeoutDeltaGraceMs: 1234 })
   })
 })

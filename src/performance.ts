@@ -7,8 +7,14 @@ export interface PerformanceEntry {
    * for the same reason; this class did not, and appending a correction here
    * would double `totalTasks` (halving every mean and putting a phantom task
    * into the success-rate denominator) and overstate `measuredTasks`.
+   *
+   * OPTIONAL, deliberately. `record` always assigns one, so the write boundary
+   * is unaffected; making it required would stop any external code that builds
+   * a `PerformanceEntry` literal from compiling, for a field those callers
+   * have no use for. `adjust` still takes a `string`, because that is the id
+   * `record` handed back.
    */
-  readonly id: string
+  readonly id?: string
   model: string
   role: string
   success: boolean

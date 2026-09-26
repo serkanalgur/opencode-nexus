@@ -324,23 +324,64 @@ export function priceUsage(
  * magnitude. See `test/task-cost.test.ts`, "the settled tier", for the worked
  * numbers in both directions.
  *
- * WHY THIS IS THE RIGHT RESIDUAL, and it is a genuine improvement rather than
- * a different guess:
+ * WHY THIS IS THE RIGHT RESIDUAL — stated as what it actually is, because an
+ * earlier version of this comment claimed the two halves "telescope" to the
+ * one-shot figure and that was only true when the increment does not cross a
+ * tier boundary.
  *
- *  - On MONOTONE price lists (rates non-decreasing in threshold) the sum is
- *    exact. Each increment priced at the tier of the settled total telescopes
- *    to `priceUsage(settledTotal)` — verified to the cent in the tests.
- *  - On a model publishing a DISCOUNTED long-context tier (Gemini's shape), the
- *    residual is bounded by the TIMEOUT SNAPSHOT's own mis-tiering, which
- *    cannot be recovered without a negative charge. The increment is small
- *    relative to the session, so the error does not grow with the runaway.
+ * MEASURED, on a monotone list (base 0.001/1K, premium 0.006/1K above 200k),
+ * input-only, showing `timeout + settledDelta` against `priceUsage(settled)`:
  *
- * The naive alternative — `priceUsage(increment)` — has a residual
- * proportional to the TOTAL spend and unbounded in the runaway factor, which
- * is the shape of the bug this replaces: the longer a task overruns, the worse
- * its bill. Both schemes are `>=` charging nothing for the increment (rates are
- * non-negative), so both are strict improvements over the timeout-only charge;
- * this one is the one whose error does not scale with the overrun.
+ *   250k -> 300k  (no crossing)  1.50 + 0.30 = 1.80   one-shot 1.80   EXACT
+ *   150k -> 250k  (crossing)     0.15 + 0.60 = 0.75   one-shot 1.50
+ *   190k -> 260k  (crossing)     0.19 + 0.42 = 0.61   one-shot 1.56
+ *
+ * So the honest statement is: EXACT WHEN THE INCREMENT DOES NOT CROSS A
+ * TIER BOUNDARY, which is the common case — the increment is usually small
+ * relative to the distance to the next threshold. When it DOES cross, the
+ * whole increment is priced at one tier and the sum is neither the one-shot
+ * figure nor the true per-call cost. Direction follows the price list:
+ *
+ *  - MONOTONE (rates rise with threshold). The settled tier is the HIGHER one,
+ *    so the part of the increment actually generated under a sub-threshold
+ *    prompt is over-priced. 150k -> 250k: ground truth is 0.15 + 0.35 = 0.50,
+ *    so the settled rule reports 0.75 and the naive rule 0.25 — symmetrically
+ *    wrong, with the settled rule the larger.
+ *  - DISCOUNTED (a provider publishing cheaper long-context rates, Gemini's
+ *    shape). The settled tier is the LOWER one, so the part generated under a
+ *    sub-threshold prompt is UNDER-priced. 150k -> 250k with base 0.01 and
+ *    premium 0.001: the settled rule reports 1.71 and the naive rule 2.70,
+ *    against 2.16 IF the increment's input split evenly across the threshold
+ *    (50k at base, 50k at premium). That split is a mid-point MODEL, not a
+ *    measurement — the per-call prompts are not observable from session totals,
+ *    so the truth is somewhere in [1.71, 2.70] and 2.16 is its centre. NEITHER
+ *    SCHEME IS EXACT, and the residual is INTRODUCED BY THE CHOICE rather than
+ *    inherited: the timeout snapshot's own 1.60 is exactly right, because 150k
+ *    really is below the threshold. An earlier version of this comment said the
+ *    residual was "bounded by the timeout snapshot's own mis-tiering", which is
+ *    backwards for exactly this fixture.
+ *
+ * The bracket is the useful part, and it holds for EVERY split: this rule prices
+ * the increment at the rate the session ENDED on, the naive rule at the rate
+ * its SMALLEST prompt implies, and the truth is between them — so this rule is
+ * the closer of the two for any distribution, and the timeout charge is exact
+ * either way.
+ *
+ * Recovering the truth needs the per-call breakdown, which is the thing we are
+ * not given, so no rule at this granularity is exact. What decides the choice
+ * is the size of the error, not its absence:
+ *
+ *  - This rule's error is proportional to the INCREMENT and is capped by the
+ *    rate ratio across one boundary.
+ *  - `priceUsage(increment)` — the naive alternative — prices a context size
+ *    that never existed, so its error is proportional to the increment AT THE
+ *    WRONG TIER: 6x on the monotone fixtures above and 10x on the discounted
+ *    one, and the multiplier is the base-to-premium rate ratio a provider
+ *    chose. It is the shape of the bug this replaces, at a larger magnitude:
+ *    the further a task overruns, the worse its bill.
+ *
+ * Both schemes are `>=` charging nothing for the increment (rates are
+ * non-negative), so both are strict improvements over the timeout-only charge.
  */
 export function priceUsageAtSettledTier(
   increment: TokenUsage,

@@ -191,21 +191,33 @@ export interface CostTimeline {
  * never read is reported HERE rather than silently dropped. Dropping it would
  * be the original bug at a smaller scale.
  *
- * The headline number is `upperBound`, and it is a BOUND AND NOT A CHARGE. It
- * is deliberately NOT added to `totalSpent`: adding an estimate to a measured
- * total is the conflation `CostProvenance` exists to prevent, and a total that
- * contains a guess can no longer be compared against a budget honestly. Named
- * as a bound, it lets a reader say "we are under-counting by at most $X"
- * instead of "we do not know", which is the difference between a warning and a
- * silent error.
+ * `observedUncollected` is a LOWER BOUND ON THE UNDER-COUNT, and the direction
+ * matters. It is the priced value of the increment seen between the last
+ * charge and the last read — spend that demonstrably happened and was
+ * demonstrably not billed. Everything the session spends AFTER that last read
+ * is also unbilled, and on a session abandoned while still generating that
+ * remainder grows without limit, so the true under-count is unbounded above
+ * and this figure is only where it is known to start. An earlier version of
+ * this field was called `upperBound` and described as "we are under-counting by
+ * at most $X", which asserts the opposite of what is knowable from a single
+ * observation; there is no upper bound derivable here, because the session may
+ * never stop.
+ *
+ * It is deliberately NOT added to `totalSpent`: adding an estimate to a
+ * measured total is the conflation `CostProvenance` exists to prevent, and a
+ * total containing a guess can no longer be compared against a budget
+ * honestly.
  */
 export interface CostReportUncollected {
   /** How many sessions are still uncollected. */
   sessions: number
   /** Sum of each session's last successfully read token count. */
   lastKnownTokens: number
-  /** Bound on the uncollected remainder, in USD. Not part of `totalSpent`. */
-  upperBound: number
+  /**
+   * Priced value of the increment observed but not charged, in USD. A LOWER
+   * bound on the under-count, and not part of `totalSpent`. See above.
+   */
+  observedUncollected: number
   /** The DAG node ids whose sessions were abandoned. */
   taskIds: string[]
 }
@@ -378,18 +390,32 @@ export interface NexusConfig {
     patternStorage: 'sqlite' | 'memory'
     minConfidence: number
   }
-  cost: {
+  /**
+   * Cost-accounting knobs.
+   *
+   * OPTIONAL, deliberately: `NexusConfig` is an exported type, and a new
+   * REQUIRED block would stop every external `NexusConfig` literal from
+   * compiling for a field those callers never set. `mergeConfig` fills in the
+   * defaults, so an omitted block behaves exactly as a configured one.
+   *
+   * NOT REACHABLE FROM A CONFIG FILE. `NexusConfigManager` models only
+   * `models`, `budget` and `selfHealing` — the same short list that excludes
+   * `memory`, `security` and `learning`. This block is settable through the
+   * `NexusOrchestrator` constructor only, and it is documented that way rather
+   * than as user-configurable, because it is not.
+   */
+  cost?: {
     /**
      * How long after a task's timeout the orchestrator keeps waiting for that
      * task's session to go idle before abandoning collection of its remaining
      * cost.
      *
-     * The default is roughly HALF the task's own budget, clamped to
-     * [30s, 180s]: by the time the clock runs out the session is already one
-     * model call past a limit that was generous, and a session that still has
-     * not settled within half of its own budget again is pathological rather
-     * than slow. Override it in tests, or to tighten reporting on a run where
-     * a figure is wanted promptly.
+     * OMIT THIS to get the derived default, which is roughly HALF the task's
+     * own budget clamped to [30s, 180s] — by the time the clock runs out the
+     * session is already one model call past a limit that was generous, and a
+     * session that still has not settled within half of its own budget again is
+     * pathological rather than slow. Setting it to a number replaces the
+     * derived window outright rather than adjusting it.
      */
     timeoutDeltaGraceMs: number
   }
