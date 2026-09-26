@@ -5,7 +5,7 @@ import type {
   CostReport, AgentMessage, MemoryEntry, MemoryScope,
   SpawnConfig, RecoveryAction, HealthStatus, NexusConfig, TaskResult
 } from "./types"
-import { NexusConfigManager } from "./config"
+import { NexusConfigManager, type NexusConfigLoadInfo, type NexusConfigReloadTrigger } from "./config"
 import { StateBroadcaster } from "./broadcast"
 import { DashboardModule } from "./dashboard"
 import { detectCycles } from "./dag"
@@ -614,6 +614,39 @@ export class NexusOrchestrator {
       this.stateChangeTimer = null
       this.onStateChange?.()
     }, 100) // 100ms debounce
+  }
+
+  /**
+   * Re-read the project and global config files from disk.
+   *
+   * Goes through the same `loadFromPath` as the initial load, so all
+   * precedence levels are refreshed together rather than patching one level in
+   * isolation. A session-scoped override (the `preset` tool, TUI settings) is
+   * deliberately preserved — a disk edit must not silently discard it.
+   * Returns the resulting load info (or the previous one when the orchestrator
+   * has no plugin context to resolve a project directory from), so callers can
+   * report what is now in effect.
+   */
+  reloadConfigFromDisk(trigger: NexusConfigReloadTrigger = 'event'): NexusConfigLoadInfo | null {
+    const projectDir = this.ctx?.location.directory
+    if (projectDir) {
+      this.configManager.loadFromPath(projectDir, trigger)
+    }
+    const info = this.configManager.getLoadInfo()
+    if (info) {
+      // Propagate to dashboard / TUI consumers of orchestrator state.
+      this.notifyStateChange()
+      this.emit('config:reloaded', info)
+    }
+    return info
+  }
+
+  /**
+   * Which config files the last load consulted and the role -> model map they
+   * resolved to. null when no load has run yet.
+   */
+  getConfigInfo(): NexusConfigLoadInfo | null {
+    return this.configManager.getLoadInfo()
   }
 
   // === Core Operations ===
@@ -1755,7 +1788,32 @@ export class NexusOrchestrator {
 
   getStatus(detailed?: boolean): string {
     const state = this.getState()
-    if (detailed) return JSON.stringify({ ...state, budgetExceeded: this.budgetExceeded }, null, 2)
+    // Which config files the last load consulted, and what they resolved to.
+    // Without this, "the subagent used the wrong model" has no answer short of
+    // reading the load log by hand.
+    const loadInfo = this.configManager.getLoadInfo()
+    // Read the model map live, not off the load snapshot: a preset applied
+    // after the last load is exactly the case this block has to get right.
+    const config = {
+      loaded: loadInfo !== null,
+      loadedAt: loadInfo?.loadedAt ?? null,
+      loadCount: loadInfo?.loadCount ?? 0,
+      // When true, `models` includes an in-process preset/TUI override and is
+      // therefore not a statement about what is on disk.
+      sessionOverride: this.configManager.hasSessionOverride(),
+      // True when a session override is shadowing the `models` level, i.e. the
+      // config file's model choices are being ignored right now. Machine-
+      // readable because the audience that most needs to know is an agent
+      // deciding why its spawn used an unexpected model.
+      diskModelsIgnored: this.configManager.hasSessionOverride(),
+      // Which mechanism caused the last load. `poll` on every reload means the
+      // host is not delivering `filesystem.changed` for these files.
+      trigger: loadInfo?.trigger ?? null,
+      project: loadInfo?.project ?? null,
+      global: loadInfo?.global ?? null,
+      models: this.configManager.getResolvedModels()
+    }
+    if (detailed) return JSON.stringify({ ...state, budgetExceeded: this.budgetExceeded, config }, null, 2)
     return JSON.stringify({
       running: state.running,
       paused: state.paused,
@@ -1763,7 +1821,8 @@ export class NexusOrchestrator {
       agents: state.agents.length,
       tasks: state.tasks.length,
       totalCost: state.totalSpent,
-      budgetRemaining: state.budgetRemaining
+      budgetRemaining: state.budgetRemaining,
+      config
     }, null, 2)
   }
 

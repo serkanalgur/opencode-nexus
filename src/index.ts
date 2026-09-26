@@ -1,13 +1,290 @@
 import { Plugin } from "@opencode/plugin"
 import { NexusOrchestrator, lastAssistantText, type SpawnedAgent } from "./orchestrator"
-import { PRESETS } from "./config"
+import { PRESETS, nexusProjectConfigPath, nexusGlobalConfigPath, type NexusConfigReloadTrigger } from "./config"
 import { TEMPLATES, instantiateTemplate, listTemplates } from "./templates"
 import { GoalManager } from "./goal"
 import { TeamManager } from "./team"
 import { AstGrep } from "./astgrep"
-import { writeFileSync, readFileSync, mkdirSync, existsSync } from "node:fs"
-import { join } from "node:path"
+import { writeFileSync, readFileSync, mkdirSync, existsSync, statSync } from "node:fs"
+import { join, resolve, basename, dirname } from "node:path"
 import { homedir } from "node:os"
+
+/**
+ * Filesystem watchers fire several times for a single editor save (write,
+ * truncate, rename-into-place, plus the editor's own atomic-save dance). Wait
+ * for the burst to settle so one save causes one reload.
+ */
+export const CONFIG_RELOAD_DEBOUNCE_MS = 150
+
+/**
+ * How often the config files are stat-ed for changes.
+ *
+ * This is the *guaranteed* trigger. `filesystem.changed` is only a fast path:
+ * OpenCode enumerates the specific paths it watches, and `nexus.jsonc` is
+ * Nexus's own filename, so there is no reason to expect an event for it. A live
+ * probe against a real server delivered zero such events, so a feature whose
+ * whole purpose is eliminating silent staleness cannot depend on that event.
+ */
+export const CONFIG_POLL_INTERVAL_MS = 2000
+
+/**
+ * The slice of the plugin context the config watcher needs. `event` is
+ * optional so the watcher degrades to a no-op on contexts that do not expose
+ * an event stream, instead of throwing during setup.
+ */
+type ConfigWatchContext = Pick<Plugin.Context, 'location'> & {
+  event?: Pick<Plugin.Context['event'], 'subscribe'>
+}
+
+/**
+ * True when a changed file is one of the two config files the config manager
+ * reads.
+ *
+ * The primary test is the resolved absolute path. The shape-based fallback
+ * exists for when normalisation is unreliable — a symlinked home, or a
+ * `location.directory` that is not the same string the loader saw — and
+ * recognises the `<...>/.opencode/nexus.jsonc` shape itself. It is narrowed by
+ * the event's own `location.directory` when the host supplies one: a nested
+ * package in a monorepo ships its own `.opencode/nexus.jsonc`, and this project
+ * does not read that file, so matching on shape alone would reload needlessly.
+ */
+function isNexusConfigFile(
+  file: string,
+  eventDirectory: string | undefined,
+  projectDirectory: string,
+  projectPath: string,
+  globalPath: string,
+): boolean {
+  const resolved = resolve(file)
+  if (resolved === projectPath || resolved === globalPath) return true
+
+  if (eventDirectory !== undefined && resolve(eventDirectory) !== projectDirectory) return false
+
+  return basename(resolved) === 'nexus.jsonc' && basename(dirname(resolved)) === '.opencode'
+}
+
+/**
+ * Contexts that already have a live config subscription. `setup` is not
+ * re-entered today, but two live watchers would mean two poll intervals and two
+ * reloads per save, silently.
+ */
+const watchedContexts = new WeakSet<ConfigWatchContext>()
+
+/**
+ * Upper bound on how long the debounce may defer a reload.
+ *
+ * Without it, `scheduleReload` is a pure trailing-edge debounce: anything
+ * arriving faster than `debounceMs` resets the timer forever and the reload
+ * never runs. A file-sync client or `git checkout` loop rewriting
+ * `nexus.jsonc` at more than ~7Hz is enough. An unbounded debounce here is
+ * silent, permanent staleness — the exact defect this feature exists to remove.
+ */
+export const MAX_RELOAD_WAIT_MS = 1000
+
+/**
+ * Floor for the injected intervals. `watchConfigFiles` is exported, and
+ * `setInterval(fn, 0)` would be a hot loop stat-ing continuously. The only
+ * production caller passes the defaults, so this is defence in depth; the floor
+ * is kept low enough that a test can drive the poller quickly.
+ */
+const MIN_INTERVAL_MS = 25
+
+const clampInterval = (ms: number, fallback: number): number =>
+  Number.isFinite(ms) && ms >= MIN_INTERVAL_MS ? ms : fallback
+
+/**
+ * Reload the Nexus config whenever one of the files the config manager reads
+ * changes, so a `nexus.jsonc` edit takes effect without restarting the service.
+ *
+ * Two triggers feed one bounded-debounced reload, so there is a single code
+ * path and a single set of semantics:
+ *
+ *  - `filesystem.changed` — the fast path. Handles all three kinds: `change`
+ *    (edited), `add` (created) and `unlink` (deleted, which falls back to the
+ *    next level rather than keeping the deleted file's values), because a
+ *    reload re-reads every level, so the deleted level stops contributing.
+ *  - mtime/size polling — the guarantee. It stat-s exactly the two files the
+ *    loader reads, so unlike the event it needs no shape heuristics and cannot
+ *    be scoped to (or missed because of) another project's config. Polling is
+ *    installed unconditionally: it must not depend on the event stream, since
+ *    the event is the trigger we cannot demonstrate.
+ *
+ * `config.init` writes these exact two files, so running it produces a second
+ * load ~150ms later. That re-read is idempotent and harmless; the extra log
+ * line is expected, not a bug.
+ *
+ * The returned disposer clears the poll interval, aborts the subscription and
+ * clears a pending debounce timer, so neither mechanism can fire after plugin
+ * unload.
+ */
+export function watchConfigFiles(
+  ctx: ConfigWatchContext,
+  orchestrator: NexusOrchestrator,
+  debounceMs: number = CONFIG_RELOAD_DEBOUNCE_MS,
+  pollMs: number = CONFIG_POLL_INTERVAL_MS,
+): () => void {
+  if (watchedContexts.has(ctx)) return () => {}
+  watchedContexts.add(ctx)
+
+  const debounce = clampInterval(debounceMs, CONFIG_RELOAD_DEBOUNCE_MS)
+  const pollEvery = clampInterval(pollMs, CONFIG_POLL_INTERVAL_MS)
+
+  const projectDirectory = resolve(ctx.location.directory)
+  const projectPath = nexusProjectConfigPath(ctx.location.directory)
+  const globalPath = nexusGlobalConfigPath()
+  const watchedPaths = [projectPath, globalPath]
+
+  const controller = new AbortController()
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null
+  let firstScheduledAt = 0
+
+  const clearPendingReload = (): void => {
+    if (debounceTimer === null) return
+    clearTimeout(debounceTimer)
+    debounceTimer = null
+  }
+
+  /**
+   * Cheap change signature for one path. Both mtime and size are compared so a
+   * same-tick edit that changes length is still caught. Any failure — missing
+   * file, permission denied, a directory in the way — reads as 'absent', which
+   * is stable, so an unreadable path can never spin the poller. A throw here
+   * would kill the interval and silently stop the guarantee.
+   *
+   * Synchronous `statSync`, and it assumes a local filesystem: on a hung
+   * NFS/WSL/sshfs mount this blocks the event loop for the duration. That is
+   * accepted deliberately — a `stat` every 2s on a path that may be a network
+   * mount is the one cost of making reload guaranteed, and the alternative
+   * (an async stamp, and the interleaving that comes with it) is more moving
+   * parts than the risk justifies. A hung stat stalls the loop, it does not
+   * corrupt state, and `MAX_RELOAD_WAIT_MS` bounds the consequence.
+   */
+  const stampOf = (filePath: string): string => {
+    try {
+      const stats = statSync(filePath)
+      if (!stats.isFile()) return 'absent'
+      return `${stats.mtimeMs}:${stats.size}`
+    } catch {
+      return 'absent'
+    }
+  }
+
+  // Record the starting state, so the first poll cannot fire a spurious reload
+  // for a file that has not moved since the last load.
+  const lastSeen = new Map<string, string>(watchedPaths.map(p => [p, stampOf(p)]))
+
+  /**
+   * The reload body, shared by the debounce timer and the bounded-wait escape.
+   *
+   * The try/catch is required, not defensive decoration. This runs unguarded
+   * inside an unattended timer for the plugin's lifetime, and it fans out to
+   * `orchestrator.emit`, which invokes every `on(...)` handler with no
+   * per-handler isolation. `orchestrator.on` is a public callable, so a
+   * third-party or LLM-registered handler that throws would otherwise become an
+   * uncaught exception in a timer callback — which can take down the host
+   * process, triggered by nothing more than a user editing a config file.
+   */
+  const runReload = (trigger: NexusConfigReloadTrigger): void => {
+    // Re-stamp BEFORE reloading. Stamping afterwards could miss an edit that
+    // lands mid-reload, and a missed edit is the exact failure this feature
+    // exists to prevent; a redundant reload is merely wasteful.
+    for (const filePath of watchedPaths) lastSeen.set(filePath, stampOf(filePath))
+    try {
+      orchestrator.reloadConfigFromDisk(trigger)
+    } catch (err) {
+      console.warn(`[nexus] config reload failed (${trigger}): ${String(err)}`)
+    }
+  }
+
+  /**
+   * The one path both triggers go through. Bounded wait: the first arrival in
+   * any window always gets its reload, so a sustained stream cannot starve it.
+   */
+  const scheduleReload = (trigger: NexusConfigReloadTrigger): void => {
+    // How long the *pending* reload has already been deferred, measured from
+    // when this window opened. With nothing pending there is no accumulated
+    // wait, so this is a fresh window and the normal debounce applies —
+    // treating "nothing pending" as an infinite wait would run every isolated
+    // event immediately and defeat the debounce.
+    const pending = debounceTimer !== null
+    const waited = pending ? Date.now() - firstScheduledAt : 0
+    clearPendingReload()
+    if (pending && waited >= MAX_RELOAD_WAIT_MS) {
+      runReload(trigger)
+      return
+    }
+    // Set only when the window opens. Re-stamping on every reset would keep
+    // `waited` pinned near zero and the cap would never fire — the starvation
+    // this is here to prevent.
+    if (!pending) firstScheduledAt = Date.now()
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null
+      runReload(trigger)
+    }, debounce)
+  }
+
+  const poll = (): void => {
+    let changed = false
+    for (const filePath of watchedPaths) {
+      const current = stampOf(filePath)
+      if (lastSeen.get(filePath) === current) continue
+      lastSeen.set(filePath, current)
+      changed = true
+    }
+    // At most one reload per tick, however many paths moved.
+    if (changed) scheduleReload('poll')
+  }
+
+  // `unref()` so a purely background watcher cannot hold the process open. It is
+  // not unit of work that must complete — the config already in effect stays in
+  // effect — so nothing is lost by letting the process exit without it. The
+  // disposer below owns the interval and clears it explicitly.
+  const pollTimer = setInterval(poll, pollEvery)
+  pollTimer.unref()
+
+  // N1: the event stream is the *optional* fast path, so it must not gate the
+  // poller. A context without one still gets guaranteed reloads. This is
+  // declared after the poller on purpose — the poller above is unconditional.
+  const eventDomain = ctx.event
+  if (typeof eventDomain?.subscribe !== 'function') {
+    console.warn('[nexus] no config event stream on this context; polling is the only config reload trigger')
+    return () => {
+      clearInterval(pollTimer)
+      clearPendingReload()
+      controller.abort()
+    }
+  }
+
+  const consume = async (): Promise<void> => {
+    try {
+      for await (const event of eventDomain.subscribe({ signal: controller.signal })) {
+        if (event.type !== 'filesystem.changed') continue
+        // A malformed event must not kill the fast path for the whole session.
+        const file: unknown = event.data?.file
+        if (typeof file !== 'string') continue
+        if (!isNexusConfigFile(file, event.location?.directory, projectDirectory, projectPath, globalPath)) continue
+        scheduleReload('event')
+      }
+      // Reaching here without an abort means the stream ended on its own —
+      // a dropped connection, most likely. Say so: a silent end makes that
+      // indistinguishable from "the host does not deliver events for these
+      // files", which is the question the trigger attribution exists to answer.
+      if (!controller.signal.aborted) {
+        console.warn('[nexus] config event stream ended; polling remains the only config reload trigger')
+      }
+    } catch (err) {
+      console.warn(`[nexus] config event stream failed; polling remains the only config reload trigger: ${String(err)}`)
+    }
+  }
+
+  void consume()
+
+  return () => {
+    clearInterval(pollTimer)
+    clearPendingReload()
+    controller.abort()
+  }
+}
 
 const NEXUS_AGENT_CONTENT = `---
 description: Nexus multi-agent orchestrator — decomposes tasks and delegates to specialized sub-agents
@@ -588,7 +865,7 @@ You are a technical writer who creates documentation that developers actually wa
 
       editor.add({
         name: "status",
-        description: "Get orchestrator status and metrics",
+        description: "Get orchestrator status, metrics, and the config files currently in effect (paths consulted, which existed, resolved role -> model map)",
         input: {
           type: "object",
           properties: {
@@ -737,7 +1014,17 @@ You are a technical writer who creates documentation that developers actually wa
           const { name } = input as { name: string }
           try {
             orchestrator.configManager.applyPreset(name)
-            return { content: `Applied preset: ${PRESETS[name]?.name || name}` }
+            // A preset replaces the whole models level, so it now shadows
+            // nexus.jsonc. Say that here, at the moment the user is told the
+            // preset was applied — otherwise a later edit that does nothing is
+            // the same silent surprise as a missing reload.
+            return {
+              content: `Applied preset: ${PRESETS[name]?.name || name}\n`
+                + `⚠️ This preset now overrides the \`models\` section of nexus.jsonc. `
+                + `Edits to models in the config file will NOT take effect until the preset is cleared. `
+                + `Clear it from the TUI (config manager) to hand control back to disk. `
+                + `Budget and self-healing values from the file still apply.`,
+            }
           } catch (error: any) {
             return { content: `Error: ${error.message}` }
           }
@@ -1742,7 +2029,15 @@ You are a technical writer who creates documentation that developers actually wa
       }
     })
 
+    // Watch the two config files the config manager reads and reload on change.
+    // Started here, immediately before the return, so the disposer returned
+    // below is reachable from the first line of setup's tail. Anywhere earlier
+    // and a rejection in one of the awaits between here and the return would
+    // strand a live poll interval with no way to stop it.
+    const stopConfigWatch = watchConfigFiles(ctx, orchestrator)
+
     return () => {
+      stopConfigWatch()
       orchestrator.shutdown()
     }
   }
