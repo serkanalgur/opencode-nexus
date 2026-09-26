@@ -4,7 +4,7 @@
 import type { NexusConfig } from "./types"
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs"
 import { homedir } from "node:os"
-import { join, dirname } from "node:path"
+import { join, dirname, resolve } from "node:path"
 
 export interface NexusModelConfig {
   architect?: string
@@ -86,21 +86,156 @@ function stripJsonComments(jsonc: string): string {
 }
 
 /**
- * Try to read and parse a JSONC file from disk. Returns null on any error.
+ * Outcome of consulting one config file.
+ *
+ * `existed` and `parsed` are kept apart on purpose: "there is no project
+ * config" and "there is a project config but it is broken" are different
+ * problems, and conflating them is what made a missing project file
+ * indistinguishable from a normal load in the field.
  */
-function readJsoncFile(filePath: string): Partial<NexusFullConfig> | null {
+export interface NexusConfigFileInfo {
+  /**
+   * Path that was consulted, with the home directory collapsed to `~`. Safe to
+   * log and to hand to a model — an absolute home path leaks the OS account
+   * name into CI output and pasted bug reports. Anything that genuinely needs
+   * the absolute path builds it with `nexusProjectConfigPath` /
+   * `nexusGlobalConfigPath`.
+   */
+  path: string
+  /** Whether a readable file was present where the config path points. */
+  existed: boolean
+  /** Whether the file parsed into a usable config object. */
+  parsed: boolean
+}
+
+/**
+ * What caused a config load.
+ *
+ * `initial` is the load at orchestrator startup; `event` and `poll` are the two
+ * reload triggers. Recorded on every load so a stale model can be traced to the
+ * mechanism that should have refreshed it — notably, `poll` on every reload
+ * means the host is not delivering `filesystem.changed` for these files.
+ */
+export type NexusConfigReloadTrigger = 'initial' | 'event' | 'poll'
+
+/** Everything a single config load consulted, and what it resolved to. */
+export interface NexusConfigLoadInfo {
+  project: NexusConfigFileInfo
+  global: NexusConfigFileInfo
+  /**
+   * Resolved `role -> model` map after defaults -> global -> project -> storage.
+   * When `sessionOverride` is true this includes an in-process override, so the
+   * map is NOT a statement about what is on disk.
+   */
+  models: Record<string, string>
+  /**
+   * True when a session-scoped override (the `preset` tool, TUI settings) is
+   * layered on top of the disk config. Reported alongside `models` so a
+   * disk-only reading of that map is never presented as the whole story.
+   */
+  sessionOverride: boolean
+  /** ISO timestamp of this load. */
+  loadedAt: string
+  /** 1 for the initial load, >1 for reloads. */
+  loadCount: number
+  /** Which mechanism caused this load. */
+  trigger: NexusConfigReloadTrigger
+}
+
+/** The two config files a load consulted. */
+interface NexusConfigLoadSources {
+  project: NexusConfigFileInfo
+  global: NexusConfigFileInfo
+}
+
+/** Result of trying to read and parse one JSONC file from disk. */
+interface JsoncReadResult {
+  config: Partial<NexusFullConfig> | null
+  existed: boolean
+}
+
+/**
+ * Try to read and parse a JSONC file from disk. `config` is null on any error;
+ * `existed` reports whether a readable file was there at all.
+ */
+function readJsoncFile(filePath: string): JsoncReadResult {
   try {
     const raw = readFileSync(filePath, 'utf-8')
     const stripped = stripJsonComments(raw)
-    const parsed = JSON.parse(stripped)
-    return parsed as Partial<NexusFullConfig>
-  } catch (err: any) {
-    // ENOENT → file not found (expected); anything else → warn
-    if (err.code !== 'ENOENT') {
-      console.warn(`[nexus] Failed to load config from ${filePath}: ${err.message}`)
+    const parsed: unknown = JSON.parse(stripped)
+    // `JSON.parse` accepts `42`, `"oops"` and `[]`. Those parse fine and then
+    // contribute nothing, so accepting them would log `[loaded]` for a file
+    // that is in fact doing nothing — a false assurance in exactly the case
+    // this reporting exists to catch.
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      console.warn(`[nexus] Ignoring config from ${filePath}: expected a JSON object, got ${Array.isArray(parsed) ? 'array' : typeof parsed}`)
+      return { config: null, existed: true }
     }
-    return null
+    return { config: parsed as Partial<NexusFullConfig>, existed: true }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    const message = err instanceof Error ? err.message : String(err)
+    // ENOENT and ENOTDIR both mean "there is no config file here": the path is
+    // missing, or a parent component is a regular file. Everything else
+    // (EACCES on a real config, EISDIR, a syntax error) means a file IS there
+    // and we simply could not use it, which must keep reporting existed=true.
+    const absent = code === 'ENOENT' || code === 'ENOTDIR'
+    if (!absent) {
+      console.warn(`[nexus] Failed to load config from ${filePath}: ${message}`)
+    }
+    return { config: null, existed: !absent }
   }
+}
+
+/** Absolute path of the project-level config: `{basePath}/.opencode/nexus.jsonc`. */
+export function nexusProjectConfigPath(basePath: string): string {
+  return resolve(join(basePath, '.opencode', 'nexus.jsonc'))
+}
+
+/** Absolute path of the global-level config: `~/.config/opencode/nexus.jsonc`. */
+export function nexusGlobalConfigPath(): string {
+  return resolve(join(homedir(), '.config', 'opencode', 'nexus.jsonc'))
+}
+
+/**
+ * Collapse a leading home directory to `~`. The global config path is fully
+ * derivable from `~`, so spelling out `/Users/<name>/...` in a log line or in
+ * the status payload buys no diagnosis and costs the user's account name.
+ */
+function redactHome(filePath: string): string {
+  const home = homedir()
+  if (filePath === home) return '~'
+  const prefix = home.endsWith('/') ? home : `${home}/`
+  return filePath.startsWith(prefix) ? `~${filePath.slice(home.length)}` : filePath
+}
+
+/** Compact per-file state for the one-line load log. */
+function describeFile(file: NexusConfigFileInfo): string {
+  if (file.parsed) return 'loaded'
+  if (file.existed) return 'unparseable'
+  return 'absent'
+}
+
+/**
+ * One-line summary of a load: which paths were consulted, which existed, and
+ * the role -> model map they resolved to. Printed on every load and reload.
+ */
+export function formatConfigLoadLog(info: NexusConfigLoadInfo): string {
+  const models = Object.entries(info.models)
+    .map(([role, model]) => `${role}=${model}`)
+    .join(' ')
+  // A preset replaces the whole `models` level, so while one is set the models
+  // above are NOT the disk file. Say so explicitly, and say how to get control
+  // back — a user who edits the file and watches nothing change needs that.
+  // `resetToDefaults()` is only reachable from the TUI, so name that, not a
+  // tool that does not exist.
+  const override = info.sessionOverride
+    ? ' (+session override: storage; disk edits to models are IGNORED while a preset is set — clear the preset in the TUI to hand control back to disk)'
+    : ''
+  return `[nexus] config loaded (#${info.loadCount} trigger=${info.trigger} at=${info.loadedAt}) `
+    + `project=${info.project.path} [${describeFile(info.project)}] `
+    + `global=${info.global.path} [${describeFile(info.global)}] `
+    + `models:${override} ${models}`
 }
 
 const DEFAULT_CONFIG: NexusFullConfig = {
@@ -129,6 +264,7 @@ export class NexusConfigManager {
   private projectConfig: Partial<NexusFullConfig> | null = null
   private globalConfig: Partial<NexusFullConfig> | null = null
   private storageConfig: NexusFullConfig | null = null
+  private loadInfo: NexusConfigLoadInfo | null = null
 
   constructor() {
     // Config files are loaded later via loadFromPath(basePath)
@@ -140,29 +276,93 @@ export class NexusConfigManager {
    * Load config files from disk and store as project/global config.
    * Called by loadFromPath() — not during construction anymore.
    */
-  private loadConfigs(basePath: string): void {
-    // Reset storage config so disk config takes precedence
-    // Storage config is only for explicit TUI/preset actions within a session
-    this.storageConfig = null
+  private loadConfigs(basePath: string): NexusConfigLoadSources {
+    // Reset the session-scoped override on the FIRST load only. The initial
+    // load runs at init, before anything can have set `storageConfig`, so
+    // clearing it there only guarantees disk wins. A reload, however, can
+    // happen at any time — including after `nexus.preset` layered an override
+    // on top — and clearing unconditionally would silently discard it.
+    if (this.loadInfo === null) this.storageConfig = null
 
     // Project-level: .opencode/nexus.jsonc
-    const projectPath = join(basePath, '.opencode', 'nexus.jsonc')
-    this.projectConfig = readJsoncFile(projectPath)
+    const projectPath = nexusProjectConfigPath(basePath)
+    const project = readJsoncFile(projectPath)
+    this.projectConfig = project.config
 
     // Global-level: ~/.config/opencode/nexus.jsonc
-    const globalPath = join(homedir(), '.config', 'opencode', 'nexus.jsonc')
-    this.globalConfig = readJsoncFile(globalPath)
+    const globalPath = nexusGlobalConfigPath()
+    const global = readJsoncFile(globalPath)
+    this.globalConfig = global.config
+
+    return {
+      project: { path: redactHome(projectPath), existed: project.existed, parsed: project.config !== null },
+      global: { path: redactHome(globalPath), existed: global.existed, parsed: global.config !== null }
+    }
   }
 
   /**
    * Public entry point for config file loading.
-   * Call during orchestrator initialization with the workspace root.
+   * Call during orchestrator initialization with the workspace root, and again
+   * on every reload. A reload uses this same path, so all precedence levels are
+   * re-read consistently.
+   *
+   * A session-scoped override applied in-process (the `preset` tool, TUI
+   * settings) survives a reload: only the first load clears it, so editing a
+   * config file on disk never silently discards a preset the user just chose.
+   * The load reports `sessionOverride` so the resulting `models` map is never
+   * mistaken for a disk-only reading.
    */
-  loadFromPath(basePath: string): void {
-    this.loadConfigs(basePath)
+  loadFromPath(basePath: string, trigger: NexusConfigReloadTrigger = 'initial'): void {
+    const sources = this.loadConfigs(basePath)
+    this.loadInfo = {
+      project: sources.project,
+      global: sources.global,
+      models: this.getResolvedModels(),
+      sessionOverride: this.hasSessionOverride(),
+      loadedAt: new Date().toISOString(),
+      loadCount: (this.loadInfo?.loadCount ?? 0) + 1,
+      trigger
+    }
+    console.log(formatConfigLoadLog(this.loadInfo))
   }
 
-  // Get merged config with precedence: project > global > storage > defaults
+  /**
+   * What the most recent load consulted and resolved, or null if no load has
+   * run yet. Lets callers answer "which config am I actually using?" without
+   * scraping logs.
+   */
+  getLoadInfo(): NexusConfigLoadInfo | null {
+    return this.loadInfo
+  }
+
+  /**
+   * The `role -> model` map as currently in effect — defaults -> global ->
+   * project -> storage.
+   *
+   * Read live rather than off `getLoadInfo()`, because a session-scoped
+   * override can be applied (or reset) between loads. A load-time snapshot
+   * would answer "which model will my next subagent use?" with the value from
+   * before the user applied a preset.
+   */
+  getResolvedModels(): Record<string, string> {
+    const models: Record<string, string> = {}
+    for (const [role, model] of Object.entries(this.getConfig().models)) {
+      if (model) models[role] = model
+    }
+    return models
+  }
+
+  /**
+   * True when a session-scoped override (the `preset` tool, TUI settings) is
+   * currently layered on top of the disk config.
+   */
+  hasSessionOverride(): boolean {
+    return this.storageConfig !== null
+  }
+
+  // Get merged config with precedence: storage > project > global > defaults
+  // (`storageConfig` is the session-scoped override, cleared only by the first
+  // load and by resetToDefaults())
   getConfig(): NexusFullConfig {
     return {
       models: {
@@ -292,7 +492,7 @@ export class NexusConfigManager {
    * Writes to `{basePath}/.opencode/nexus.jsonc` with only non-default values.
    */
   saveProjectConfig(basePath: string): void {
-    const projectPath = join(basePath, '.opencode', 'nexus.jsonc')
+    const projectPath = nexusProjectConfigPath(basePath)
     const config = this.getSaveableConfig()
     this.writeJsoncFile(projectPath, config)
   }
@@ -302,7 +502,7 @@ export class NexusConfigManager {
    * Writes to `~/.config/opencode/nexus.jsonc` with only non-default values.
    */
   saveGlobalConfig(): void {
-    const globalPath = join(homedir(), '.config', 'opencode', 'nexus.jsonc')
+    const globalPath = nexusGlobalConfigPath()
     const config = this.getSaveableConfig()
     this.writeJsoncFile(globalPath, config)
   }
@@ -312,7 +512,7 @@ export class NexusConfigManager {
    * Writes to `{basePath}/.opencode/nexus.jsonc` with all default values.
    */
   initProjectConfig(basePath: string): void {
-    const projectPath = join(basePath, '.opencode', 'nexus.jsonc')
+    const projectPath = nexusProjectConfigPath(basePath)
     // Don't overwrite existing user config
     try {
       readFileSync(projectPath, 'utf-8')
@@ -328,7 +528,7 @@ export class NexusConfigManager {
    * Writes to `~/.config/opencode/nexus.jsonc` with all default values.
    */
   initGlobalConfig(): void {
-    const globalPath = join(homedir(), '.config', 'opencode', 'nexus.jsonc')
+    const globalPath = nexusGlobalConfigPath()
     // Don't overwrite existing user config
     try {
       readFileSync(globalPath, 'utf-8')
@@ -378,7 +578,14 @@ export class NexusConfigManager {
     this.storageConfig = null
   }
 
-  // Apply a named preset configuration
+  /**
+   * Apply a named preset configuration.
+   *
+   * A preset is a complete model selection and its `models` object replaces
+   * the whole level, so while it is in effect a disk edit to `models` cannot
+   * win. It survives a config reload (see `loadFromPath`); `resetToDefaults()`
+   * is how the user hands control back to disk.
+   */
   applyPreset(name: string): void {
     const preset = PRESETS[name]
     if (!preset) throw new Error(`Unknown preset: ${name}. Available: ${Object.keys(PRESETS).join(', ')}`)
