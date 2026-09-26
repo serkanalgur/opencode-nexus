@@ -1,5 +1,22 @@
 // Core types for OpenCode Nexus
 
+import type { PricingSource, UsageSource } from "./forecast"
+
+/**
+ * How a task's cost and token count were arrived at. `usage` says whether the
+ * tokens were real, `pricing` says whether the rate was real.
+ *
+ * Declared here, in the leaf type module, rather than in `orchestrator.ts`
+ * where it was introduced: `PerformanceEntry` and `ExecutionRecord` must carry
+ * it too, and they are consumed by the tracker, the history and the tool layer
+ * — none of which may import the orchestrator. `orchestrator.ts` re-exports
+ * this name, so the public surface is unchanged.
+ */
+export interface CostProvenance {
+  usage: UsageSource
+  pricing: PricingSource
+}
+
 export interface Agent {
   id: string
   name: string
@@ -220,10 +237,29 @@ export interface ExecutionOptions {
   enableCommunication?: boolean
 }
 
+/**
+ * How a total was arrived at, split into what was measured and what was
+ * predicted. `measuredSpend + estimatedSpend` is the figure the field it
+ * qualifies carries, so a mixed total is legible from the number alone.
+ */
+export interface SpendSplit {
+  measuredSpend: number
+  estimatedSpend: number
+}
+
 export interface ExecutionResult {
   success: boolean
   tasks: TaskResult[]
   totalCost: number
+  /**
+   * Split of `totalCost`. Required rather than optional: `totalCost` is the
+   * headline figure handed back to the caller, and a run in which most tasks
+   * fell back to estimates must not be readable as a fully billed total. This
+   * is the same accounting `getCostReport()` reports, over the same
+   * `totalSpent` window, so the two cannot disagree.
+   */
+  measuredSpend: number
+  estimatedSpend: number
   totalDuration: number
   agentsUsed: number
 }

@@ -1,12 +1,35 @@
+import type { CostProvenance } from "./types"
+
 export interface PerformanceEntry {
   model: string
   role: string
   success: boolean
   duration: number
   cost: number
+  /**
+   * Required, not defaulted: 30% of a model's `overallScore` is derived from
+   * its costs, so an entry that does not say whether its numbers were real is
+   * an entry that can move a ranking on a guess. Same rule as
+   * `NexusOrchestrator.trackCost`.
+   */
+  costProvenance: CostProvenance
   tokensUsed: number
   timestamp: Date
 }
+
+/**
+ * Whether a score's cost terms were computed from real figures.
+ *
+ * `measured` — at least one entry carried a real token count; `costEfficiency`
+ * and the cost third of `overallScore` come from the measured subset only.
+ *
+ * `none` — every entry in the group was predicted. The cost terms carry no
+ * evidence, and `costEfficiency` is `0` as a stated absence of signal, NOT as
+ * a measurement of an expensive model. This is the state that keeps
+ * "we could not measure it" from being read as "we measured it and it was
+ * bad", which is what a bare `0` would say.
+ */
+export type CostBasis = 'measured' | 'none'
 
 export interface PerformanceScore {
   model: string
@@ -14,9 +37,20 @@ export interface PerformanceScore {
   totalTasks: number
   successRate: number
   avgDuration: number
+  /**
+   * Mean of EVERY entry's cost, measured or not. Retained unchanged so existing
+   * consumers keep working; it is a mean of recorded charges, and provenance
+   * is reported separately rather than folded into the figure.
+   */
   avgCost: number
-  costEfficiency: number  // success per dollar
+  costEfficiency: number  // measured successes per measured dollar
   overallScore: number     // 0-100 weighted composite
+  /** How many of `totalTasks` were measured. Coverage of the cost terms. */
+  measuredTasks: number
+  /** How many of `totalTasks` were predicted. `measuredTasks + estimatedTasks === totalTasks`. */
+  estimatedTasks: number
+  /** Whether the cost terms rest on measurements. See `CostBasis`. */
+  costBasis: CostBasis
 }
 
 export class PerformanceTracker {
@@ -36,6 +70,35 @@ export class PerformanceTracker {
 
   /**
    * Get performance scores grouped by model+role
+   *
+   * The cost terms are computed from MEASURED entries only. A predicted cost is
+   * the forecaster's guess at a token count we never saw, and 30% of a model's
+   * score is too much weight to put on a guess — worse, `costScore` saturates
+   * at 1, so a group whose recorded costs are mostly cheap estimates pinned at
+   * a perfect cost score and the ceiling hid it, making a model with no cost
+   * evidence at all indistinguishable from a genuinely cheap one. Excluding
+   * them removes the guess from the ranking; the counters below say how thin
+   * the remaining evidence is, so a score from one measurement is visibly not
+   * the same kind of object as a score from fifty.
+   *
+   * SUCCESS AND SPEED ARE UNAFFECTED: `successRate` and `speedScore` are
+   * computed over every entry exactly as before. Only the cost terms narrow,
+   * and only to what was actually billed.
+   *
+   * NO MEASURED ENTRIES — the cost term contributes 0 and `costBasis` is
+   * `none`. The alternative, re-weighting the 40 success points and 30 speed
+   * points up to fill the vacated 30, keeps the arithmetic finite and is the
+   * tidier-looking option, but it makes `overallScore` mean two different
+   * things: 100 points when a group has cost evidence, 70 renormalised when it
+   * does not. `getBestModel` and `getScores` rank on that number, so a group
+   * with no cost evidence would outrank a fully measured group that merely
+   * looked expensive — a ranking decided by which sessions happened to be
+   * readable, which is exactly the failure the provenance discipline exists to
+   * prevent. Holding the scale fixed instead charges a group for its missing
+   * measurement, which is a real and visible cost: `estimatedTasks` and
+   * `costBasis` say why it was charged. A `0` cost term is also not a zero or
+   * perfect cost score by accident — it is the documented absence, and
+   * `costBasis` is what distinguishes it from a measurement of $0.
    */
   getScores(): PerformanceScore[] {
     const groups = new Map<string, PerformanceEntry[]>()
@@ -54,14 +117,42 @@ export class PerformanceTracker {
       const successRate = total > 0 ? successful / total : 0
       const avgDuration = entries.reduce((s, e) => s + e.duration, 0) / total
       const avgCost = entries.reduce((s, e) => s + e.cost, 0) / total
-      const costEfficiency = avgCost > 0 ? successRate / avgCost : 0
 
-      // Weighted composite: 40% success, 30% speed, 30% cost efficiency
+      // Cost terms, restricted to real token counts. Success is re-read WITHIN
+      // that subset rather than paired with the all-entries success rate: a
+      // rate over all tasks divided by a cost over measured tasks would mix two
+      // populations into one "successes per dollar" figure.
+      const measured = entries.filter(e => e.costProvenance.usage === 'measured')
+      const measuredTasks = measured.length
+      const estimatedTasks = total - measuredTasks
+      const measuredSuccessRate = measuredTasks > 0
+        ? measured.filter(e => e.success).length / measuredTasks
+        : 0
+      const measuredAvgCost = measuredTasks > 0
+        ? measured.reduce((s, e) => s + e.cost, 0) / measuredTasks
+        : 0
+      const costEfficiency = measuredAvgCost > 0 ? measuredSuccessRate / measuredAvgCost : 0
+
+      // Weighted composite: 40% success, 30% speed, 30% cost efficiency.
+      // Unchanged arithmetic; with no measured entries `costEfficiency` is 0,
+      // so the cost third contributes 0 and the total stays finite.
       const speedScore = Math.max(0, 1 - avgDuration / 30000)  // Normalize to 30s
       const costScore = Math.min(1, costEfficiency * 100)
       const overallScore = (successRate * 40) + (speedScore * 30) + (costScore * 30)
 
-      scores.push({ model, role, totalTasks: total, successRate, avgDuration, avgCost, costEfficiency, overallScore })
+      scores.push({
+        model,
+        role,
+        totalTasks: total,
+        successRate,
+        avgDuration,
+        avgCost,
+        costEfficiency,
+        overallScore,
+        measuredTasks,
+        estimatedTasks,
+        costBasis: measuredTasks > 0 ? 'measured' : 'none',
+      })
     }
 
     return scores.sort((a, b) => b.overallScore - a.overallScore)
