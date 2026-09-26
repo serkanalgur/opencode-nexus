@@ -155,8 +155,10 @@ describe('NexusOrchestrator', () => {
 
   describe('cost tracking', () => {
     it('should track costs', () => {
-      orchestrator.trackCost('agent-1', 'claude-sonnet', 0.50, 1000)
-      orchestrator.trackCost('agent-1', 'claude-sonnet', 0.25, 500)
+      // Provenance is explicit: these figures stand in for real, billed usage.
+      const measured = { usage: 'measured', pricing: 'model-costs' } as const
+      orchestrator.trackCost('agent-1', 'claude-sonnet', 0.50, 1000, measured)
+      orchestrator.trackCost('agent-1', 'claude-sonnet', 0.25, 500, measured)
 
       const report = orchestrator.getCostReport()
       expect(report).toContain('totalSpent')
@@ -169,7 +171,7 @@ describe('NexusOrchestrator', () => {
       })
 
       // Track costs
-      orch.trackCost('agent-1', 'claude-sonnet', 0.90, 2000)
+      orch.trackCost('agent-1', 'claude-sonnet', 0.90, 2000, { usage: 'measured', pricing: 'model-costs' })
 
       // Budget should be exceeded
       const report = orch.getCostReport()

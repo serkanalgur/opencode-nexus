@@ -20,7 +20,14 @@ import { SecurityScanner } from "./security"
 import { PerformanceTracker } from "./performance"
 import { ExecutionHistory } from "./history"
 import { CustomRoleManager } from "./custom-roles"
-import { CostForecaster } from "./forecast"
+import {
+  CostForecaster,
+  bareModelId,
+  totalTokens,
+  type PricingSource,
+  type TokenUsage,
+  type UsageSource,
+} from "./forecast"
 import { WorktreeManager } from "./worktree"
 import { TodoEnforcer } from "./todo"
 
@@ -61,6 +68,44 @@ export interface NexusModelCost {
   output: number
   cacheRead: number
   cacheWrite: number
+}
+
+/**
+ * How a task's cost and token count were arrived at. Recorded on every
+ * `TaskResult` and every `trackCost` entry so a predicted figure is never read
+ * as a billed one: `usage` says whether the tokens were real, `pricing` says
+ * whether the rate was real.
+ */
+export interface CostProvenance {
+  usage: UsageSource
+  pricing: PricingSource
+}
+
+/**
+ * A `TaskResult` that says how its cost was arrived at. Lives here rather than
+ * in `types.ts` only so the provenance travels with the value stored on the DAG
+ * node and the execution record, which is where an agent is most likely to
+ * encounter a cost that is really an estimate.
+ */
+export interface CostedTaskResult extends TaskResult {
+  costProvenance: CostProvenance
+}
+
+/** One task's cost, its token count, and how both were arrived at. */
+interface TaskCost {
+  cost: number
+  tokensUsed: number
+  provenance: CostProvenance
+}
+
+/** Per-model accounting provenance, so a model with mixed charges is legible. */
+interface ModelProvenance {
+  usage: UsageSource
+  pricing: PricingSource
+  measuredEntries: number
+  estimatedEntries: number
+  measuredSpend: number
+  estimatedSpend: number
 }
 
 /**
@@ -126,6 +171,13 @@ export function lastAssistantText(messages: readonly NexusSessionMessage[]): str
     if (text) return text
   }
   return ""
+}
+
+/** Sum a numeric field across the per-model provenance records. */
+function sumBy<T>(records: Map<string, T>, select: (record: T) => number): number {
+  let total = 0
+  for (const record of records.values()) total += select(record)
+  return total
 }
 
 export interface SpawnOptions {
@@ -296,7 +348,13 @@ export class NexusOrchestrator {
   private stateChangeTimer: ReturnType<typeof setTimeout> | null = null
 
   // Cost history for periodic cleanup
-  private costHistory: Array<{ timestamp: number; cost: number; agentId: string }> = []
+  private costHistory: Array<{ timestamp: number; cost: number; agentId: string; model: string; tokens: number; provenance: CostProvenance }> = []
+
+  // Token counts per model, and how much of each model's spend was measured
+  // rather than predicted. Reported by getCostReport so a mixed total is never
+  // read as a fully billed one.
+  private tokensByModel: Map<string, number> = new Map()
+  private costProvenance: Map<string, ModelProvenance> = new Map()
 
   // Cleanup interval handle
   private cleanupInterval: ReturnType<typeof setInterval> | null = null
@@ -351,8 +409,10 @@ export class NexusOrchestrator {
     // Initialize custom role manager
     this.customRoles = new CustomRoleManager()
 
-    // Initialize cost forecaster
-    this.forecaster = new CostForecaster()
+    // Initialize cost forecaster. Injected with the `modelCosts` lookup so the
+    // forecaster prices from the same per-1K table as everything else instead of
+    // carrying a second, divergent price universe.
+    this.forecaster = new CostForecaster((model, provider) => this.getModelCost(model, provider))
   }
 
   /**
@@ -405,6 +465,29 @@ export class NexusOrchestrator {
    * which is the unit the hardcoded table and every consumer of `modelCosts`
    * use. The conversion happens here, on write, so the rest of the plugin never
    * has to think about it.
+   *
+   * KNOWN UNDER-COUNT (pre-existing, not changed here): we take the base tier,
+   * but OpenCode selects the tier per call by total prompt size
+   * (`input + cache.read + cache.write`) and applies that tier to the WHOLE
+   * call. A long-context, cache-heavy session — the 23M-token one, say — is
+   * therefore billed by OpenCode at the long-context premium while we bill it at
+   * the base rate, roughly 2× low for exactly the runs that dominate spend.
+   * Reproducing OpenCode's tier selection would mean storing every tier and
+   * re-deriving the same predicate; out of scope for this change, and recorded
+   * here so nobody reads our totals as authoritative billing.
+   *
+   * THE TIER IS NOT THE ONLY SOURCE OF UNDER-COUNT. Two more, both in the
+   * pricing rather than the projection:
+   *   - a model absent from `modelCosts` is priced by the forecaster's fallback
+   *     table, whose cache rates are ESTIMATES derived from each row's own input
+   *     rate (see `forecast.ts`), not provider-sourced figures. They reproduce
+   *     the real relation — verified against the real sonnet and opus entries —
+   *     but they are not what the provider would bill, and a provider that
+   *     does not bill cache writes separately is approximated outright;
+   *   - a timed-out task is billed at the instant of the timeout, while its
+   *     session keeps running, so the rest of its consumption is never billed.
+   *     Correctly labelled `measured` (it is a real reading), but it means the
+   *     most expensive case — a runaway task — is the most under-counted.
    */
   private async loadModelCosts(): Promise<void> {
     try {
@@ -934,21 +1017,28 @@ export class NexusOrchestrator {
       const output = lastAssistantText(messages) || "Task completed (no output captured)"
 
       const duration = Date.now() - startTime
-      const result: TaskResult = {
+      // Real cost from the session's actual token usage, priced with the
+      // orchestrator's per-1K `modelCosts`. `estimateModelCost` returns a
+      // per-1K RATE, so it cannot stand in for a task's total — that was the
+      // old behaviour and it made spend a sum of rates, unrelated to usage.
+      const cost = await this.safeAccountTaskCost(agent, node.task)
+      const result: CostedTaskResult = {
         success: true,
         output,
         duration,
-        tokensUsed: 0, // Would need to parse from session context
-        cost: this.estimateModelCost(agent.model.model, agent.model.provider)
+        tokensUsed: cost.tokensUsed,
+        cost: cost.cost,
+        costProvenance: cost.provenance
       }
 
       this.dag!.markComplete(node.id, result)
       this.todoEnforcer.completeTask(agent.id)
       agent.metrics.tasksCompleted++
       agent.metrics.totalCost += result.cost
-      this.totalSpent += result.cost
-      this.costByAgent.set(agent.id, (this.costByAgent.get(agent.id) || 0) + result.cost)
-      this.checkBudget()
+      agent.metrics.totalTokens += result.tokensUsed
+      // Single accounting path: trackCost owns totalSpent, costByAgent,
+      // costByModel and the budget check.
+      this.trackCost(agent.id, `${agent.model.provider}/${agent.model.model}`, result.cost, result.tokensUsed, result.costProvenance)
 
       // Record performance metrics
       this.performanceTracker.record({
@@ -1001,15 +1091,27 @@ export class NexusOrchestrator {
     } catch (error: any) {
       const duration = Date.now() - startTime
       const errorMessage = error.message || "Task failed"
-      const result: TaskResult = {
+      // A failed or timed-out task still burned tokens. With self-healing a
+      // retry spawns a NEW session, so this session's usage would otherwise
+      // never be seen by the accounting at all — spend that never reaches
+      // `totalSpent` never reaches `checkBudget` either.
+      const cost = await this.safeAccountTaskCost(agent, node.task)
+      const result: CostedTaskResult = {
         success: false,
         error: errorMessage,
         duration,
-        tokensUsed: 0,
-        cost: 0
+        tokensUsed: cost.tokensUsed,
+        cost: cost.cost,
+        costProvenance: cost.provenance
       }
 
+      // `markFailed` only sets node.status, so the result is assigned here for
+      // `collectResults` — the same two-step the spawn-failure path uses.
       this.dag!.markFailed(node.id, new Error(errorMessage))
+      node.result = result
+      this.trackCost(agent.id, `${agent.model.provider}/${agent.model.model}`, result.cost, result.tokensUsed, result.costProvenance)
+      agent.metrics.totalCost += result.cost
+      agent.metrics.totalTokens += result.tokensUsed
       this.todoEnforcer.completeTask(agent.id)
       agent.metrics.tasksFailed++
       agent.status = 'failed'
@@ -1569,11 +1671,10 @@ export class NexusOrchestrator {
       if (qualified) return qualified
     }
 
-    // `indexOf` is -1 when there is no "/", and slice(0) is the whole string.
-    const bare = model.slice(model.indexOf('/') + 1)
+    const bare = bareModelId(model)
     let best: NexusModelCost | undefined
     for (const [key, cost] of this.modelCosts) {
-      if (key.slice(key.indexOf('/') + 1) !== bare) continue
+      if (bareModelId(key) !== bare) continue
       if (!best || cost.input < best.input) best = cost
     }
     return best
@@ -1682,11 +1783,17 @@ export class NexusOrchestrator {
     // Score all candidates
     const scored = unique.map(m => this.scoreModel(m, role, complexity))
 
-    // Filter by budget
+    // Filter by budget. The comparison must be between two per-task dollar
+    // figures: the estimated cost of running a task of this complexity on the
+    // candidate, versus what is left of the total budget. The old filter
+    // compared a per-1K RATE against a per-task remaining total, which are not
+    // commensurable, so it excluded models essentially at random.
     const budgetRemaining = this.budget.maxTotalCost - this.totalSpent
     const affordable = scored.filter(s => {
-      const cost = this.estimateModelCost(s.model, s.provider)
-      return cost <= budgetRemaining || cost === 0
+      const estimate = this.forecaster.estimateCost(complexity, s.model, s.provider)
+      // A genuinely free model costs nothing and must stay selectable however
+      // little budget is left — hence the `=== 0` escape hatch.
+      return estimate <= budgetRemaining || estimate === 0
     })
 
     // Pick best — prefer affordable models, but fall back to all if none are affordable
@@ -1696,7 +1803,10 @@ export class NexusOrchestrator {
     return {
       provider: best.provider,
       model: best.model,
-      estimatedCost: this.estimateModelCost(best.model, best.provider),
+      // A per-task estimate in USD, not `estimateModelCost`'s per-1K rate: the
+      // field is named `estimatedCost` and consumers read it as one. The rate
+      // now lives only inside `scoreModel`, which ranks on it.
+      estimatedCost: this.forecaster.estimateCost(complexity, best.model, best.provider),
       estimatedQuality: best.qualityScore,
       reasoning: best.reasoning
     }
@@ -1704,15 +1814,140 @@ export class NexusOrchestrator {
 
   // === Cost Tracking ===
 
-  trackCost(agentId: string, model: string, cost: number, tokens: number): void {
+  /**
+   * The ONE place spend is mutated. `model` is expected in the same
+   * "providerID/id" form `modelCosts` uses, so `costByModel` and the price
+   * table can be joined directly. `provenance` is required rather than
+   * defaulted: an accounting entry that does not say whether its tokens and
+   * rate were real is a reporting bug, so the caller has to state it.
+   */
+  trackCost(agentId: string, model: string, cost: number, tokens: number, provenance: CostProvenance): void {
     this.totalSpent += cost
     const agentCost = this.costByAgent.get(agentId) || 0
     this.costByAgent.set(agentId, agentCost + cost)
     const modelCost = this.costByModel.get(model) || 0
     this.costByModel.set(model, modelCost + cost)
-    this.costHistory.push({ timestamp: Date.now(), cost, agentId })
+    this.tokensByModel.set(model, (this.tokensByModel.get(model) || 0) + tokens)
+    this.recordProvenance(model, cost, provenance)
+    this.costHistory.push({ timestamp: Date.now(), cost, agentId, model, tokens, provenance })
     this.checkBudget()
     this.notifyStateChange()
+  }
+
+  /** Accumulate per-model provenance, keeping the split of measured vs predicted. */
+  private recordProvenance(model: string, cost: number, provenance: CostProvenance): void {
+    const measured = provenance.usage === 'measured'
+    const prior = this.costProvenance.get(model) ?? {
+      usage: provenance.usage,
+      pricing: provenance.pricing,
+      measuredEntries: 0,
+      estimatedEntries: 0,
+      measuredSpend: 0,
+      estimatedSpend: 0,
+    }
+    // `usage` / `pricing` are last-write-wins; the counters and the spend split
+    // are what make a mixed model legible.
+    prior.usage = provenance.usage
+    prior.pricing = provenance.pricing
+    if (measured) {
+      prior.measuredEntries++
+      prior.measuredSpend += cost
+    } else {
+      prior.estimatedEntries++
+      prior.estimatedSpend += cost
+    }
+    this.costProvenance.set(model, prior)
+  }
+
+  /**
+   * `accountTaskCost` with its failures contained. Cost accounting must not be
+   * able to fail the task it is accounting for: an unexpected throw here would
+   * otherwise discard a completed task's real output, mark it failed, and let
+   * the per-node handler overwrite its result with `cost: 0`. The failure mode
+   * we want is "we lost the number", not "we lost the task" — hence a zero
+   * charge labelled as an unknown-model estimate, so it is never read as a
+   * measured $0.
+   */
+  private safeAccountTaskCost(agent: Agent, task: Task): Promise<TaskCost> {
+    return this.accountTaskCost(agent, task).catch((): TaskCost => ({
+      cost: 0,
+      tokensUsed: 0,
+      provenance: { usage: 'estimated', pricing: 'unknown-model' },
+    }))
+  }
+
+  /**
+   * Cost one task from its session's REAL token usage.
+   *
+   * `SessionInfo.cost` is deliberately not consulted: it is provider-billed
+   * against a context-size-dependent tier, and mixing it with our base-tier
+   * per-1K rates would make the plugin's spend disagree with the bill. Token
+   * counts are the trustworthy signal.
+   *
+   * Falls back to the forecaster's token estimate ONLY when the session could
+   * not be read. A session that was read successfully and consumed nothing is a
+   * real zero and is billed as one — inventing an estimate there would be the
+   * one place this code manufactures money. The provenance recorded alongside
+   * keeps the difference visible in state.
+   */
+  private async accountTaskCost(agent: Agent, task: Task): Promise<TaskCost> {
+    const model = `${agent.model.provider}/${agent.model.model}`
+    const read = agent.sessionID ? await this.readSessionTokens(agent.sessionID) : { read: false as const }
+
+    if (read.read) {
+      const measured = this.forecaster.measureCost(read.usage, model, agent.model.provider)
+      return {
+        cost: measured.cost,
+        tokensUsed: measured.tokens,
+        provenance: { usage: 'measured', pricing: measured.pricingSource },
+      }
+    }
+
+    const predicted = this.forecaster.forecastTask(task, task.requiredRole, model, task.complexity)
+    return {
+      cost: predicted.estimatedCost,
+      tokensUsed: predicted.estimatedInputTokens + predicted.estimatedOutputTokens,
+      provenance: { usage: 'estimated', pricing: predicted.pricingSource },
+    }
+  }
+
+  /**
+   * Real token usage for a session. Discriminated rather than nullable: `read:
+   * false` means the count is UNKNOWN (so an estimate is legitimate), while
+   * `read: true` with zero tokens means the session genuinely consumed nothing
+   * and that zero must survive. Best-effort — a session-API failure must not
+   * fail a task that already ran.
+   *
+   * Every field is coerced to a finite, non-negative number.
+   * `SessionInfo.tokens` is a
+   * projection that the installed server always populates, but a missing field
+   * would otherwise make `output + undefined` → `NaN`, which flows through the
+   * pricing into `totalSpent`; `checkBudget` then compares `NaN` (always false)
+   * and the budget alarm goes silent for the rest of the process while every
+   * reported cost reads `NaN`. A wrong-but-finite number is strictly better
+   * than a poisoned total.
+   */
+  private async readSessionTokens(sessionID: string): Promise<{ read: true; usage: TokenUsage } | { read: false }> {
+    // Non-negative as well as finite: a token count cannot be negative, and
+    // letting one through would SUBTRACT from reported spend.
+    const finite = (value: unknown): number =>
+      typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0
+    try {
+      const session = await this.ctx?.session.get({ sessionID })
+      const tokens = session?.tokens
+      if (!tokens) return { read: false }
+      return {
+        read: true,
+        usage: {
+          input: finite(tokens.input),
+          output: finite(tokens.output),
+          reasoning: finite(tokens.reasoning),
+          cache: { read: finite(tokens.cache?.read), write: finite(tokens.cache?.write) },
+        },
+      }
+    } catch {
+      return { read: false }
+    }
   }
 
   private checkBudget(): void {
@@ -1840,7 +2075,13 @@ export class NexusOrchestrator {
       totalSpent: state.totalSpent,
       budgetRemaining: state.budgetRemaining,
       byAgent: Object.fromEntries(this.costByAgent),
-      byModel: Object.fromEntries(this.costByModel)
+      byModel: Object.fromEntries(this.costByModel),
+      tokensByModel: Object.fromEntries(this.tokensByModel),
+      // Per model: last entry's provenance plus the measured/estimated split, so
+      // `byModel[model]` can be read without assuming all of it is billed.
+      provenance: Object.fromEntries(this.costProvenance),
+      measuredEntries: sumBy(this.costProvenance, p => p.measuredEntries),
+      estimatedEntries: sumBy(this.costProvenance, p => p.estimatedEntries)
     }, null, 2)
   }
 
