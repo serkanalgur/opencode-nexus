@@ -389,6 +389,11 @@ export class NexusOrchestrator {
     // Initialize escalation policy from config selfHealing settings
     this.escalationPolicy = {
       ...DEFAULT_ESCALATION,
+      // Copied, not shared: step 3 escalations `shift()` entries off this list,
+      // and a shallow spread would leave every orchestrator instance holding
+      // the one array on DEFAULT_ESCALATION — so the first node anywhere to
+      // escalate would silently drain the fallbacks for the whole process.
+      fallbackModels: [...DEFAULT_ESCALATION.fallbackModels],
       maxRetries: this.config.selfHealing.maxRetries,
       retryDelay: this.config.selfHealing.retryDelay,
       enableRespawn: this.config.selfHealing.contextTransfer
@@ -923,13 +928,17 @@ export class NexusOrchestrator {
     }
   }
 
-  private async spawnAndExecute(node: DAGNode, transferContext?: ContextTransferData): Promise<void> {
+  /**
+   * Resolve the "providerID/modelID" reference that `spawnAgent` requires.
+   *
+   * `ModelSelection.model` is the bare id (`scoreModel` splits the candidate
+   * on "/"), so the two halves have to be rejoined here.
+   */
+  private selectQualifiedModel(node: DAGNode): string {
     // Analyze complexity and select model
     const complexity = this.analyzeComplexity(node.task)
     const model = this.selectModel(node.task.requiredRole, complexity)
 
-    // `ModelSelection.model` is the bare id (`scoreModel` splits the candidate
-    // on "/"), but `spawnAgent` needs the qualified "providerID/modelID" form.
     // A role's configured model is user-supplied and may lack a provider prefix;
     // `scoreModel` then yields the whole value as `provider` and `model: ""`,
     // and `spawnAgent` resolves that empty id to 'default' — a silent wrong-model
@@ -943,7 +952,27 @@ export class NexusOrchestrator {
         `Cannot build a "providerID/modelID" reference.`
       )
     }
-    const qualifiedModel = `${model.provider}/${model.model}`
+
+    return `${model.provider}/${model.model}`
+  }
+
+  /**
+   * Spawn, deliver and execute a node — the single path every attempt takes.
+   *
+   * `options` groups the two orthogonal knobs a caller may set, rather than
+   * adding a third positional parameter: they are unrelated concerns (what
+   * context the prompt carries vs. which model runs it), and an options bag
+   * keeps the single-knob call sites self-documenting — step 3 passes
+   * `{ modelOverride }` without an `undefined` placeholder in the middle.
+   */
+  private async spawnAndExecute(
+    node: DAGNode,
+    options: { transferContext?: ContextTransferData; modelOverride?: string } = {}
+  ): Promise<void> {
+    // A fallback model is already a qualified "providerID/modelID" reference
+    // from the escalation policy, so it bypasses selection — and with it the
+    // qualification check, which has nothing to verify.
+    const qualifiedModel = options.modelOverride ?? this.selectQualifiedModel(node)
 
     // Spawn agent with real session
     const agent = await this.spawnAgent({
@@ -958,7 +987,7 @@ export class NexusOrchestrator {
     this.notifyStateChange()
 
     // Execute task via OpenCode session
-    await this.executeTask(agent, node, transferContext)
+    await this.executeTask(agent, node, options.transferContext)
   }
 
   /**
@@ -1267,25 +1296,37 @@ export class NexusOrchestrator {
       // Respawn with context
       node.status = 'pending'
       this.notifyStateChange()
-      await this.spawnAndExecute(node, context)
+      await this.spawnAndExecute(node, { transferContext: context })
       return
     }
 
     // Step 3: Try fallback model
     if (policy.fallbackModels.length > 0) {
+      // `shift` consumes the entry, so each escalation burns one fallback: a
+      // node reaches step 4 (alert) after at most `fallbackModels.length`
+      // fallback attempts.
       const fallbackModel = policy.fallbackModels.shift()
       if (fallbackModel) {
         // Terminate the failed agent
         await this.terminateAgent(agent.id)
 
-        // Spawn with fallback model override
+        // Re-enter the normal execution path with the fallback model. Going
+        // through `spawnAndExecute` is what makes the attempt real: it assigns
+        // `node.spawnedAgent` / `node.task.assignedAgent`, moves the node out
+        // of 'pending', prompts the new session with the task and runs
+        // `executeTask`. A bare `spawnAgent` did none of that, leaving the node
+        // pending forever with an orphaned session the scheduler would re-pick.
+        //
+        // Context is deliberately NOT transferred. Step 3 is "same task,
+        // different (cheaper) model" — step 1's semantics with a model
+        // override. Step 2's transfer exists because the *agent* failed and a
+        // fresh one needs to know what it walked into; here the failure is
+        // attributed to the model, not the agent, and replaying a failed
+        // agent's error log into the fallback's prompt would just re-teach it
+        // the failure we are trying to route around.
         node.status = 'pending'
         this.notifyStateChange()
-        // KNOWN PRE-EXISTING BUG (present at base commit a87e81e, not introduced
-        // here): this bare spawnAgent never prompts the new session, so the
-        // fallback agent receives no task. Out of scope for the subagent-tool
-        // dispatch change; do not mistake it for a regression from that work.
-        await this.spawnAgent({ role: node.task.requiredRole, model: fallbackModel })
+        await this.spawnAndExecute(node, { modelOverride: fallbackModel })
         return
       }
     }
