@@ -17,16 +17,17 @@ afterAll(() => {
 })
 
 /**
- * Cost accounting used to be fabricated: `executeTask` assigned
- * `estimateModelCost(model, provider)` — a USD **per-1K rate** — to
- * `TaskResult.cost`, and left `tokensUsed` at 0 with a "Would need to parse"
- * TODO. A run's spend was therefore a sum of rates with no relationship to
- * tokens consumed, and `costByModel` was never populated because `trackCost`
- * had no callers.
+ * Cost accounting used to be fabricated: `executeTask` assigned a USD
+ * **per-1K rate** to `TaskResult.cost` — the now-deleted
+ * `estimateModelCost(model, provider)`, or its mean of a real rate and a
+ * hand-tuned relative figure — and left `tokensUsed` at 0 with a "Would need
+ * to parse" TODO. A run's spend was therefore a sum of rates with no
+ * relationship to tokens consumed, and `costByModel` was never populated
+ * because `trackCost` had no callers.
  *
  * These tests pin the replacement: real session token usage priced with the
- * orchestrator's per-1K `modelCosts`, one accounting path, and a budget filter
- * that compares like with like.
+ * orchestrator's per-1K `modelCosts` at the context tier that usage selects,
+ * one accounting path, and a budget filter that compares like with like.
  *
  * The token conventions are OpenCode's, not ours. From the installed server
  * binary, `SessionInfo.tokens` is projected as

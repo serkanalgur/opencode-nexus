@@ -212,14 +212,16 @@ export function totalTokens(usage: TokenUsage): number {
 }
 
 /**
- * The "prompt size" OpenCode prices tiers on: `input + cache.read +
- * cache.write`.
+ * The "prompt size" tier SELECTION is keyed on: `input + cache.read +
+ * cache.write`. It is a property of which rate applies, not of the cost
+ * arithmetic — `selectTier(tiers, promptSizeOf(usage))` is the whole of it, and
+ * the same quantity reaches the base rate via `selectTier(tiers, 0)`.
  *
  * NOT `totalTokens`. Output and reasoning are EXCLUDED — they are produced
- * after the tier is chosen and are not part of the context the tier is a
- * function of. Conflating the two is the single easiest way to get tier
- * selection subtly wrong, and it would only show up on long-context runs,
- * which is precisely where the answer matters.
+ * after the tier is chosen and are not part of the context the tier depends on.
+ * Conflating the two is the single easiest way to get tier selection subtly
+ * wrong, and it would only show up on long-context runs, which is precisely
+ * where the answer matters.
  */
 export function promptSizeOf(usage: TokenUsage): number {
   return usage.input + usage.cache.read + usage.cache.write
@@ -252,6 +254,19 @@ const ZERO_RATES: ModelPricing = { input: 0, output: 0, cacheRead: 0, cacheWrite
  * `accountTaskCost`, and `safeAccountTaskCost` would swallow that into a
  * silent, unlabelled `$0` — a wrong answer with no trace. An empty tier list
  * is a data error, and the honest response to it is a zero bill, not a crash.
+ *
+ * TWO PLACES WHERE THIS IS NOT `Ng`, and a reader auditing "term for term"
+ * will find two rather than one:
+ *  1. NO UNTIERED BASE. `Ng` falls back to `tiers.find(c => c.tier ===
+ *     void 0)` and, finding none, returns ZERO for the whole call. We return
+ *     the zero-rate tier above, which coincides with `Ng` in that case — but
+ *     only because `loadModelCosts` synthesises an untiered base from `cost[0]`
+ *     for exactly this shape. Hand this function a tier-only list and `Ng`
+ *     would bill 0 where we bill the lowest published rate.
+ *  2. A TIER WHOSE `size` IS NOT A FINITE NUMBER. `loadModelCosts` keeps such a
+ *     row (so it stays visible in the price list) but omits its `threshold`,
+ *     which makes it the untiered base. `Ng` would keep the `tier` object and
+ *     never match it, so it is inert there and load-bearing here.
  */
 export function selectTier(tiers: readonly ModelPricingTier[], promptSize: number): ModelPricingTier {
   let best: ModelPricingTier | undefined
@@ -308,13 +323,33 @@ export function priceUsage(
  *
  * NOTE: `SessionInfo.cost` is deliberately not read as an input, and the
  * reason is granularity, not unit. OpenCode prices each model CALL at the tier
- * its own prompt falls into and accumulates; we are handed one SESSION TOTAL
- * and make a single tier selection for it (see `priceUsage`). A session with
- * one small warm-up call and one large call is therefore billed entirely at
- * the large tier by us, while OpenCode splits it — so we OVER-report, by
- * design and in the safe direction. Tokens × our per-1K rates is the one
- * unit-consistent path, but it still will not tie exactly to `SessionInfo.cost`
- * and must not be read as a reconciliation of it.
+ * that call's own prompt falls into, and accumulates. We are handed one SESSION
+ * TOTAL and make ONE tier selection for it (see `priceUsage`). Tokens × our
+ * per-1K rates is the unit-consistent path, but it will not tie exactly to
+ * `SessionInfo.cost` and must not be read as a reconciliation of it.
+ *
+ * THE DIRECTION OF THE ERROR IS NOT KNOWABLE HERE, and an earlier version of
+ * this comment claimed otherwise. It is tempting to say a single session-wide
+ * selection can only over-report, because a session sum is always at least as
+ * large as any one of its calls' prompts. That holds ONLY while rates are
+ * monotonically non-decreasing in threshold:
+ *
+ *   - Monotone rates (the common case — a premium tier costs more). The sum
+ *     reaches at least as high a tier as any single call did, so we bill at
+ *     the same or a HIGHER rate: we OVER-report.
+ *   - A provider publishing a DISCOUNTED long-context tier — Gemini's
+ *     long-context pricing is exactly this shape, and T5 pins it as base 10 /
+ *     200k threshold rate 1. Several sub-threshold calls then sum PAST the
+ *     threshold while each was billed at the base rate. OpenCode bills
+ *     2 × (150k/1k × 10) = $3.00; we bill (300k/1k × 1) = $0.30. A 10x
+ *     UNDER-report, by the ratio between base and discounted rate.
+ *
+ * So on precisely the long-context sessions this change exists to price
+ * correctly, a discounted tier inverts the sign. There is no cheap fix at
+ * session-total granularity — recovering opencode's figure needs the
+ * per-call breakdown, which is the thing we are not given — which is the
+ * honest reason the code makes a single selection and labels it. Treat the
+ * sign as unknown, not as safe.
  */
 export function priceTokens(usage: TokenUsage, pricing: ModelPricing): CostBreakdown & { total: number } {
   const inputCost = per1k(pricing.input, usage.input)

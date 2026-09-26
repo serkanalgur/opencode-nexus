@@ -42,6 +42,19 @@ function internals(orchestrator: NexusOrchestrator): Internals {
   return orchestrator as unknown as Internals
 }
 
+/**
+ * The escalation step 3 actually reaches for these tasks.
+ *
+ * NOT `DEFAULT_ESCALATION.fallbackModels[0]`. Model selection at complexity 50
+ * wins with `google/gemini-2.5-flash`, which is also `fallbackModels[0]`, so
+ * step 3 skips that entry as "the model that just failed" and uses the next
+ * one. Naming the reachable entry once here keeps the tests below asserting
+ * about behaviour instead of re-deriving the list order.
+ */
+const REACHED_FALLBACK = 'anthropic/claude-haiku-4-5'
+/** The entry step 3 steps over, because selection already chose it. */
+const SKIPPED_FALLBACK = 'google/gemini-2.5-flash'
+
 function makeTask(id: string, role: string): Task {
   return {
     id,
@@ -155,7 +168,6 @@ describe('handleFailure step 3 — the fallback model actually runs the task', (
     // The first attempt's prompt throws; step 3's must succeed, so the node
     // ends completed rather than failed.
     const { orchestrator, h } = await initialized(1)
-    const fallback = DEFAULT_ESCALATION.fallbackModels[0] as string
 
     const result = await orchestrator.execute({ tasks: [makeTask('task-1', 'coder')] })
 
@@ -173,10 +185,10 @@ describe('handleFailure step 3 — the fallback model actually runs the task', (
     expect(result.tasks[0]?.success).toBe(true)
 
     // `spawnedAgent` points at the agent that ran it, and that agent is on
-    // the fallback model — the wiring the bare `spawnAgent` skipped.
+    // the escalation model — the wiring the bare `spawnAgent` skipped.
     const spawned = nodeOf(orchestrator, 'task-1').spawnedAgent
     expect(spawned).toBeDefined()
-    expect(agentFor(orchestrator, fallback)?.id).toBe(spawned?.id)
+    expect(agentFor(orchestrator, REACHED_FALLBACK)?.id).toBe(spawned?.id)
   })
 
   it('leaves the node running or completed, never pending', async () => {
@@ -203,28 +215,95 @@ describe('handleFailure step 3 — the fallback model actually runs the task', (
       return realSpawnAgent(config)
     }
 
-    const task = makeTask('task-1', 'coder')
-    // What the first spawn must have used: the same analysis the real
-    // `selectQualifiedModel` runs for this node.
-    const chosen = orchestrator.selectModel('coder', orchestrator['analyzeComplexity'](task))
+    await orchestrator.execute({ tasks: [makeTask('task-1', 'coder')] })
 
-    await orchestrator.execute({ tasks: [task] })
-
-    // The second spawn carries the fallback reference; the first is whatever
-    // model selection chose.
+    // The second spawn carries an escalation reference, and the escalation
+    // CHANGED THE MODEL.
     //
-    // NOT asserted as "not a fallback", which is what this test used to say.
-    // That was never an invariant — it held only because the old cost term
-    // ranked on a fixed ceiling, so selection never picked an escalation
-    // fallback. The cost term is now a real per-task estimate, and at this
-    // complexity selection legitimately wins with `google/gemini-2.5-flash`,
-    // which IS the first fallback. So the ref can no longer distinguish the two
-    // spawns by value. What the test actually needs to pin is that the
-    // escalation used the POLICY's entry rather than repeating the selected
-    // model, so each spawn is compared against the thing it should equal.
+    // This assertion is load-bearing and was briefly relaxed, wrongly. Step 3
+    // shifted `fallbackModels[0]` with no comparison against the model that just
+    // failed, and since selection wins with 'google/gemini-2.5-flash' at almost
+    // every complexity — which is also `fallbackModels[0]` — an unconditional
+    // shift re-ran the identical task on the identical model, burning a full
+    // task's tokens and an escalation entry to achieve nothing. "Escalation
+    // must change the model" is the product requirement, and it does not hold
+    // by accident of which model selection happens to pick.
+    //
+    // The escalation is the NEXT usable entry, not the head: step 3 steps over
+    // the head because it is the model that just failed.
     expect(spawned.length).toBe(2)
-    expect(spawned[0]).toBe(`${chosen.provider}/${chosen.model}`)
-    expect(spawned[1]).toBe('google/gemini-2.5-flash')
+    expect(spawned[1]).toBe(REACHED_FALLBACK)
+    expect(spawned[0]).not.toBe(spawned[1])
+  })
+
+  it('skips a fallback that equals the model that just failed, and burns it', async () => {
+    // The other half of the same requirement: an entry equal to the failed
+    // model is not merely skipped, it is stepped over AND consumed, so a node
+    // does not re-attempt it on a later escalation.
+    const { orchestrator } = await initialized(1)
+    expect(internals(orchestrator).escalationPolicy.fallbackModels[0])
+      .toBe(SKIPPED_FALLBACK)
+
+    // The first attempt runs on the model selection picks, which at this
+    // complexity IS google/gemini-2.5-flash — the head of the fallback list.
+    const spawned: string[] = []
+    const realSpawnAgent = orchestrator.spawnAgent.bind(orchestrator)
+    orchestrator.spawnAgent = async (config) => {
+      spawned.push(config.model ?? '')
+      return realSpawnAgent(config)
+    }
+
+    await orchestrator.execute({ tasks: [makeTask('task-1', 'coder')] })
+
+    // Exactly two spawns, and the escalation is NOT the model that just
+    // failed. Before the step-3 fix this produced two spawns both on
+    // google/gemini-2.5-flash: a full task's tokens spent re-running the same
+    // thing.
+    expect(spawned).toHaveLength(2)
+    expect(spawned[0]).toBe(SKIPPED_FALLBACK)
+    expect(spawned[1]).toBe(REACHED_FALLBACK)
+
+    // And the unusable entry was consumed, so a second escalation cannot reach
+    // for the model that just failed.
+    expect(internals(orchestrator).escalationPolicy.fallbackModels).toEqual([])
+  })
+
+  it('reaches step 4 without consuming the list when EVERY fallback equals the failed model', async () => {
+    // No usable escalation exists, so step 3 must not fire at all — and it must
+    // leave the shared policy intact. Draining it would strip the escalation
+    // route from every OTHER node too, turning one node's dead end into the
+    // whole orchestrator's.
+    const { orchestrator } = await initialized(1)
+    internals(orchestrator).escalationPolicy.fallbackModels = [
+      'google/gemini-2.5-flash',
+      'google/gemini-2.5-flash',
+    ]
+
+    const spawned: string[] = []
+    const realSpawnAgent = orchestrator.spawnAgent.bind(orchestrator)
+    orchestrator.spawnAgent = async (config) => {
+      spawned.push(config.model ?? '')
+      return realSpawnAgent(config)
+    }
+    const alerts: string[] = []
+    orchestrator.on('agent:escalation', (e: { taskId: string }) => { alerts.push(e.taskId) })
+
+    const result = await orchestrator.execute({ tasks: [makeTask('task-1', 'coder')] })
+
+    // One attempt only: no step-3 respawn, because there is nothing to switch
+    // to. The node fails, which is the honest outcome.
+    expect(spawned).toEqual([SKIPPED_FALLBACK])
+    expect(alerts).toEqual(['task-1'])
+    expect(nodeOf(orchestrator, 'task-1').status).toBe('failed')
+    // `result.success` is about the DAG having run to completion, not about
+    // every task succeeding — the per-task result is the one that says the
+    // task failed. Pre-existing `execute()` semantics, not a step-3 claim.
+    expect(result.tasks[0]?.success).toBe(false)
+
+    // Nothing was consumed: the list is still there for a node that failed on
+    // a DIFFERENT model and could use these entries.
+    expect(internals(orchestrator).escalationPolicy.fallbackModels)
+      .toEqual(['google/gemini-2.5-flash', 'google/gemini-2.5-flash'])
   })
 })
 
@@ -234,10 +313,12 @@ describe('handleFailure step 3 — the fallback entry is consumed', () => {
 
     await orchestrator.execute({ tasks: [makeTask('task-1', 'coder')] })
 
-    // `shift()` removed the entry the escalation used.
-    expect(internals(orchestrator).escalationPolicy.fallbackModels).toEqual([
-      'anthropic/claude-haiku-4-5'
-    ])
+    // BOTH entries are gone: `anthropic/claude-haiku-4-5` is the one the
+    // escalation used, and `google/gemini-2.5-flash` was stepped over and
+    // consumed because it is the model that just failed. Consumed-not-skipped
+    // is deliberate — a later escalation must not reach for the model that
+    // already failed once.
+    expect(internals(orchestrator).escalationPolicy.fallbackModels).toEqual([])
 
     // A second, independent orchestrator gets the full default list — the
     // policy owns its copy rather than mutating the shared module default.
@@ -298,8 +379,13 @@ describe('handleFailure step 3 — a throw in the fallback path is contained', (
 
     // Sibling nodes spawn concurrently, so a call *count* would be racy. Key
     // the throw on "this task has already spawned once" instead — that
-    // identifies the step-3 path exactly and per node, because step 3 is the
-    // only caller that spawns a second agent for a task.
+    // identifies the step-3 path exactly and per node, because with this policy
+    // (retries exhausted, respawn disabled) step 3 is the only REMAINING
+    // caller that spawns a second agent for a task. Steps 1 and 2 also re-spawn
+    // the same node, and the harness disables both, so the key is correct FOR
+    // THIS POLICY: if retries or respawn were ever enabled here, the first
+    // attempt would throw and this test would silently stop testing sibling
+    // containment at all.
     //
     // The previous key was the fallback MODEL REF, on the grounds that step 3
     // was the only caller passing a model override. That stopped being true:

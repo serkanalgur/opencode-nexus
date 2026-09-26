@@ -119,14 +119,24 @@ describe('the cost term is a per-task estimate, normalised within the pass', () 
       expect(real.pricing[field]).toBeCloseTo(fallback.pricing[field], 15)
     }
 
-    // Same shared normalisation reference, so the cost term must match exactly.
-    // Both are near 1 because this reference (1) is far above their estimate
-    // (~$0.0004); what matters is that the two agree to the last bit.
-    const reference = new Map([['x', 1]])
+    // Both candidates' OWN estimates go in the map, so the denominator is the
+    // max of the two — a discriminating one. An earlier version of this test
+    // used a hand-made `new Map([['x', 1]])` as the reference, which made the
+    // assertion nearly vacuous: against a reference of 1, estimates of ~$0.0004
+    // both land at 0.9996 whether or not they are the same price, so the
+    // equality passed for the wrong reason. The exact `toBe` below is the
+    // load-bearing assertion; the rate loop above it establishes that the two
+    // really are the same price.
+    const reference = new Map([
+      ['my-org/twin', orchestrator.forecaster.estimateCost(COMPLEXITY, 'twin', 'my-org')],
+      ['google/gemini-2.5-flash', orchestrator.forecaster.estimateCost(COMPLEXITY, 'gemini-2.5-flash', 'google')],
+    ])
     const a = orchestrator.scoreModel('my-org/twin', 'coder', COMPLEXITY, reference)
     const b = orchestrator.scoreModel('google/gemini-2.5-flash', 'coder', COMPLEXITY, reference)
     expect(a.costScore).toBe(b.costScore)
-    expect(a.costScore).toBeGreaterThan(0.999)
+    // The shared rate is also the max, so the more expensive of the pair scores
+    // 0 on cost — a real spread, not two near-identical values.
+    expect(Math.min(a.costScore, b.costScore)).toBe(0)
     await orchestrator.shutdown()
   })
 
