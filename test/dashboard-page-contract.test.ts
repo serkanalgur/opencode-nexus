@@ -1,6 +1,11 @@
 import { describe, it, expect, beforeAll } from 'bun:test'
-import { join } from 'node:path'
 import { BROADCAST_EVENTS } from '../src/broadcast'
+import {
+  readDashboardHtml,
+  extractInlineScript,
+  executableSource,
+  functionSource,
+} from './helpers/dashboard-page'
 
 /**
  * The page's side of the WebSocket contract.
@@ -25,39 +30,25 @@ import { BROADCAST_EVENTS } from '../src/broadcast'
  * handler being renamed out from under it.
  *
  * All of it is source-level, so it carries the usual caveat: it cannot see
- * through a dynamic property access. That is why every check is paired with a
- * non-vacuity guard on the number of things it found, and why the coverage half
- * is driven off the exported list rather than a copy — a copy is the thing that
- * rots, which is how the eight dead cases got there.
+ * through a dynamic property access, and — the reason this file is not the whole
+ * story — it cannot tell code that RUNS from code that merely reads correctly.
+ * A use-before-declaration is invisible here: `renderState` once read
+ * `liveAgents.length` on the line above `var liveAgents`, which satisfies every
+ * grep below and throws on every state push. That is what
+ * `dashboard-page-execution.test.ts` is for; the two are complementary and both
+ * are load-bearing.
+ *
+ * The extraction helpers live in `./helpers/dashboard-page`, shared with the
+ * execution test so there is one `<script>` regex rather than two that can rot
+ * apart silently.
  */
-
-const HTML_PATH = join(import.meta.dir, '..', 'dashboard', 'index.html')
 
 let html = ''
 let script = ''
 
-/**
- * The page's executable source: the `<script>` body with comments removed.
- *
- * Comment stripping is the point. The page documents at length WHY certain keys
- * are not read — `criticalThreshold`, `autoTerminate`, `config:update` all
- * appear in prose explaining their removal — and a grep that cannot tell prose
- * from code would either fail on the explanation or force the explanation out of
- * the file. What is left is what actually runs.
- */
-function executableSource(): string {
-  return script
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .split('\n')
-    .filter((line) => !/^\s*\/\//.test(line))
-    .join('\n')
-}
-
 beforeAll(async () => {
-  html = await Bun.file(HTML_PATH).text()
-  const match = /<script>([\s\S]*?)<\/script>/.exec(html)
-  if (match === null) throw new Error('dashboard/index.html has no <script> block')
-  script = match[1] as string
+  html = await readDashboardHtml()
+  script = extractInlineScript(html)
 })
 
 describe('the page finds the script and the body it drives', () => {
@@ -123,13 +114,13 @@ describe('the page handles every event the broadcaster forwards', () => {
     // The broadcaster forwards each event to each client exactly once, so any
     // suppression set on the page would drop real events. A count or a
     // seen-set keyed on event name is the shape this fails on.
-    const code = executableSource()
+    const code = executableSource(script)
     expect(/seenEvents|handledEvents|dedup|lastEventType/.test(code)).toBe(false)
   })
 })
 
 describe('the page renders only what the server reports', () => {
-  const code = () => executableSource()
+  const code = () => executableSource(script)
 
   it('reads every field the state contract now carries', () => {
     // Coverage, the inverse of the checks below. Each of these was sent and
@@ -230,7 +221,7 @@ describe('the config panel is honestly read-only', () => {
     // so the button reported a success that could not happen. There is no auth
     // story for writes and the socket is localhost with `CORS: *`, so no write
     // path was added either — the control is gone, not re-pointed.
-    const c = executableSource()
+    const c = executableSource(script)
     expect(/config:update/.test(c)).toBe(false)
     expect(/config-apply/.test(html)).toBe(false)
     expect(html).not.toContain('Apply Config')
@@ -250,7 +241,7 @@ describe('the config panel is honestly read-only', () => {
     // the old `budget.maxBudget` check was not, so it could never have fired.
     expect(html).toContain('id="config-format-btn"')
     expect(html).toContain('id="config-validate-btn"')
-    expect(/maxTotalCost/.test(executableSource())).toBe(true)
+    expect(/maxTotalCost/.test(executableSource(script))).toBe(true)
   })
 })
 
@@ -260,7 +251,7 @@ describe('the page uses the HTTP routes the server actually serves', () => {
     // every completed or terminated agent's cost vanishes from the page while
     // the orchestrator still holds it. The chart got less accurate as the run
     // progressed. `/api/costs` carries the full history.
-    const c = executableSource()
+    const c = executableSource(script)
     expect(/fetch\('\/api\/costs'\)/.test(c)).toBe(true)
     expect(/byAgent/.test(c)).toBe(true)
     expect(/byModel/.test(c)).toBe(true)
@@ -269,7 +260,7 @@ describe('the page uses the HTTP routes the server actually serves', () => {
   it('reads server uptime from /api/health instead of the browser tab', () => {
     // The old "Uptime" was `startTime + a 1s interval` — the age of the tab,
     // presented as if it were the orchestrator's.
-    const c = executableSource()
+    const c = executableSource(script)
     expect(/fetch\('\/api\/health'\)/.test(c)).toBe(true)
     expect(/startTime/.test(c)).toBe(false)
   })
@@ -278,7 +269,7 @@ describe('the page uses the HTTP routes the server actually serves', () => {
     // Normalising to the most expensive agent makes the top bar 100% by
     // construction, so the bars encode rank rather than budget consumption.
     // The page divides by the budget ceiling and says which it did.
-    const c = executableSource()
+    const c = executableSource(script)
     expect(/maxTotalCost/.test(c)).toBe(true)
     expect(/budget ceiling/i.test(c)).toBe(true)
   })
@@ -305,13 +296,13 @@ describe('the sessions view exists and makes the orphan case unmissable', () => 
   it('sorts the rows that matter to the top', () => {
     // An orphan and an abandoned session must not be below the fold of a long
     // list of healthy ones.
-    const c = executableSource()
+    const c = executableSource(script)
     expect(/function sessionRank/.test(c)).toBe(true)
     expect(/sessionRank/.test(c)).toBe(true)
   })
 
   it('is driven by the state field, not by a filter on the agent list', () => {
-    expect(/\.sessions\b/.test(executableSource())).toBe(true)
+    expect(/\.sessions\b/.test(executableSource(script))).toBe(true)
   })
 
   it('keeps the "live agents only" caveat on the number it qualifies', () => {
@@ -321,7 +312,7 @@ describe('the sessions view exists and makes the orphan case unmissable', () => 
     // the page — just nowhere near the number it qualifies, on a card of four,
     // above the fold, long before that section is reached. The caveat is now in
     // the sub-line itself.
-    const c = executableSource()
+    const c = executableSource(script)
     expect(/\(live agents only\)/.test(c)).toBe(true)
     // Both halves of the arithmetic come from `liveAgents`. `activeCount` was
     // already computed over it while the total was `agents.length`, so the
@@ -338,7 +329,7 @@ describe('the dependency graph draws the graph rather than a pipeline', () => {
     // each CONSECUTIVE pair, which renders as a linear pipeline whatever the
     // real graph is. The page now builds its edge list from
     // `tasks[].dependencies` and draws only those.
-    const c = executableSource()
+    const c = executableSource(script)
     expect(/edges\.push/.test(c)).toBe(true)
     expect(/\.dependencies\b/.test(c)).toBe(true)
   })
@@ -346,7 +337,7 @@ describe('the dependency graph draws the graph rather than a pipeline', () => {
   it('says so when there is no graph to draw', () => {
     // A graph with no edges rendered as a row of boxes is indistinguishable
     // from a linear pipeline unless the page says the edges are absent.
-    expect(/No task reports any dependency/.test(executableSource())).toBe(true)
+    expect(/No task reports any dependency/.test(executableSource(script))).toBe(true)
   })
 
   it('reports the edges and nodes it could not draw', () => {
@@ -354,7 +345,7 @@ describe('the dependency graph draws the graph rather than a pipeline', () => {
     // no id, and a dependency cycle are all cases where a layout can quietly
     // imply a structure the data does not have. Each is counted and said out
     // loud rather than dropped.
-    const c = executableSource()
+    const c = executableSource(script)
     expect(/dangling/.test(c)).toBe(true)
     expect(/idless/.test(c)).toBe(true)
     expect(/cycleCount/.test(c)).toBe(true)
@@ -383,7 +374,7 @@ describe('the auto-refresh is consistent with a getState the server answers', ()
   it('polls with getState, which the socket replies to', () => {
     // Kept as a user-facing affordance, and it is what makes the README's
     // "auto-refresh every 5 seconds" true rather than aspirational.
-    const c = executableSource()
+    const c = executableSource(script)
     expect(/type: 'getState'/.test(c)).toBe(true)
     expect(/AUTO_REFRESH_INTERVAL = 5000/.test(c)).toBe(true)
   })
@@ -391,9 +382,81 @@ describe('the auto-refresh is consistent with a getState the server answers', ()
   it('labels the snapshot by its age rather than by when it asked', () => {
     // "Updated HH:MM:SS" was written when the request went out, so it claimed
     // a freshness the page had not yet confirmed.
-    const c = executableSource()
+    const c = executableSource(script)
     expect(/ago\)/.test(c)).toBe(true)
     expect(/STALE_AFTER_MS/.test(c)).toBe(true)
+  })
+})
+
+/**
+ * A frame the page could not parse, and a frame the page could not draw, are
+ * two different faults with two different owners.
+ *
+ * They shipped as one. `ws.onmessage` wrapped `JSON.parse` AND `handleMessage`
+ * in a single `try`, so when `renderState` began throwing on every state push,
+ * the page logged "Non-JSON frame from server" — which is a false statement
+ * about a frame that parsed perfectly well, and which sent the investigation
+ * at the server instead of at the 2000-line file that was throwing. The user
+ * saw that message every five seconds.
+ *
+ * Pinned at source level because the property is structural — two handlers, two
+ * `catch` blocks, two messages — and a grep is exactly the right tool for
+ * "are these two things still separate". The behavioural half, that a page-side
+ * failure is actually reachable and actually reported as one, is in
+ * `dashboard-page-execution.test.ts`, which drives the page until it fails.
+ */
+describe('a parse failure and a render failure are separate reports', () => {
+  /** The body of the `ws.onmessage` assignment. */
+  function onMessageBody(): string {
+    const c = executableSource(script)
+    const start = c.indexOf('ws.onmessage = function(evt)')
+    if (start === -1) throw new Error('dashboard/index.html assigns no ws.onmessage handler')
+    const open = c.indexOf('{', start)
+    let depth = 0
+    for (let i = open; i < c.length; i++) {
+      if (c[i] === '{') depth++
+      else if (c[i] === '}') {
+        depth--
+        if (depth === 0) return c.slice(open + 1, i)
+      }
+    }
+    throw new Error('unbalanced braces in the ws.onmessage handler')
+  }
+
+  it('catches the parse and the render separately, not as one failure', () => {
+    // THE assertion. One `try` around both is what made a `TypeError` from the
+    // page's own renderer indistinguishable from a bad frame on the wire.
+    const body = onMessageBody()
+    expect((body.match(/\} catch \(e\) \{/g) ?? []).length).toBe(2)
+    // And the two calls are in two different `try` blocks, so the second is not
+    // reachable from a `JSON.parse` failure.
+    expect(/try \{\s*msg = JSON\.parse\(evt\.data\);/.test(body)).toBe(true)
+    expect(/try \{\s*handleMessage\(msg\);/.test(body)).toBe(true)
+  })
+
+  it('blames the server for a frame it could not parse', () => {
+    // Still an `info` line, because an unparseable frame IS news about the
+    // server. Asserted with its severity so a future edit cannot quietly
+    // promote a server-side problem into a page error.
+    const body = onMessageBody()
+    expect(/addLog\('info', '📩', 'Non-JSON frame from server: /.test(body)).toBe(true)
+  })
+
+  it('blames the page, names the frame type, and logs an error when it cannot render', () => {
+    const body = onMessageBody()
+    expect(/addLog\('error', '⚠️', 'Page failed to render a ' \+ frameType\(msg\)/.test(body)).toBe(true)
+    // The frame's own type comes from a helper, so the line says WHICH frame
+    // could not be drawn. Handled without a build step, by reading the field
+    // off the already-parsed object.
+    expect(/function frameType\(msg\)/.test(executableSource(script))).toBe(true)
+  })
+
+  it('has a frameType that cannot itself throw on an untyped frame', () => {
+    // It is called from the failure path, where the page has already thrown
+    // once. A helper that assumed an object would be the second exception.
+    const src = functionSource(executableSource(script), 'frameType')
+    expect(src).toContain('asObject(msg)')
+    expect(src).toContain("return 'untyped'")
   })
 })
 
@@ -414,28 +477,16 @@ describe('the unbilled stat distinguishes "none evicted" from "not reported"', (
   /**
    * One named function's source, brace-matched out of the page.
    *
-   * Brace counting is naive about braces inside string literals, which is a
-   * real caveat and not a hypothetical one: the page's prose is full of `{`.
-   * It is sound here because the functions pulled are the small numeric and
-   * formatting helpers plus the two under test, none of which contain a brace
-   * in a string — and because `extracted` is asserted to be non-empty below, so
-   * a match that silently found the wrong span fails rather than passing.
+   * A thin wrapper over the shared extractor, which carries the documented
+   * caveat: brace counting is naive about braces inside string literals, and the
+   * page's prose is full of `{`. It is sound for the functions pulled here —
+   * the small numeric and formatting helpers plus the two under test, none of
+   * which contain a brace in a string — and because `deps` is asserted to be
+   * non-empty below, so a match that silently found the wrong span fails rather
+   * than passing.
    */
-  function functionSource(name: string): string {
-    const src = executableSource()
-    const start = src.indexOf(`function ${name}(`)
-    if (start === -1) throw new Error(`dashboard/index.html has no function ${name}`)
-    let depth = 0
-    let opened = false
-    for (let i = start; i < src.length; i++) {
-      const ch = src[i]
-      if (ch === '{') { depth++; opened = true }
-      else if (ch === '}') {
-        depth--
-        if (opened && depth === 0) return src.slice(start, i + 1)
-      }
-    }
-    throw new Error(`unbalanced braces while extracting ${name}`)
+  function extractFunction(name: string): string {
+    return functionSource(executableSource(script), name)
   }
 
   /** A cost report with an `uncollected` block, at the given eviction count. */
@@ -457,7 +508,7 @@ describe('the unbilled stat distinguishes "none evicted" from "not reported"', (
   /** Run the page's own `renderUnbilledStat` over a report; return what it wrote. */
   function render(report: Record<string, unknown>): { value: string; sub: string } {
     const deps = ['num', 'fmt$', 'asObject', 'evictedSuffix', 'renderUnbilledStat']
-      .map(functionSource)
+      .map(extractFunction)
       .join('\n')
     const $statUnbilled = { textContent: '' }
     const $statUnbilledSub = { textContent: '' }
@@ -516,7 +567,7 @@ describe('the unbilled stat distinguishes "none evicted" from "not reported"', (
     // That panel builds its rows inline rather than through `evictedSuffix`, so
     // it cannot share the executed test. Pinned at source level, with the
     // wording named so a reword that drops a state fails here too.
-    const c = executableSource()
+    const c = executableSource(script)
     expect(/not reported by this server/.test(c)).toBe(true)
     expect(/the itemised list is complete/.test(c)).toBe(true)
     // And the positive branch still reports the evicted MONEY, not just a
