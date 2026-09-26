@@ -227,10 +227,10 @@ export function formatConfigLoadLog(info: NexusConfigLoadInfo): string {
   // A preset replaces the whole `models` level, so while one is set the models
   // above are NOT the disk file. Say so explicitly, and say how to get control
   // back — a user who edits the file and watches nothing change needs that.
-  // `resetToDefaults()` is only reachable from the TUI, so name that, not a
-  // tool that does not exist.
+  // Name the in-band way first (`preset` with mode 'clear'), since that is
+  // the one an agent can act on without the user leaving the session.
   const override = info.sessionOverride
-    ? ' (+session override: storage; disk edits to models are IGNORED while a preset is set — clear the preset in the TUI to hand control back to disk)'
+    ? ' (+session override: storage; disk edits to models are IGNORED while a preset is set — call the preset tool with mode "clear", or reset in the TUI, to hand control back to disk)'
     : ''
   return `[nexus] config loaded (#${info.loadCount} trigger=${info.trigger} at=${info.loadedAt}) `
     + `project=${info.project.path} [${describeFile(info.project)}] `
@@ -573,9 +573,23 @@ export class NexusConfigManager {
     return result
   }
 
-  // Reset to defaults
-  resetToDefaults(): void {
+  /**
+   * Hand control back to the disk config by dropping the session-scoped
+   * override. This is the one implementation of that, and the only place
+   * `storageConfig` is cleared: the TUI reaches it from two call sites, and
+   * the `preset` tool's `clear` mode reaches it from the agent side, so
+   * neither can drift from the other or bypass it.
+   *
+   * The disk files are not touched — this drops the in-memory override, it
+   * does not rewrite any config.
+   *
+   * @returns whether an override was actually present, so a caller can report
+   * "nothing to clear" instead of claiming a change it did not make.
+   */
+  resetToDefaults(): boolean {
+    const hadOverride = this.storageConfig !== null
     this.storageConfig = null
+    return hadOverride
   }
 
   /**

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, afterAll, mock } from 'bun:test'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, statSync, utimesSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, statSync, utimesSync } from 'node:fs'
 import * as realOs from 'node:os'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -14,6 +14,7 @@ mock.module('node:os', () => ({ ...realOs, default: realOs, homedir: () => SANDB
 
 const { default: plugin, CONFIG_RELOAD_DEBOUNCE_MS, watchConfigFiles } = await import('../src/index')
 const { NexusOrchestrator } = await import('../src/orchestrator')
+const { DEFAULT_CONFIG } = await import('../src/config')
 
 /**
  * The config manager is loaded from disk exactly once, from
@@ -35,6 +36,9 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 // `DEFAULT_CONFIG.models.reviewer` — the value a load falls back to when no
 // config file supplies one.
 const DEFAULT_REVIEWER = 'openai/gpt-5-mini'
+
+// Built-in models, for pinning that a cleared override stopped supplying them.
+const DEFAULT_CONFIG_MODELS = DEFAULT_CONFIG.models
 
 /**
  * Wait for a condition instead of sleeping a fixed span: a reload that does
@@ -986,5 +990,206 @@ describe('NexusOrchestrator.reloadConfigFromDisk', () => {  it('notifies state c
     expect(orchestrator.reloadConfigFromDisk()).toBeNull()
     expect(orchestrator.getConfigInfo()).toBeNull()
     await orchestrator.shutdown()
+  })
+})
+
+/**
+ * The way back to disk, from inside the session.
+ *
+ * Until this existed, applying a preset meant only the TUI could undo it, so
+ * an agent that had just applied one had no in-band recovery: the user edits
+ * nexus.jsonc, nothing happens, and the agent can only point at a UI it cannot
+ * open. These tests pin that `preset` with mode 'clear' clears the override
+ * through the same `resetToDefaults()` path the TUI uses, reports the resolved
+ * map afterwards so the outcome is confirmable, and does not weaken the 2.5.0
+ * fix that made the override survive a reload.
+ */
+describe('clearing the session preset override (preset mode: clear)', () => {
+  const bootedPlugins: Booted[] = []
+
+  afterEach(() => {
+    while (bootedPlugins.length > 0) bootedPlugins.pop()?.cleanup()
+  })
+
+  async function boot(dir: string): Promise<Booted> {
+    const booted = await bootPlugin(dir)
+    bootedPlugins.push(booted)
+    return booted
+  }
+
+  /** The registered `preset` tool, as a model would find it in the tool list. */
+  function presetTool(booted: Booted) {
+    const tool = booted.tools.get('preset')
+    expect(tool).toBeDefined()
+    return tool
+  }
+
+  async function apply(booted: Booted, name: string) {
+    return presetTool(booted).execute({ name }, { sessionID: 'ses_parent' })
+  }
+
+  async function clear(booted: Booted) {
+    return presetTool(booted).execute({ mode: 'clear' }, { sessionID: 'ses_parent' })
+  }
+
+  it('returns control to disk, and reports the resolved map afterwards', async () => {
+    const dir = makeProjectDir()
+    const file = projectConfigPath(dir)
+    writeConfig(file, { reviewer: 'opencode/disk', tester: 'opencode/disk-tester' })
+
+    const booted = await boot(dir)
+    await apply(booted, 'enterprise')
+    const withPreset = await readStatus(booted)
+    expect(withPreset.sessionOverride).toBe(true)
+    expect(withPreset.models.reviewer).toBe('openai/gpt-5')
+
+    const cleared = await clear(booted)
+
+    // The override is gone, and the disk file's own values are in effect.
+    const after = await readStatus(booted)
+    expect(after.sessionOverride).toBe(false)
+    expect(after.diskModelsIgnored).toBe(false)
+    expect(after.models.reviewer).toBe('opencode/disk')
+    expect(after.models.tester).toBe('opencode/disk-tester')
+    // No other role drifted to a preset value.
+    expect(after.models.coder).toBe(DEFAULT_CONFIG_MODELS.coder)
+
+    // The result says what changed and hands back the post-clear map, so the
+    // caller can confirm rather than assume.
+    expect(cleared.content).toContain('Cleared the session preset override')
+    expect(cleared.content).toContain('reviewer=opencode/disk')
+    expect(cleared.content).toContain('tester=opencode/disk-tester')
+    expect(cleared.content).toContain('sessionOverride: false')
+
+    // The disk file itself is untouched — this clears the override, it does
+    // not rewrite the user's config.
+    expect(readFileSync(file, 'utf-8')).toContain('"reviewer": "opencode/disk"')
+    expect(readFileSync(file, 'utf-8')).toContain('"tester": "opencode/disk-tester"')
+  })
+
+  it('says so honestly, and changes nothing, when no override is set', async () => {
+    const dir = makeProjectDir()
+    writeConfig(projectConfigPath(dir), { reviewer: 'opencode/disk' })
+
+    const booted = await boot(dir)
+    const before = await readStatus(booted)
+
+    const cleared = await clear(booted)
+
+    // No override existed, so this is not a success that changed nothing.
+    expect(cleared.content).toContain('nothing was cleared')
+    expect(cleared.content).not.toContain('Cleared the session preset override')
+    // It still reports the map it resolved, and the state is unchanged.
+    expect(cleared.content).toContain('reviewer=opencode/disk')
+    expect(cleared.content).toContain('sessionOverride: false')
+    expect(await readStatus(booted)).toEqual(before)
+  })
+
+  it('is idempotent: a second clear reports nothing to clear, and is harmless', async () => {
+    const dir = makeProjectDir()
+    writeConfig(projectConfigPath(dir), { reviewer: 'opencode/disk' })
+
+    const booted = await boot(dir)
+    await apply(booted, 'enterprise')
+
+    const first = await clear(booted)
+    const afterFirst = await readStatus(booted)
+    expect(first.content).toContain('Cleared the session preset override')
+    expect(afterFirst.models.reviewer).toBe('opencode/disk')
+
+    const second = await clear(booted)
+    expect(second.content).toContain('nothing was cleared')
+    // The already-cleared state is a fixed point, not a fresh change.
+    expect(await readStatus(booted)).toEqual(afterFirst)
+  })
+
+  it('still clears an override that survived a reload in between', async () => {
+    const dir = makeProjectDir()
+    const file = projectConfigPath(dir)
+    writeConfig(file, { reviewer: 'opencode/disk' })
+
+    const booted = await boot(dir)
+    await apply(booted, 'enterprise')
+
+    // The 2.5.0 fix: a reload must not silently discard the in-session choice,
+    // so the override is still there — and still needs an explicit way out.
+    writeConfig(file, { reviewer: 'opencode/edited' })
+    booted.events.push(changedEvent(file, 'change', dir))
+    await sleep(SETTLE_MS)
+    const reloaded = await readStatus(booted)
+    expect(reloaded.loadCount).toBe(2)
+    expect(reloaded.sessionOverride).toBe(true)
+    expect(reloaded.models.reviewer).toBe('openai/gpt-5')
+
+    const cleared = await clear(booted)
+    expect(cleared.content).toContain('reviewer=opencode/edited')
+
+    const after = await readStatus(booted)
+    expect(after.sessionOverride).toBe(false)
+    // No reload happened as part of the clear: the disk file was already read
+    // on load, and it is the override that was in the way.
+    expect(after.loadCount).toBe(2)
+    expect(after.models.reviewer).toBe('opencode/edited')
+  })
+
+  it('leaves disk in control across a reload that follows the clear', async () => {
+    const dir = makeProjectDir()
+    const file = projectConfigPath(dir)
+    writeConfig(file, { reviewer: 'opencode/disk' })
+
+    const booted = await boot(dir)
+    await apply(booted, 'enterprise')
+    await clear(booted)
+
+    // A later disk edit is now honoured directly, with no second clear needed —
+    // the override does not resurrect itself on reload.
+    writeConfig(file, { reviewer: 'opencode/edited' })
+    booted.events.push(changedEvent(file, 'change', dir))
+    await sleep(SETTLE_MS)
+
+    const after = await readStatus(booted)
+    expect(after.loadCount).toBe(2)
+    expect(after.sessionOverride).toBe(false)
+    expect(after.models.reviewer).toBe('opencode/edited')
+    expect(loadLogs[1]).not.toContain('IGNORED')
+
+    // And applying a preset again after the clear still works, i.e. clearing
+    // did not wedge the override mechanism.
+    await apply(booted, 'minimal')
+    const reapplied = await readStatus(booted)
+    expect(reapplied.sessionOverride).toBe(true)
+    expect(reapplied.models.reviewer).toBe('google/gemini-2.5-flash')
+    expect((await clear(booted)).content).toContain('reviewer=opencode/edited')
+  })
+
+  it('is discoverable from the registered tool definition, not just its behaviour', async () => {
+    const booted = await boot(makeProjectDir())
+    const tool = presetTool(booted)
+
+    // A model decides how to call this from `description` alone; the clear
+    // mode must be named there, not only in the parameter description.
+    expect(tool.description).toContain("mode 'clear'")
+    expect(tool.description).toContain('nexus.jsonc')
+
+    // And the shape itself has to carry it, or the call cannot be built.
+    expect(tool.input.properties.mode.enum).toEqual(['apply', 'clear'])
+    expect(tool.input.properties.mode.description).toContain('clear')
+    expect(tool.input.properties.name.description).toContain('clear')
+    expect(tool.input.additionalProperties).toBe(false)
+
+    // The apply path is unchanged for existing callers: mode is optional and
+    // defaults to apply, so `{ name }` alone still works.
+    expect(tool.input.required).toBeUndefined()
+  })
+
+  it('reports the missing preset name instead of silently doing nothing', async () => {
+    const booted = await boot(makeProjectDir())
+    const result = await presetTool(booted).execute({ mode: 'apply' }, { sessionID: 'ses_parent' })
+
+    expect(result.content).toContain('Error')
+    expect(result.content).toContain("mode: 'clear'")
+    // Nothing was applied, and nothing was cleared.
+    const status = await readStatus(booted)
+    expect(status.sessionOverride).toBe(false)
   })
 })
