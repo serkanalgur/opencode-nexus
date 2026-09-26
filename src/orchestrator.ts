@@ -149,6 +149,13 @@ export interface SubagentTool {
  * Text of an assistant message. V2 assistant messages are discriminated by
  * `type` and their text lives in typed `content` parts — there is no `role`
  * field and `content` is an array, not a string.
+ *
+ * The `part.type === "text"` filter is load-bearing, not a redundant narrowing.
+ * A V2 `reasoning` part also carries a `.text` field, so filtering on the
+ * presence of `.text` instead — or dropping the filter and concatenating
+ * `.text` unconditionally — would silently splice the model's chain of thought
+ * into the task output reported back to the caller. Only `text` parts are
+ * user-facing output.
  */
 export function assistantMessageText(message: NexusSessionMessage): string {
   if (message.type !== "assistant") return ""

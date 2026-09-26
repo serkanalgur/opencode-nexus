@@ -21,6 +21,208 @@ interface SidebarState {
   budgetRemaining: number
 }
 
+// ── Sidebar session scanning ───────────────────────────────────────
+// Kept as free functions so the TUI entrypoint stays a thin adapter over the
+// live context and the scanning logic can be driven directly in tests.
+
+/** Agent-id prefix this plugin registers its roles under (`nexus-coder`, …). */
+const NEXUS_AGENT_PREFIX = "nexus-"
+
+/**
+ * The subset of `SessionInfo` the sidebar reads.
+ *
+ * Structural rather than an import from `@opencode/client`, which is not a
+ * direct dependency of this package: every real `SessionInfo` is assignable to
+ * this shape, and the narrow shape is what the scanner below is written
+ * against.
+ */
+export interface SidebarSession {
+  readonly id: string
+  readonly title?: string
+  readonly agent?: string
+  readonly model?: { readonly id: string; readonly providerID: string }
+  readonly metadata?: Readonly<Record<string, unknown>>
+}
+
+/** The read-only slice of `context.data.session` the scanner needs. */
+export interface SidebarSessionSource {
+  family(sessionID: string): readonly string[]
+  get(sessionID: string): SidebarSession | undefined
+}
+
+/**
+ * Reads a string field from `session.metadata`.
+ *
+ * `spawnAgent` no longer writes session-level metadata — it is not a field of
+ * `SessionUpdateInput`, so the write was a silent no-op — and the nexus role
+ * and model live on the orchestrator's own `Agent` record, which the TUI cannot
+ * reach (its `nexus-sidebar-state` is TUI-local storage, a different scope from
+ * the server-side `ctx.storage` the orchestrator writes). What the TUI *can*
+ * read is `session.agent` and `session.model`, which the host populates for
+ * every session; those are the authoritative sources and are used everywhere
+ * below. Metadata is still consulted first purely as a forward-compatible
+ * preferred source: if a future release does manage to write it, the exact
+ * role/model spelling wins without this code changing.
+ */
+function metadataString(
+  metadata: SidebarSession["metadata"],
+  key: string
+): string | undefined {
+  const value = metadata?.[key]
+  return typeof value === "string" && value.length > 0 ? value : undefined
+}
+
+/**
+ * Role behind a session's agent id: `nexus-coder` → `coder`.
+ *
+ * A non-nexus agent id is taken as-is, since the sidebar is already scoped to
+ * this session's family and the real agent name is more informative than the
+ * `'agent'` placeholder the old dead metadata read produced.
+ */
+function roleFromAgent(agent: string | undefined): string | undefined {
+  if (!agent) return undefined
+  const role = agent.startsWith(NEXUS_AGENT_PREFIX)
+    ? agent.slice(NEXUS_AGENT_PREFIX.length)
+    : agent
+  return role.length > 0 ? role : undefined
+}
+
+/** `ModelRef` → the `provider/id` string the sidebar renders. */
+function modelLabel(model: SidebarSession["model"]): string | undefined {
+  if (!model?.providerID || !model.id) return undefined
+  return `${model.providerID}/${model.id}`
+}
+
+/** `coder` → `Coder`, matching how the sidebar has always displayed roles. */
+function titleCase(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1)
+}
+
+/**
+ * Sidebar record for one child session.
+ *
+ * `name` keeps its previous meaning — the capitalised role when one is known,
+ * otherwise the session title, otherwise a short id — so the sidebar reads the
+ * same as it did when the (now absent) metadata path worked.
+ */
+export function sidebarAgentFor(
+  session: SidebarSession,
+  status: AgentStatus["status"],
+  now: string
+): AgentStatus {
+  const role =
+    metadataString(session.metadata, "nexusRole") ??
+    roleFromAgent(session.agent)
+  return {
+    id: session.id,
+    name: role ? titleCase(role) : session.title || session.id.slice(0, 12),
+    role: role ?? "agent",
+    status,
+    model:
+      metadataString(session.metadata, "nexusModel") ??
+      modelLabel(session.model) ??
+      "",
+    sessionID: session.id,
+    spawnedAt: now,
+    tasksCompleted: 0,
+    tasksFailed: 0
+  }
+}
+
+/**
+ * The nexus subagent sessions to show for the current session, from
+ * `session.family()` alone.
+ *
+ * `family()` resolves to the *root* of the given session and returns that
+ * root's entire tree, so a subagent spawned by this plugin is always in it.
+ *
+ * There is deliberately no "scan every session for a nexus role" fallback. One
+ * used to exist to recover nexus sessions that `family()` missed, back when
+ * spawned sessions came out unparented. That parentage bug is fixed at the
+ * source, and the scan has been dead ever since: it keyed off
+ * `metadata.nexusRole`, which no session carries any more. Re-arming it against
+ * `session.agent` would be worse than dead. Anything `family()` excludes
+ * belongs to a *different* root's tree, so a scan could only ever pull in
+ * another session's agents — and it has no way to tell them apart, because
+ * `nexus-orchestrator` carries a `nexus-`-prefixed agent id while being a
+ * primary agent rather than a subagent. A `startsWith("nexus-")` filter would
+ * therefore sweep every previous orchestrator session into the sidebar, and the
+ * entries would then flicker in and out as the family result oscillated.
+ */
+export function sidebarChildSessionIDs(
+  family: readonly string[] | undefined,
+  currentSessionID: string
+): string[] {
+  if (!Array.isArray(family)) return []
+  return family.filter(id => id !== currentSessionID)
+}
+
+/**
+ * One polling pass: resolve each child session of `currentSessionID` into an
+ * `AgentStatus`. Per-session lookups are individually guarded because a session
+ * can be evicted between listing and reading it, and a missing or unreadable
+ * child must drop out of the sidebar rather than crash the poll.
+ */
+export function collectSidebarAgents(
+  source: SidebarSessionSource,
+  currentSessionID: string,
+  statusOf: (sessionID: string) => AgentStatus["status"],
+  now: string
+): AgentStatus[] {
+  const childIDs = sidebarChildSessionIDs(source.family(currentSessionID), currentSessionID)
+  if (childIDs.length === 0) return []
+
+  const agents: AgentStatus[] = []
+  for (const id of childIDs) {
+    try {
+      const session = source.get(id)
+      if (!session) continue
+      let status: AgentStatus["status"] = "completed"
+      try {
+        status = statusOf(id)
+      } catch {
+        // session.status() is best-effort; fall back to "completed"
+      }
+      agents.push(sidebarAgentFor(session, status, now))
+    } catch {
+      // a single unreadable child must not abort the whole poll
+    }
+  }
+  return agents
+}
+
+/**
+ * Folds one poll's findings into the sidebar's agent list: update agents we
+ * already track, append the new ones, and drop working agents whose session has
+ * left the family. Completed and failed agents are kept as history.
+ */
+export function mergeSidebarAgents(
+  agents: readonly AgentStatus[],
+  polled: readonly AgentStatus[],
+  childIDs: readonly string[]
+): AgentStatus[] {
+  const next = agents.map(agent => ({ ...agent }))
+
+  for (const agent of polled) {
+    const existing = next.find(a => a.sessionID === agent.sessionID)
+    if (existing) {
+      existing.status = agent.status
+      existing.name = agent.name
+      existing.role = agent.role
+      existing.model = agent.model
+    } else {
+      next.push(agent)
+    }
+  }
+
+  return next.filter(
+    a =>
+      (a.sessionID && childIDs.includes(a.sessionID)) ||
+      a.status === "completed" ||
+      a.status === "failed"
+  )
+}
+
 export default Plugin.define({
   id: "nexus.cli",
   setup(context) {
@@ -451,78 +653,33 @@ export default Plugin.define({
         const currentSessionID = currentRoute.sessionID
         if (!currentSessionID) return
 
-        const family = context.data.session.family(currentSessionID)
-        if (!family || !Array.isArray(family)) return
+        const source: SidebarSessionSource = context.data.session
+        const childIDs = sidebarChildSessionIDs(
+          source.family(currentSessionID),
+          currentSessionID
+        )
 
-        const childIDs = family.filter(id => id !== currentSessionID)
-
-        // Also scan all sessions for nexusRole metadata
-        try {
-          const allSessions = context.data.session.list()
-          if (allSessions && Array.isArray(allSessions)) {
-            for (const s of allSessions) {
-              if (!s || !(s as any).id) continue
-              const meta = (s as any).metadata
-              if (meta?.nexusRole && !childIDs.includes((s as any).id) && (s as any).id !== currentSessionID) {
-                childIDs.push((s as any).id)
-              }
-            }
-          }
-        } catch {
-          // session.list() may not be available
-        }
-
+        // No children at all: keep only the finished ones as history.
         if (childIDs.length === 0) {
           setSidebarState((draft) => {
-            draft.agents = draft.agents.filter(a => a.status === 'completed' || a.status === 'failed')
+            draft.agents = mergeSidebarAgents(draft.agents, [], [])
           })
           return
         }
 
-        const newAgents = childIDs.map(id => {
-          try {
-            const session = context.data.session.get(id)
-            if (!session) return null
-            const meta = (session as any).metadata || {}
-            let status: 'working' | 'completed' = 'completed'
-            try {
-              status = context.data.session.status(id) === 'running' ? 'working' : 'completed'
-            } catch {}
-            return {
-              id,
-              name: meta.nexusRole
-                ? `${meta.nexusRole.charAt(0).toUpperCase() + meta.nexusRole.slice(1)}`
-                : (session as any)?.title || id.slice(0, 12),
-              role: meta.nexusRole || 'agent',
-              status,
-              model: meta.nexusModel || '',
-              sessionID: id,
-              spawnedAt: new Date().toISOString(),
-              tasksCompleted: 0,
-              tasksFailed: 0
-            }
-          } catch {
-            return null
-          }
-        }).filter(Boolean) as SidebarState['agents']
+        const newAgents = collectSidebarAgents(
+          source,
+          currentSessionID,
+          id => (context.data.session.status(id) === 'running' ? 'working' : 'completed'),
+          new Date().toISOString()
+        )
 
-        if (newAgents.length > 0) {
-          setSidebarState((draft) => {
-            for (const agent of newAgents) {
-              const existing = draft.agents.find(a => a.sessionID === agent.sessionID)
-              if (existing) {
-                existing.status = agent.status
-                existing.name = agent.name
-                existing.model = agent.model
-              } else {
-                draft.agents.push(agent)
-              }
-            }
-            draft.agents = draft.agents.filter(a =>
-              (a.sessionID && childIDs.includes(a.sessionID)) || a.status === 'completed' || a.status === 'failed'
-            )
-          })
-        }
+        // Every child was unreadable — leave the sidebar as it is.
+        if (newAgents.length === 0) return
+
+        setSidebarState((draft) => {
+          draft.agents = mergeSidebarAgents(draft.agents, newAgents, childIDs)
+        })
       } catch {
         // poll must never crash the sidebar
       }

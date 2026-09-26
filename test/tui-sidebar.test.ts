@@ -1,4 +1,9 @@
 import { describe, it, expect, beforeEach } from "bun:test"
+import {
+  collectSidebarAgents,
+  mergeSidebarAgents,
+  sidebarChildSessionIDs
+} from "../src/tui"
 
 // ── Types matching tui.tsx ──────────────────────────────────────────
 interface AgentStatus {
@@ -264,17 +269,21 @@ describe("Sidebar: edge cases from V2 crash fix", () => {
 })
 
 // ── Sidebar creation/update logic ──────────────────────────────────
-// Tests for the pollChildSessions approach from tui.tsx
+// The scanner itself is exercised against the real implementation in
+// tui-sidebar-sessions.test.ts; these tests cover how its output folds into
+// the sidebar's own state.
 
 interface MockSession {
   id: string
   title?: string
+  agent?: string
+  model?: { providerID: string; id: string }
   metadata?: Record<string, string>
 }
 
 /**
- * Simulates pollChildSessions logic from tui.tsx.
- * Reads from session family, builds agent list, merges into state.
+ * Drives the real tui.tsx scanner over a session store, then folds the result
+ * into the sidebar state the way pollChildSessions does.
  */
 function pollChildSessions(
   state: SidebarState,
@@ -282,54 +291,29 @@ function pollChildSessions(
   family: string[],
   sessions: Map<string, MockSession>
 ): SidebarState {
-  const next = structuredClone(state)
-  const childIDs = family.filter(id => id !== currentSessionID)
-
-  if (childIDs.length === 0) return next
-
-  const newAgents = childIDs.map(id => {
-    const session = sessions.get(id)
-    if (!session) return null
-    const meta = session.metadata || {}
-    return {
-      id,
-      name: meta.nexusRole
-        ? `${meta.nexusRole.charAt(0).toUpperCase() + meta.nexusRole.slice(1)}`
-        : session.title || id.slice(0, 12),
-      role: meta.nexusRole || 'agent',
-      status: 'working' as const,
-      model: meta.nexusModel || '',
-      sessionID: id,
-      spawnedAt: new Date().toISOString(),
-      tasksCompleted: 0,
-      tasksFailed: 0
-    }
-  }).filter(Boolean) as AgentStatus[]
-
-  if (newAgents.length > 0) {
-    for (const agent of newAgents) {
-      const existing = next.agents.find(a => a.sessionID === agent.sessionID)
-      if (existing) {
-        existing.status = agent.status
-        existing.name = agent.name
-        existing.model = agent.model
-      } else {
-        next.agents.push(agent)
-      }
-    }
-    next.agents = next.agents.filter(a =>
-      (a.sessionID && childIDs.includes(a.sessionID)) || a.status === 'completed' || a.status === 'failed'
-    )
+  const source = {
+    family: () => family,
+    get: (id: string) => sessions.get(id)
   }
-
-  return next
+  const childIDs = sidebarChildSessionIDs(family, currentSessionID)
+  if (childIDs.length === 0) {
+    return { ...state, agents: mergeSidebarAgents(state.agents, [], []) }
+  }
+  const polled = collectSidebarAgents(
+    source,
+    currentSessionID,
+    id => 'working',
+    new Date().toISOString()
+  )
+  if (polled.length === 0) return state
+  return { ...state, agents: mergeSidebarAgents(state.agents, polled, childIDs) }
 }
 
 describe("Sidebar: pollChildSessions — creation", () => {
-  it("creates agent from session metadata", () => {
+  it("creates agent from the session's agent and model", () => {
     const state = createInitialState()
     const sessions = new Map<string, MockSession>([
-      ["ses-child-1", { id: "ses-child-1", title: "🔍 Reviewer", metadata: { nexusRole: "reviewer", nexusModel: "opencode-go/mimo-v2.5" } }]
+      ["ses-child-1", { id: "ses-child-1", title: "🔍 Reviewer", agent: "nexus-reviewer", model: { providerID: "opencode-go", id: "mimo-v2.5" } }]
     ])
     const family = ["ses-parent", "ses-child-1"]
 
@@ -343,12 +327,24 @@ describe("Sidebar: pollChildSessions — creation", () => {
     expect(next.agents[0].status).toBe("working")
   })
 
+  it("prefers session metadata when a future release writes it again", () => {
+    const state = createInitialState()
+    const sessions = new Map<string, MockSession>([
+      ["ses-child-1", { id: "ses-child-1", agent: "nexus-coder", model: { providerID: "opencode-go", id: "mimo-v2.5" }, metadata: { nexusRole: "reviewer", nexusModel: "opencode-go/mimo-v2.6" } }]
+    ])
+
+    const next = pollChildSessions(state, "ses-parent", ["ses-parent", "ses-child-1"], sessions)
+
+    expect(next.agents[0].role).toBe("reviewer")
+    expect(next.agents[0].model).toBe("opencode-go/mimo-v2.6")
+  })
+
   it("creates multiple agents from multiple sessions", () => {
     const state = createInitialState()
     const sessions = new Map<string, MockSession>([
-      ["ses-1", { id: "ses-1", metadata: { nexusRole: "reviewer", nexusModel: "mimo-v2.5" } }],
-      ["ses-2", { id: "ses-2", metadata: { nexusRole: "explorer", nexusModel: "big-pickle" } }],
-      ["ses-3", { id: "ses-3", metadata: { nexusRole: "coder", nexusModel: "mimo-v2.6-flash-free" } }],
+      ["ses-1", { id: "ses-1", agent: "nexus-reviewer", model: { providerID: "p", id: "mimo-v2.5" } }],
+      ["ses-2", { id: "ses-2", agent: "nexus-explorer", model: { providerID: "p", id: "big-pickle" } }],
+      ["ses-3", { id: "ses-3", agent: "nexus-coder", model: { providerID: "p", id: "mimo-v2.6-flash-free" } }],
     ])
     const family = ["ses-parent", "ses-1", "ses-2", "ses-3"]
 
@@ -356,10 +352,14 @@ describe("Sidebar: pollChildSessions — creation", () => {
 
     expect(next.agents).toHaveLength(3)
     expect(next.agents.map(a => a.name)).toEqual(["Reviewer", "Explorer", "Coder"])
-    expect(next.agents.map(a => a.model)).toEqual(["mimo-v2.5", "big-pickle", "mimo-v2.6-flash-free"])
+    expect(next.agents.map(a => a.model)).toEqual([
+      "p/mimo-v2.5",
+      "p/big-pickle",
+      "p/mimo-v2.6-flash-free"
+    ])
   })
 
-  it("uses session title as fallback when no nexusRole metadata", () => {
+  it("uses session title as fallback when the session has no agent", () => {
     const state = createInitialState()
     const sessions = new Map<string, MockSession>([
       ["ses-1", { id: "ses-1", title: "Custom Agent Name" }]
@@ -375,7 +375,7 @@ describe("Sidebar: pollChildSessions — creation", () => {
   it("does not create agent for parent session itself", () => {
     const state = createInitialState()
     const sessions = new Map<string, MockSession>([
-      ["ses-parent", { id: "ses-parent", metadata: { nexusRole: "orchestrator" } }]
+      ["ses-parent", { id: "ses-parent", agent: "nexus-orchestrator" }]
     ])
     const family = ["ses-parent"]
 
@@ -397,7 +397,7 @@ describe("Sidebar: pollChildSessions — update", () => {
     }))
 
     const sessions = new Map<string, MockSession>([
-      ["ses-1", { id: "ses-1", metadata: { nexusRole: "reviewer", nexusModel: "mimo-v2.5" } }]
+      ["ses-1", { id: "ses-1", agent: "nexus-reviewer", model: { providerID: "p", id: "mimo-v2.5" } }]
     ])
     const family = ["ses-parent", "ses-1"]
 
@@ -424,7 +424,7 @@ describe("Sidebar: pollChildSessions — update", () => {
     }))
 
     const sessions = new Map<string, MockSession>([
-      ["ses-active", { id: "ses-active", metadata: { nexusRole: "reviewer" } }]
+      ["ses-active", { id: "ses-active", agent: "nexus-reviewer" }]
     ])
     // ses-old is no longer in family
     const family = ["ses-parent", "ses-active"]
@@ -488,7 +488,7 @@ describe("Sidebar: pollChildSessions — edge cases", () => {
     expect(next.agents).toHaveLength(0)
   })
 
-  it("handles session with empty metadata", () => {
+  it("handles a session with neither agent, model nor title", () => {
     const state = createInitialState()
     const sessions = new Map<string, MockSession>([
       ["ses-1", { id: "ses-1", metadata: {} }]
