@@ -41,6 +41,26 @@ export interface NexusDashboardConfig {
   host: string
 }
 
+/**
+ * Whether OS notifications may be sent at all.
+ *
+ * FILE-SETTABLE for the same reason `dashboard` is, and because it fixes the
+ * same defect: the orchestrator used to hardcode `new NotificationManager(true)`,
+ * so this block would have been a knob that read as a control and was inert.
+ * There is only one field today, but the block is shaped to grow, and it is
+ * merged field by field for that reason rather than by spread.
+ */
+export interface NexusNotificationsConfig {
+  /**
+   * Whether notifications are sent.
+   *
+   * Honoured at the single gate every notification flows through
+   * (`NexusOrchestrator.sendNotification()`), so one switch covers the task
+   * complete/failed sites and the budget sites alike.
+   */
+  enabled: boolean
+}
+
 export interface NexusFullConfig {
   models: NexusModelConfig
   budget: {
@@ -55,6 +75,7 @@ export interface NexusFullConfig {
     contextTransfer: boolean
   }
   dashboard: NexusDashboardConfig
+  notifications: NexusNotificationsConfig
 }
 
 /**
@@ -290,6 +311,12 @@ const DEFAULT_CONFIG: NexusFullConfig = {
     enabled: true,
     port: 4747,
     host: "127.0.0.1"
+  },
+  // Kept aligned with the orchestrator's own `NexusConfig.notifications`
+  // default so the two agree when neither a config file nor a constructor
+  // says otherwise.
+  notifications: {
+    enabled: true
   }
 }
 
@@ -319,12 +346,22 @@ export class NexusConfigManager {
    * how `enabled` ended up readable from neither.
    */
   private dashboardBase: NexusDashboardConfig
+  /**
+   * Programmatic starting point for the `notifications` block, beneath the
+   * file levels and above `DEFAULT_CONFIG`. Same single-consumer rationale as
+   * `dashboardBase`.
+   */
+  private notificationsBase: NexusNotificationsConfig
 
-  constructor(dashboardBase?: Partial<NexusDashboardConfig>) {
+  constructor(
+    dashboardBase?: Partial<NexusDashboardConfig>,
+    notificationsBase?: Partial<NexusNotificationsConfig>
+  ) {
     // Config files are loaded later via loadFromPath(basePath)
     this.projectConfig = null
     this.globalConfig = null
     this.dashboardBase = { ...DEFAULT_CONFIG.dashboard, ...dashboardBase }
+    this.notificationsBase = { ...DEFAULT_CONFIG.notifications, ...notificationsBase }
   }
 
   /**
@@ -449,6 +486,12 @@ export class NexusConfigManager {
           ?? this.globalConfig?.dashboard?.port ?? this.dashboardBase.port,
         host: this.storageConfig?.dashboard?.host ?? this.projectConfig?.dashboard?.host
           ?? this.globalConfig?.dashboard?.host ?? this.dashboardBase.host
+      },
+      // Field by field, for the same reason as `dashboard` above: a level
+      // that sets only `enabled` must not blank out its siblings.
+      notifications: {
+        enabled: this.storageConfig?.notifications?.enabled ?? this.projectConfig?.notifications?.enabled
+          ?? this.globalConfig?.notifications?.enabled ?? this.notificationsBase.enabled
       }
     }
   }
@@ -645,6 +688,10 @@ export class NexusConfigManager {
     // a block deleted from the user's `nexus.jsonc` the first time they change
     // a model in the TUI. `enabled: false` would silently turn back on.
     result.dashboard = { ...current.dashboard }
+
+    // Notifications — same reason, and with `enabled: false` this is the
+    // setting a user is most likely to have deliberately turned off.
+    result.notifications = { ...current.notifications }
 
     return result
   }

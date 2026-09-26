@@ -408,6 +408,14 @@ export interface NexusConfig {
     port: number
     host: string
   }
+  notifications: {
+    /**
+     * Whether OS notifications are sent. Reaches
+     * `NotificationManager.setEnabled()` through the single gate in
+     * `NexusOrchestrator.sendNotification()`.
+     */
+    enabled: boolean
+  }
   security: {
     sastEnabled: boolean
     secretsScanning: boolean
