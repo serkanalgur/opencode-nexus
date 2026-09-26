@@ -1,6 +1,14 @@
 import type { CostProvenance } from "./types"
 
 export interface PerformanceEntry {
+  /**
+   * Stable identity for the entry, so a later cost correction can find and
+   * ADJUST it rather than append a second one. `ExecutionRecord` has had an id
+   * for the same reason; this class did not, and appending a correction here
+   * would double `totalTasks` (halving every mean and putting a phantom task
+   * into the success-rate denominator) and overstate `measuredTasks`.
+   */
+  readonly id: string
   model: string
   role: string
   success: boolean
@@ -61,11 +69,59 @@ export class PerformanceTracker {
     this.maxEntries = maxEntries
   }
 
-  record(entry: Omit<PerformanceEntry, 'timestamp'>): void {
-    this.entries.push({ ...entry, timestamp: new Date() })
+  /**
+   * Record one observation. Returns its `id`, which is what `adjust` needs.
+   *
+   * CHANGELOG NOTE: this used to return `void`. Widening a return type is
+   * source-compatible for every existing caller, so nothing that compiled
+   * before stops compiling.
+   */
+  record(entry: Omit<PerformanceEntry, 'id' | 'timestamp'>): string {
+    const id = `perf-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`
+    this.entries.push({ ...entry, id, timestamp: new Date() })
     if (this.entries.length > this.maxEntries) {
       this.entries = this.entries.slice(-this.maxEntries)
     }
+    return id
+  }
+
+  /**
+   * Add to an already-recorded entry's COST, in place. THE ARGUMENT IS AN
+   * INCREMENT, not a replacement — the same rule and the same reason as
+   * `ExecutionHistory.adjust`: an entry's cost is what its task cost, and a
+   * late correction makes that the old figure plus the increment.
+   *
+   * See `ExecutionHistory.adjust` for why adjustment rather than a second
+   * entry, and for why only the cost fields are touched: `success`, `duration`
+   * and `timestamp` describe what the task did, and a late cost correction is
+   * accounting rather than progress.
+   *
+   * `costProvenance` is left as the ORIGINAL charge's, so the measured/estimated
+   * split in `getScores` still describes what was measured — and because the
+   * correction is applied through the orchestrator's `trackCost` as its own
+   * `measured` entry, `totalSpent` accounts for the whole amount either way.
+   *
+   * CHANGELOG NOTE, and it is a real one: `PerformanceEntry` values are now
+   * MUTABLE where they were previously write-once. `getScores` does not expose
+   * entries, so there is no live-object exposure through this class's own API,
+   * but it is a change to the mutability contract of an exported type in the
+   * package's public surface and is called out rather than slipped in.
+   *
+   * A SIDE EFFECT WORTH NAMING, because it is correct and surprising: this
+   * moves `overallScore`, and so can change the answer `getBestModel` returns
+   * minutes after it was consulted. The model really did cost that money, so
+   * the new ranking is the accurate one — but anything caching a ranking needs
+   * to know it can move.
+   *
+   * Returns `false` for an unknown id: `entries` trims to `maxEntries` (1000
+   * by default), so eviction is real and a caller must be able to tell
+   * "corrected" from "not there".
+   */
+  adjust(id: string, { cost }: { cost?: number }): boolean {
+    const entry = this.entries.find(e => e.id === id)
+    if (!entry) return false
+    if (cost !== undefined) entry.cost += cost
+    return true
   }
 
   /**

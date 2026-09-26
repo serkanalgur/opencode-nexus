@@ -181,6 +181,35 @@ export interface CostTimeline {
   agent?: string
 }
 
+/**
+ * Sessions whose cost stopped being collected while they were still running.
+ *
+ * A timed-out task is not aborted, so its session keeps spending after the
+ * orchestrator has given up on it. Some of that spend is recovered — the
+ * remainder is billed when the session goes idle — but a session that never
+ * settles in the grace window is abandoned, and the part of its cost that was
+ * never read is reported HERE rather than silently dropped. Dropping it would
+ * be the original bug at a smaller scale.
+ *
+ * The headline number is `upperBound`, and it is a BOUND AND NOT A CHARGE. It
+ * is deliberately NOT added to `totalSpent`: adding an estimate to a measured
+ * total is the conflation `CostProvenance` exists to prevent, and a total that
+ * contains a guess can no longer be compared against a budget honestly. Named
+ * as a bound, it lets a reader say "we are under-counting by at most $X"
+ * instead of "we do not know", which is the difference between a warning and a
+ * silent error.
+ */
+export interface CostReportUncollected {
+  /** How many sessions are still uncollected. */
+  sessions: number
+  /** Sum of each session's last successfully read token count. */
+  lastKnownTokens: number
+  /** Bound on the uncollected remainder, in USD. Not part of `totalSpent`. */
+  upperBound: number
+  /** The DAG node ids whose sessions were abandoned. */
+  taskIds: string[]
+}
+
 export interface AgentMessage {
   id: string
   from: string
@@ -250,6 +279,22 @@ export interface SpendSplit {
 export interface ExecutionResult {
   success: boolean
   tasks: TaskResult[]
+  /**
+   * A LOWER BOUND, and deliberately not a live object and not a promise.
+   *
+   * It is `totalSpent` at the instant `execute` returned. A task that timed out
+   * has already been charged at the instant of its timeout, but its session is
+   * NOT aborted: it keeps generating and keeps spending after the run returns,
+   * and the remainder is billed later, when the session finally goes idle
+   * (`cost:delta`) or is reported as an uncollected bound
+   * (`CostReport.uncollected`).
+   *
+   * A caller that needs the final figure must read `getCostReport()` after
+   * settlement has had a chance to happen, or subscribe to `cost:delta`. A
+   * figure that included a not-yet-observed increment would be a prediction
+   * wearing a measured number's clothes, which is the one thing
+   * `CostProvenance` exists to prevent.
+   */
   totalCost: number
   /**
    * Split of `totalCost`. Required rather than optional: `totalCost` is the
@@ -332,5 +377,20 @@ export interface NexusConfig {
     enabled: boolean
     patternStorage: 'sqlite' | 'memory'
     minConfidence: number
+  }
+  cost: {
+    /**
+     * How long after a task's timeout the orchestrator keeps waiting for that
+     * task's session to go idle before abandoning collection of its remaining
+     * cost.
+     *
+     * The default is roughly HALF the task's own budget, clamped to
+     * [30s, 180s]: by the time the clock runs out the session is already one
+     * model call past a limit that was generous, and a session that still has
+     * not settled within half of its own budget again is pathological rather
+     * than slow. Override it in tests, or to tighten reporting on a run where
+     * a figure is wanted promptly.
+     */
+    timeoutDeltaGraceMs: number
   }
 }
