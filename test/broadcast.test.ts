@@ -198,7 +198,8 @@ describe('StateBroadcaster', () => {
       ws.messages = []
 
       // Set up a tight budget
-      orchestrator.trackCost('agent-1', 'claude-sonnet', 8.50, 2000) // 85% of 10.00
+      // 85% of 10.00
+      orchestrator.trackCost('agent-1', 'claude-sonnet', 8.50, 2000, { usage: 'measured', pricing: 'model-costs' })
 
       const alertMessages = ws.messages.filter(m => {
         const parsed = JSON.parse(m)

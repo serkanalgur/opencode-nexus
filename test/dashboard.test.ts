@@ -197,7 +197,7 @@ describe('Dashboard integration with Orchestrator', () => {
     orchestrator.startDashboard(14757, '127.0.0.1')
 
     // Trigger budget alert
-    orchestrator.trackCost('agent-1', 'test-model', 8.50, 1000)
+    orchestrator.trackCost('agent-1', 'test-model', 8.50, 1000, { usage: 'measured', pricing: 'model-costs' })
 
     await new Promise(resolve => setTimeout(resolve, 50))
     expect(orchestrator.dashboard!.isRunning()).toBe(true)

@@ -77,6 +77,10 @@ describe('assistant text extraction from ctx.session.context()', () => {
       task: {
         name: 't', description: 'd', requiredRole: 'coder', timeout: 1000,
         files: { include: [], exclude: [] },
+        // Required by `Task`, and now actually read: when this ctx has no
+        // `session.get` the cost falls back to the forecaster's token estimate,
+        // which scales off the complexity score.
+        complexity: { overall: 50, factors: { fileCount: 0, codeLines: 0, dependencyDepth: 0, domainKnowledge: 0, riskLevel: 'low' } },
       },
     }
     const agent = await orchestrator.spawnAgent(
