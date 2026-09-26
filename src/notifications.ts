@@ -191,9 +191,60 @@ export function buildInvocation(
 
 export type SpawnFn = typeof spawn
 
+/**
+ * The handle a {@link TimerFunctions} implementation hands back. Opaque here on
+ * purpose: the notifier only ever passes it back to `clearTimeout`, and nothing
+ * outside a test ever sees it.
+ */
+export type TimerHandle = ReturnType<typeof setTimeout>
+
+/**
+ * The timer surface `runProcess` uses, injectable for the same reason
+ * `spawnImpl` is.
+ *
+ * This exists because the alternative was a test that patched the GLOBAL
+ * `setTimeout`/`clearTimeout` and counted every timer in the process. That
+ * count is not a fact about the notification code — it is every timer anything
+ * else in the process scheduled while the assertion's window was open — so the
+ * assertion was a measurement of the environment that happened to be attributed
+ * to this module. It passed on darwin and failed on `ubuntu-latest` with
+ * nothing about the notifier having changed.
+ *
+ * Injecting the functions instead means a test observes exactly the timers the
+ * notifier created, and is therefore immune to whatever else the host runtime
+ * is doing while the test runs.
+ */
+export interface TimerFunctions {
+  setTimeout: (handler: () => void, ms: number) => TimerHandle
+  clearTimeout: (handle: TimerHandle) => void
+}
+
+/**
+ * The real timers, bound at module load.
+ *
+ * Captured here rather than read off `globalThis` at call time so the default
+ * path cannot be redirected by anything that swaps the globals later — which is
+ * precisely the thing that made the old assertion environment-dependent.
+ */
+const boundSetTimeout = globalThis.setTimeout
+const boundClearTimeout = globalThis.clearTimeout
+
+export const SYSTEM_TIMERS: TimerFunctions = {
+  setTimeout: (handler, ms) => boundSetTimeout(handler, ms),
+  clearTimeout: handle => boundClearTimeout(handle)
+}
+
 export interface NotificationManagerOptions {
   /** Test seam. Defaults to `node:child_process.spawn`. */
   spawnImpl?: SpawnFn
+  /**
+   * Test seam for the timeout's timer functions. Defaults to the real ones.
+   *
+   * Same rationale as `spawnImpl`: the notifier's own handle is only
+   * observable if the functions that create and clear it are handed in rather
+   * than reached for globally. See {@link TimerFunctions}.
+   */
+  timers?: TimerFunctions
   /**
    * Test seam for `NOTIFY_TIMEOUT_MS`. Defaults to the production 3 s.
    *
@@ -221,7 +272,8 @@ interface ProcessOutcome {
 function runProcess(
   proc: ChildProcess,
   label: string,
-  timeoutMs: number = NOTIFY_TIMEOUT_MS
+  timeoutMs: number = NOTIFY_TIMEOUT_MS,
+  timers: TimerFunctions = SYSTEM_TIMERS
 ): Promise<ProcessOutcome> {
   return new Promise<ProcessOutcome>((resolve) => {
     let settled = false
@@ -232,11 +284,11 @@ function runProcess(
       settled = true
       // Unconditionally cleared, even when the outcome is `close`, so no
       // handle outlives the process it was watching.
-      clearTimeout(timer)
+      timers.clearTimeout(timer)
       resolve(outcome)
     }
 
-    const timer = setTimeout(() => {
+    const timer = timers.setTimeout(() => {
       // Only kill if the process is still running; `close` already settled
       // and cleared us otherwise, but a manual `kill()` here on an
       // already-exited process would emit `error` under some platforms.
@@ -293,6 +345,7 @@ export class NotificationManager {
   private platform: string
   private readonly spawnImpl: SpawnFn
   private readonly timeoutMs: number
+  private readonly timers: TimerFunctions
   private sent = 0
   private failed = 0
   private suppressed = 0
@@ -304,6 +357,7 @@ export class NotificationManager {
     this.platform = process.platform
     this.spawnImpl = options.spawnImpl ?? spawn
     this.timeoutMs = options.timeoutMs ?? NOTIFY_TIMEOUT_MS
+    this.timers = options.timers ?? SYSTEM_TIMERS
   }
 
   /**
@@ -418,7 +472,7 @@ export class NotificationManager {
       }
     }
 
-    return runProcess(proc, invocation.command, this.timeoutMs)
+    return runProcess(proc, invocation.command, this.timeoutMs, this.timers)
   }
 
   /**

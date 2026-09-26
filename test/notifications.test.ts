@@ -11,7 +11,9 @@ import {
   WINDOWS_NOTIFY_ENV,
   WINDOWS_SCRIPT,
   type NotificationInvocation,
-  type NotificationOptions
+  type NotificationOptions,
+  type TimerFunctions,
+  type TimerHandle
 } from "../src/notifications"
 
 /**
@@ -595,24 +597,61 @@ describe("notifications.test() reports the real result", () => {
 describe("no handle outlives the notifier", () => {
   const realSetTimeout = globalThis.setTimeout
   const realClearTimeout = globalThis.clearTimeout
-  let outstanding = 0
 
-  beforeEach(() => {
-    outstanding = 0
-    globalThis.setTimeout = ((handler: () => void, ms?: number, ...rest: unknown[]) => {
-      outstanding += 1
-      return realSetTimeout(handler, ms, ...rest)
-    }) as unknown as typeof globalThis.setTimeout
-    globalThis.clearTimeout = ((handle: unknown) => {
-      outstanding -= 1
-      return realClearTimeout(handle as never)
-    }) as unknown as typeof globalThis.clearTimeout
-  })
-
-  afterEach(() => {
-    globalThis.setTimeout = realSetTimeout
-    globalThis.clearTimeout = realClearTimeout
-  })
+  /**
+   * Every timer the NOTIFIER created, keyed by handle, plus the calls it made
+   * to clear one.
+   *
+   * This replaced a shim that replaced the global `setTimeout`/`clearTimeout`
+   * and kept a running `created - cleared` count. That count was not the
+   * notifier's handle; it was every timer in the process during the assertion's
+   * window, and it was reported as a fact about the notification code. Nothing
+   * else scheduled a timer in that window on darwin, so it passed; on
+   * `ubuntu-latest` something did, `outstanding` read 2, and the suite failed
+   * on a claim about the notifier that had never been violated. The numbers
+   * below are collected from the functions handed INTO the notifier, so they
+   * can only ever be the notifier's own.
+   *
+   * Three counts rather than one, because a single net count cannot tell the
+   * three interesting states apart:
+   *
+   * - `outstanding` — created and not yet cleared, by IDENTITY. This is the
+   *   claim: one armed while hanging, none afterwards.
+   * - `cleared` — how many times `clearTimeout` was called, repeats included.
+   *   Needed because clearing the same handle twice leaves `outstanding` at
+   *   zero and would therefore hide a second `finish()`.
+   * - `clearedUnknown` — clears of a handle this notifier never created, which
+   *   is what a double clear looks like from here.
+   */
+  function spyTimers(): {
+    timers: TimerFunctions
+    readonly outstanding: Set<TimerHandle>
+    created: number
+    cleared: number
+    clearedUnknown: number
+  } {
+    const outstanding = new Set<TimerHandle>()
+    const spy = {
+      timers: {
+        setTimeout: (handler: () => void, ms: number): TimerHandle => {
+          const handle = realSetTimeout(handler, ms)
+          outstanding.add(handle)
+          spy.created += 1
+          return handle
+        },
+        clearTimeout: (handle: TimerHandle): void => {
+          spy.cleared += 1
+          if (!outstanding.delete(handle)) spy.clearedUnknown += 1
+          realClearTimeout(handle)
+        }
+      },
+      outstanding,
+      created: 0,
+      cleared: 0,
+      clearedUnknown: 0
+    }
+    return spy
+  }
 
   function fakeSpawn(emit: (proc: EventEmitter) => void) {
     return () => {
@@ -634,20 +673,31 @@ describe("no handle outlives the notifier", () => {
   it("leaves no pending timer when the notifier closes quickly", async () => {
     // osascript normally returns in well under 3s, so the old code armed a
     // 3s timer for EVERY notification and never cleared it.
-    const manager = new NotificationManager(true, { spawnImpl: fakeSpawn(p => p.emit("close", 0)) })
+    const spy = spyTimers()
+    const manager = new NotificationManager(true, {
+      spawnImpl: fakeSpawn(p => p.emit("close", 0)),
+      timers: spy.timers
+    })
     expect(await manager.notify({ title: "T", body: "B" })).toBe(true)
-    expect(outstanding).toBe(0)
+    // Armed one, and cleared that one: nothing is left pending.
+    expect(spy.created).toBe(1)
+    expect(spy.cleared).toBe(1)
+    expect(spy.outstanding.size).toBe(0)
   })
 
   it("leaves no pending timer when the notifier fails to start", async () => {
+    const spy = spyTimers()
     const manager = new NotificationManager(true, {
-      spawnImpl: fakeSpawn(p => p.emit("error", new Error("ENOENT")))
+      spawnImpl: fakeSpawn(p => p.emit("error", new Error("ENOENT"))),
+      timers: spy.timers
     })
     const previous = console.error
     console.error = mock(() => {})
     try {
       expect(await manager.notify({ title: "T", body: "B" })).toBe(false)
-      expect(outstanding).toBe(0)
+      expect(spy.created).toBe(1)
+      expect(spy.cleared).toBe(1)
+      expect(spy.outstanding.size).toBe(0)
     } finally {
       console.error = previous
     }
@@ -664,9 +714,10 @@ describe("no handle outlives the notifier", () => {
     // `error`, which is a real ordering (a notifier killed by our own timeout
     // can emit both). Without the guard the second signal runs a second
     // `finish()`: it calls `clearTimeout` a second time on an already-cleared
-    // handle, which is exactly what the `outstanding` counter measures. The
-    // counters below are therefore the assertion.
+    // handle. `cleared` and `clearedUnknown` are what catch that, which is why
+    // they are tracked separately from `outstanding` — see `spyTimers`.
     let killCalls = 0
+    const spy = spyTimers()
     const manager = new NotificationManager(true, {
       spawnImpl: () => {
         const proc = new EventEmitter() as EventEmitter & {
@@ -684,14 +735,17 @@ describe("no handle outlives the notifier", () => {
           proc.emit("error", new Error("late EPIPE after close"))
         })
         return proc as never
-      }
+      },
+      timers: spy.timers
     })
 
     expect(await manager.notify({ title: "T", body: "B" })).toBe(true)
 
-    // One `finish` means one resolve and ONE `clearTimeout`. Two finishes leave
-    // this at -1, because the shim above decrements unconditionally.
-    expect(outstanding).toBe(0)
+    // One `finish` means one resolve and ONE `clearTimeout`.
+    expect(spy.created).toBe(1)
+    expect(spy.cleared).toBe(1)
+    expect(spy.clearedUnknown).toBe(0)
+    expect(spy.outstanding.size).toBe(0)
     // ...and the outcome was neither overwritten nor counted twice.
     expect(manager.getStats().sent).toBe(1)
     expect(manager.getStats().failed).toBe(0)
@@ -708,32 +762,90 @@ describe("no handle outlives the notifier", () => {
     // armed — a statement about the FIRST 250 ms, not about the timeout.
     // `timeoutMs` is the seam that makes the real thing testable without a
     // 3-second wait, so it now asserts the resolution it names.
+    const spy = spyTimers()
     const manager = new NotificationManager(true, {
       spawnImpl: fakeSpawn(() => {}),
-      timeoutMs: 60
+      timeoutMs: 60,
+      timers: spy.timers
     })
     const previous = console.error
     console.error = mock(() => {})
     try {
       const pending = manager.notify({ title: "T", body: "B" })
 
-      // Before the timeout: still pending, with the timer armed.
+      // Before the timeout: still pending, with EXACTLY ONE of the notifier's
+      // own timers armed. `outstanding.size` is the notifier's armed handles
+      // and nothing else's, so this is 1 on any platform, in any company.
       const settled = await Promise.race([
         pending,
         new Promise<boolean>(resolve => realSetTimeout(() => resolve(true), 10))
       ])
       expect(settled).toBe(true)
-      expect(outstanding).toBe(1)
+      expect(spy.created).toBe(1)
+      expect(spy.outstanding.size).toBe(1)
 
       // On the timeout: resolves FALSE, says so, and leaves no timer behind.
       expect(await pending).toBe(false)
-      expect(outstanding).toBe(0)
+      expect(spy.cleared).toBe(1)
+      expect(spy.clearedUnknown).toBe(0)
+      expect(spy.outstanding.size).toBe(0)
       const stats = manager.getStats()
       expect(stats.sent).toBe(0)
       expect(stats.failed).toBe(1)
       expect(stats.lastError).toContain("timed out after 60ms")
     } finally {
       console.error = previous
+    }
+  })
+
+  it("makes the same claim with an unrelated timer ticking throughout", async () => {
+    // The control for the failure this block used to have. CI ran the version
+    // above on a host where something else in the process scheduled a timer
+    // during the window, and the global-shim assertion reported that ambient
+    // count as the notifier's. Spoofing `process.platform` could not reproduce
+    // it — the platform changes which notifier is built, not what else is
+    // running — so the control has to add the thing that actually differs: a
+    // live recurring timer, running for the whole assertion.
+    //
+    // Both shapes, deliberately. A bare `setInterval` does not route through
+    // the global `setTimeout` in Bun, so on its own it cannot trip the old
+    // assertion; the self-rescheduling `setTimeout` chain is what a recurring
+    // scheduler is actually made of, and it is the one with teeth. Running the
+    // stray from a real `setInterval` tick keeps it honest about being
+    // concurrent with the test rather than merely started before it.
+    const stray = setInterval(() => {
+      realSetTimeout(() => {}, 0)
+    }, 1)
+    // The shape with teeth: a recurring scheduler re-arming itself through
+    // `setTimeout`, which is what the old global shim counted.
+    const selfArming = (): void => {
+      realSetTimeout(selfArming, 1)
+    }
+    selfArming()
+
+    const spy = spyTimers()
+    const manager = new NotificationManager(true, {
+      spawnImpl: fakeSpawn(() => {}),
+      timeoutMs: 60,
+      timers: spy.timers
+    })
+    const previous = console.error
+    console.error = mock(() => {})
+    try {
+      const pending = manager.notify({ title: "T", body: "B" })
+      const settled = await Promise.race([
+        pending,
+        new Promise<boolean>(resolve => realSetTimeout(() => resolve(true), 10))
+      ])
+      expect(settled).toBe(true)
+      // The whole point: still 1, with a stray timer having armed many more.
+      expect(spy.outstanding.size).toBe(1)
+      expect(await pending).toBe(false)
+      expect(spy.cleared).toBe(1)
+      expect(spy.outstanding.size).toBe(0)
+    } finally {
+      console.error = previous
+      clearInterval(stray)
     }
   })
 
