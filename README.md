@@ -30,17 +30,17 @@ OpenCode Nexus is an agent orchestration plugin for [OpenCode V2](https://openco
 | **DAG Execution** | Tasks are parallelized based on dependency graphs with priority queuing |
 | **Cost-Aware Routing** | Scores models by quality/cost/speed, selects optimal per task complexity |
 | **Self-Healing** | Retries with exponential backoff, context transfer, escalation policies |
-| **Web Dashboard** | Real-time monitoring via HTTP + WebSocket server on port 4747 |
+| **Web Dashboard** | A live view of sessions, agents, tasks, costs and config, served over HTTP + WebSocket (default port 4747) — started on request, never automatically |
 | **TUI Dashboard** | Monitor agents, budget, and config from the terminal |
 | **Team Mode** | Lead agent orchestrates specialist agents in parallel |
 | **Todo & Goal Tracking** | Enforce task completion, persist objectives across sessions |
 | **Persistent Memory** | SQLite-backed memory store with TTL and search |
 | **Learning Module** | Pattern recognition from failures, confidence scoring |
 | **JSONC Config** | Read/write project and global config files with comments |
-| **LSP Integration** | Auto-enabled for TypeScript, Python, Go, and 30+ languages |
+| **OpenCode LSP opt-in** | On startup, inserts `"lsp": true` into your global `opencode.jsonc` if it isn't already there. That is the whole of it — Nexus does not read LSP state, manage servers, or report anything about them |
 | **AST-Grep** | Pattern-aware code search and rewriting |
 | **Security Scanning** | Automated secrets and vulnerability detection |
-| **Slash Commands** | `/nexus`, `/nexus web`, `/nexus review`, and more |
+| **Slash Commands** | `/nexus`, `/nexus-web`, `/nexus-config`, `/nexus-model`, `/nexus-status`, `/nexus-dashboard`, `/nexus-reset` |
 
 ---
 
@@ -105,11 +105,11 @@ Use nexus.goal.set with description="Build complete auth system"
 ### 3. Use Slash Commands
 
 ```
-/nexus              # Open full configuration
-/nexus web          # Start web dashboard (open http://localhost:4747)
-/nexus review       # Quick code review
-/nexus fix          # Quick fix for last error
-/nexus explain      # Explain last change
+/nexus              # Open full configuration dialog
+/nexus web          # Open the web dashboard, if one is running
+/nexus status       # Show the config summary
+/nexus model coder  # Pick the model for a role
+/nexus reset        # Reset configuration to defaults
 ```
 
 ---
@@ -146,35 +146,80 @@ Failed tasks follow a 4-step escalation chain:
 
 ### Web Dashboard
 
-Real-time monitoring via embedded HTTP + WebSocket server on port 4747.
+A live view of the orchestrator, served by an HTTP + WebSocket server on port 4747 (`127.0.0.1`).
 
-**How to start:**
+**Nothing is listening until you ask for it.** The server is not started at
+startup, and no command starts it implicitly. There is exactly one call that
+does, and it has to come from the agent, because the server runs in the OpenCode
+server process next to the orchestrator that feeds it:
 
-1. Ask the agent to start the dashboard:
-   ```
-   Use nexus.dashboard.start with port=4747
-   ```
+```
+Ask the agent: "start the nexus dashboard"
+```
 
-2. Or use the TUI command:
-   ```
-   /nexus web
-   ```
-   This shows instructions and tries to open your browser.
+which calls `nexus.dashboard.start(port=4747, host="127.0.0.1")` and prints the
+URL. **If the start fails, nothing is listening and no browser is opened** — the
+tool says so and names the reason. The two ways it fails are a port already in
+use (the bind is refused; pass a different `port`) and `dashboard.enabled: false`
+in `nexus.jsonc`, which the tool reports by name.
 
-3. Open in browser: `http://localhost:4747`
+Once it is running, the TUI command opens it for you:
+
+```
+/nexus web [port] [host]
+```
+
+`/nexus web` **cannot start the server** and does not pretend to. It asks
+`http://host:port/api/health` whether a nexus dashboard is already serving there,
+and then does one of three things:
+
+| What it found | What it does |
+|---|---|
+| A nexus dashboard | Opens your browser at that URL |
+| A different process on that port | Says so, opens nothing, suggests another port |
+| Nothing there | Says so, opens nothing, and gives you the one `nexus.dashboard.start` call to make |
+
+**How it stays current.** A WebSocket to `/ws/events` carries a throttled
+`orchestrator:state` push — every state change schedules a full snapshot, at
+most once a second — plus the thirteen orchestrator events as they happen. On
+top of that, an **Auto-refresh** checkbox (on by default) has the page ask the
+server for a fresh state every 5 seconds and poll `/api/health` and `/api/costs`,
+the two things the socket does not carry. The push is what keeps the page fresh;
+the interval is a belt-and-braces refresh you can switch off. The page also
+shows how old the last snapshot is, and labels it stale past 15 seconds.
 
 **What it shows:**
-- Agent grid with role, status, model, and metrics
-- Cost tracker with budget gauge
-- DAG visualization with task dependencies
-- Activity log with all events
-- Config panel (read-only)
-- Auto-refresh every 5 seconds
+- **Sessions** — one row per session nexus owns, is still collecting cost from,
+  or has abandoned, with each one's state (`running` / `idle` / `abandoned` /
+  `settled`), last read token count, and unbilled spend. Rows with **no owning
+  agent** are called out in a banner above the table, because a session that is
+  still generating after its agent was terminated keeps spending and nothing is
+  collecting that spend — a case that was invisible on every layer before.
+  This list is nexus's own bookkeeping, not an enumeration of every open session
+  on the server, and the page says so on the section itself.
+- **Agents** — role, status, model, session id, and metrics
+- **Budget** — spend against the configured cap, with the alert threshold marked
+- **Tasks and DAG** — the task list, and a graph drawn from the dependency edges
+  the state actually reports. Edges pointing at tasks that are not in the
+  snapshot, self-edges, and cycles are counted and reported in the section note
+  rather than silently not drawn.
+- **Cost breakdown** — by agent and by model, read from `/api/costs`, which
+  covers the full history rather than only the live agents
+- **Configuration (read-only)** — the resolved config the orchestrator reports
+  as in force, plus a `read-only` JSON viewer. The write path was deliberately
+  removed rather than left broken: it used to post a `config:update` message
+  that the server does not handle, so the Apply button reported success and
+  nothing happened. There is no auth story for writes and the socket is a
+  localhost server answering with `CORS: *`, so no write path was added to
+  replace it — edit `nexus.jsonc` instead.
+- **Activity log** — every event the broadcaster forwards, each delivered once
 
 **Stop the dashboard:**
 ```
-nexus.dashboard.stop()
+Ask the agent to call nexus.dashboard.stop
 ```
+This stops the HTTP/WebSocket server only. The orchestrator, its agents and its
+sessions keep running.
 
 ### Team Mode
 
@@ -297,8 +342,8 @@ nexus.clarify(question="Should I use JWT or OAuth?", options="JWT, OAuth", assum
 | `nexus.preset` | Apply preset config | `{ name }` |
 | `nexus.config.save` | Save config to disk | `{ level: 'project' \| 'global' }` |
 | `nexus.config.init` | Initialize config files | `{ level }` |
-| `nexus.dashboard.start` | Start web dashboard | `{ port?, host? }` |
-| `nexus.dashboard.stop` | Stop web dashboard | `{}` |
+| `nexus.dashboard.start` | Start the web dashboard server (port must be free) | `{ port?, host? }` |
+| `nexus.dashboard.stop` | Stop the web dashboard server | `{}` |
 | `nexus.todo.add` | Add a todo item | `{ description, assignedTo? }` |
 | `nexus.todo.list` | List all todos | `{}` |
 | `nexus.todo.complete` | Complete a todo | `{ id }` |
@@ -327,17 +372,26 @@ nexus.clarify(question="Should I use JWT or OAuth?", options="JWT, OAuth", assum
 
 ## TUI Commands
 
+The TUI plugin registers exactly these slash commands. With no argument,
+`/nexus` opens the full configuration dialog; with one, it dispatches to a
+subcommand (`config`/`c`, `status`/`s`, `dashboard`/`d`, `web`/`w`,
+`model`/`m`, `reset`).
+
 | Command | Alias | Description |
 |---------|-------|-------------|
-| `/nexus` | `Ctrl+N` | Open full configuration dialog |
-| `/nexus web` | `/nw` | Start web dashboard |
-| `/nexus review` | `/nr` | Quick code review |
-| `/nexus fix` | `/nf` | Quick fix for last error |
-| `/nexus explain` | `/ne` | Explain last change |
-| `/nexus config` | `/nc` | Configure models & budget |
-| `/nexus model` | `/nm` | Select model for a role |
-| `/nexus status` | `/ns` | Show config summary |
-| `/nexus reset` | — | Reset all settings to defaults |
+| `/nexus` | `Ctrl+N` | Full configuration dialog, or a subcommand |
+| `/nexus-web` | `/nw` | Open the web dashboard if one is already serving; otherwise say how to start it. Does not start the server — see [Web Dashboard](#web-dashboard) |
+| `/nexus-config` | `/nc` | Configure models & budget |
+| `/nexus-model` | `/nm` | Select a model for a role |
+| `/nexus-status` | `/ns` | Show the config summary |
+| `/nexus-dashboard` | `/nd` | Config, budget and dashboard-status overview. Prints text; starts nothing |
+| `/nexus-reset` | — | Reset all settings to defaults |
+
+A prompt beginning `/nexus …` typed into the composer is a *different* thing: it
+is intercepted by a prompt hook and routed to `orchestrator.handleCommand()`,
+which understands only `status`, `agents`, `costs`, `pause`, `resume` and
+`dashboard` (which returns the state as JSON). Anything else answers
+`Unknown command`. The table above is the TUI palette.
 
 ---
 
@@ -355,6 +409,24 @@ Configure via `/nexus` or `Ctrl+N`:
 🔬 Explorer:  opencode/big-pickle
 📝 Documenter: opencode/big-pickle
 ```
+
+### Web Dashboard
+
+`.opencode/nexus.jsonc` (project) and `~/.config/opencode/nexus.jsonc` (global)
+both accept:
+
+```jsonc
+{
+  "dashboard": {
+    "enabled": true,   // false makes every start attempt refuse, and say so
+    "port": 4747,      // default port; startDashboard({port}) still wins
+    "host": "127.0.0.1"
+  }
+}
+```
+
+The server has no authentication, which is why `host` defaults to loopback.
+Leave it there unless you have put your own authentication in front of it.
 
 ### Custom Roles
 
@@ -395,7 +467,7 @@ nexus.template(name="documentation") — Documentation update
 │  ┌────────────────────────────────────────────────────┐     │
 │  │              SERVER PLUGIN (index.ts)                │     │
 │  │  • 40+ tool registrations                            │     │
-│  │  • Auto-creates agents and enables LSP              │     │
+│  │  • Auto-creates agent files; opts OpenCode into LSP  │     │
 │  │  • Config file loading and creation                 │     │
 │  └────────────────────────────────────────────────────┘     │
 │                                                              │
@@ -422,7 +494,8 @@ nexus.template(name="documentation") — Documentation update
 │  ┌────────────────────────────────────────────────────┐     │
 │  │              WEB DASHBOARD                          │     │
 │  │  • Bun.serve() HTTP + WebSocket (port 4747)         │     │
-│  │  • DAG viz, cost chart, config editor, auto-refresh │     │
+│  │  • DAG viz, cost chart, read-only config, sessions  │     │
+│  │  • Started on request; throttled push + poll        │     │
 │  └────────────────────────────────────────────────────┘     │
 │                                                              │
 │  ┌────────────────────────────────────────────────────┐     │

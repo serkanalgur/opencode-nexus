@@ -63,7 +63,7 @@ type Internals = {
   configManager: { getModelForRole(role: string): string }
 }
 
-function internals(orchestrator: NexusOrchestrator): Internals {
+function internals(orchestrator: InstanceType<typeof NexusOrchestrator>): Internals {
   return orchestrator as unknown as Internals
 }
 
@@ -123,7 +123,7 @@ function bareStubAgent(): SpawnedAgent {
 }
 
 /** Capture the `SpawnConfig.model` that `spawnAndExecute` passes, isolating it from execution. */
-function captureSpawnedModels(orchestrator: NexusOrchestrator): string[] {
+function captureSpawnedModels(orchestrator: InstanceType<typeof NexusOrchestrator>): string[] {
   const seen: string[] = []
   orchestrator.spawnAgent = async (config) => {
     seen.push(config.model ?? '')
@@ -134,7 +134,7 @@ function captureSpawnedModels(orchestrator: NexusOrchestrator): string[] {
   return seen
 }
 
-function stubSelection(orchestrator: NexusOrchestrator, provider: string, model: string): void {
+function stubSelection(orchestrator: InstanceType<typeof NexusOrchestrator>, provider: string, model: string): void {
   orchestrator.selectModel = (): ModelSelection => ({
     provider,
     model,
@@ -145,7 +145,7 @@ function stubSelection(orchestrator: NexusOrchestrator, provider: string, model:
 }
 
 describe('spawnAndExecute — qualified providerID/modelID', () => {
-  let orchestrator: NexusOrchestrator
+  let orchestrator: InstanceType<typeof NexusOrchestrator>
 
   beforeEach(async () => {
     orchestrator = newOrchestrator()
@@ -186,7 +186,7 @@ describe('spawnAndExecute — qualified providerID/modelID', () => {
 })
 
 describe('executeDAG — a non-configured candidate does not kill the scheduler', () => {
-  let orchestrator: NexusOrchestrator
+  let orchestrator: InstanceType<typeof NexusOrchestrator>
 
   beforeEach(async () => {
     orchestrator = newOrchestrator()
@@ -208,7 +208,7 @@ describe('executeDAG — a non-configured candidate does not kill the scheduler'
 })
 
 describe('executeDAG — a malformed selection fails one node, not the run', () => {
-  let orchestrator: NexusOrchestrator
+  let orchestrator: InstanceType<typeof NexusOrchestrator>
 
   beforeEach(async () => {
     orchestrator = newOrchestrator()
@@ -260,7 +260,7 @@ describe('executeDAG — a malformed selection fails one node, not the run', () 
 })
 
 describe('spawnAgent — invalid model error message', () => {
-  let orchestrator: NexusOrchestrator
+  let orchestrator: InstanceType<typeof NexusOrchestrator>
 
   beforeEach(async () => {
     orchestrator = newOrchestrator()

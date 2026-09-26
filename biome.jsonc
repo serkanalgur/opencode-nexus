@@ -1,0 +1,104 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.14/schema.json",
+
+  // `bun run lint` is: `biome check src/ test/` && `tsc --noEmit` && a page-syntax check.
+  // The tsc and page legs overlap the standalone `typecheck` script deliberately:
+  // they are the only legs that can actually fail this repository, and one command
+  // that fails is what CI can rely on. Biome is a lint-only gate; tsc is the only
+  // check that sees `test/`, and with `test/` now inside the tsconfig include it is
+  // what keeps the "no any / no @ts-ignore in tests" rule honest. Keep all three legs.
+
+  "files": {
+    "includes": ["src/**", "test/**"]
+  },
+
+  "formatter": {
+    // The existing tree is NOT Biome-formatted: 55 of 58 files differ, mostly
+    // hand-wrapped arrays and long comment blocks. Enabling the formatter would
+    // make `biome check` fail on layout alone and force a repo-wide reformat,
+    // which is out of scope for the linter-adoption commit.
+    //
+    // The `format` script was REMOVED rather than left pointing at a disabled
+    // formatter: a script that exits 0 while doing nothing is the exact failure
+    // this file exists to end. When the reformat lands, set `enabled: true` here
+    // and re-add `"format": "biome format --write src/"`.
+    "enabled": false,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 120
+  },
+
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "double",
+      "semicolons": "asNeeded",
+      "trailingCommas": "all",
+      "arrowParentheses": "asNeeded"
+    }
+  },
+
+  "assist": {
+    "actions": {
+      "source": {
+        // Import ordering is not a convention this repo follows; adopting it would
+        // rewrite the import block of all 58 files.
+        "organizeImports": "off"
+      }
+    }
+  },
+
+  // Rules below are switched OFF to match the state the tree is actually in, so
+  // that this config can be committed together with the linter. Each one is real
+  // pre-existing debt, tracked in the linter-adoption report:
+  //   noExplicitAny               82  (the "no any" rule is unenforced until these are gone)
+  //   noNonNullAssertion          49
+  //   useLiteralKeys              73
+  //   useTemplate                 17
+  //   noUnusedVariables           14  (all in test/)
+  //   noUnusedImports              6
+  //   noUnusedFunctionParameters   6
+  //   useIterableCallbackReturn    2  (src/orchestrator.ts)
+  //   noGlobalIsNan                1  (src/tui.tsx)
+  //   noAssignInExpressions        1  (test/broadcast-event-coverage.test.ts)
+  //   noSwitchDeclarations         1  (src/tui.tsx)
+  //   noUnsafeOptionalChaining     1  (test/orchestrator.test.ts)
+  //   useImportType                1  (test/config-reload-content-signal.test.ts)
+  //   noBannedTypes                3
+  //   useOptionalChain             2
+  //
+  // Every rule switched off here is listed with its count, because the promise
+  // this block makes is that the config matches the measured state of the tree.
+  // An unlisted "off" breaks that silently: the count is the only part anyone
+  // checks, and a rule switched off with no number beside it is indistinguishable
+  // from one that was never considered.
+  // Everything else in the recommended preset stays ON and is enforced.
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      "suspicious": {
+        "noExplicitAny": "off",
+        "useIterableCallbackReturn": "off",
+        "noGlobalIsNan": "off",
+        "noAssignInExpressions": "off"
+      },
+      "style": {
+        "noNonNullAssertion": "off",
+        "useTemplate": "off",
+        "useImportType": "off"
+      },
+      "complexity": {
+        "useLiteralKeys": "off",
+        "noBannedTypes": "off",
+        "useOptionalChain": "off"
+      },
+      "correctness": {
+        "noUnusedVariables": "off",
+        "noUnusedImports": "off",
+        "noUnusedFunctionParameters": "off",
+        "noSwitchDeclarations": "off",
+        "noUnsafeOptionalChaining": "off"
+      }
+    }
+  }
+}

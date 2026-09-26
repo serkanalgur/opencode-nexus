@@ -95,7 +95,7 @@ describe('MessageStore', () => {
       store.add(msg)
 
       const fs = require('node:fs')
-      const raw = fs.readFileSync(TEST_PATH, 'utf-8')
+      const raw: string = fs.readFileSync(TEST_PATH, 'utf-8')
       const parsed = JSON.parse(raw.trim())
       expect(parsed.id).toBe(msg.id)
     })
@@ -107,7 +107,7 @@ describe('MessageStore', () => {
       store.add(makeMessage({ id: 'm3' }))
 
       const fs = require('node:fs')
-      const raw = fs.readFileSync(TEST_PATH, 'utf-8')
+      const raw: string = fs.readFileSync(TEST_PATH, 'utf-8')
       const lines = raw.split('\n').filter(l => l.trim())
       expect(lines).toHaveLength(3)
     })

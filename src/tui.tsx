@@ -223,6 +223,258 @@ export function mergeSidebarAgents(
   )
 }
 
+// ── `/nexus web` ───────────────────────────────────────────────────
+// Free functions, for the same reason the sidebar scanners are: the TUI
+// entrypoint is a thin adapter over the live context, and the logic worth
+// having a test on has to be reachable without one.
+//
+// WHAT THIS CANNOT DO, and why that matters enough to be a design constraint
+// rather than a limitation to apologise for: it cannot start the server.
+//
+// The TUI plugin (`@opencode/plugin/tui`, shipped as `dist/tui.js`) runs in the
+// TUI process. The orchestrator, and therefore the only `DashboardModule` that
+// has any state to serve, lives in the *server* plugin process (`dist/index.js`,
+// the one that registers `nexus.dashboard.start`). The TUI's `PluginContext`
+// exposes no orchestrator, no module registry and no way to invoke a tool — only
+// the OpenCode client, host data, and the UI. So a "start" from here could only
+// mean spawning a second, empty server in the TUI process, which would answer
+// `/api/state` with an orchestrator that does not exist and render an empty
+// dashboard on the very port the real one wants.
+//
+// The previous behaviour was worse than doing nothing: it shelled out to
+// `open`/`start`/`xdg-open` unconditionally, so the browser was ALWAYS pointed
+// at a dead address, and the toast told the user to go ask the agent. This
+// probes first and opens the browser only against a confirmed nexus dashboard.
+
+/** What a probe of `http://host:port/api/health` found. */
+export interface DashboardProbe {
+  /** Something answered on that address. */
+  listening: boolean
+  /** That something is a nexus dashboard, by its own health contract. */
+  isNexusDashboard: boolean
+  /** Human-readable outcome, used verbatim in the toast. */
+  detail: string
+}
+
+/**
+ * Ask an address whether it is a nexus dashboard.
+ *
+ * `/api/health` is the discriminator, not a bare TCP connect: a port in use by
+ * something else — a stale dashboard from a previous session, a dev server, a
+ * Jupyter kernel — also answers, and opening a browser at it would be the same
+ * mistake as opening one at a closed port. The response is also checked for
+ * shape, because a 200 from an unrelated app is still a 200.
+ */
+export async function probeDashboard(
+  host: string,
+  port: number,
+  fetchImpl: typeof fetch = fetch
+): Promise<DashboardProbe> {
+  const url = `http://${host}:${port}/api/health`
+  let response: Response
+  try {
+    response = await fetchImpl(url)
+  } catch (error: unknown) {
+    // A refused connection is the ordinary "not started" case and is reported
+    // as such rather than as an error. Anything else (a DNS failure, an
+    // abort) is named so it is not mistaken for "nothing is listening".
+    const detail = error instanceof Error ? error.message : String(error)
+    const refused = /ECONNREFUSED|fetch failed|Failed to fetch|NetworkError|ECONNRESET/i.test(detail)
+    return {
+      listening: false,
+      isNexusDashboard: false,
+      detail: refused
+        ? `nothing is listening on ${host}:${port}`
+        : `could not reach ${host}:${port} (${detail})`,
+    }
+  }
+
+  let body: unknown
+  try {
+    body = await response.json()
+  } catch {
+    return {
+      listening: true,
+      isNexusDashboard: false,
+      detail: `${host}:${port} answered ${response.status} but not with dashboard JSON`,
+    }
+  }
+
+  // `DashboardModule`'s `/api/health` handler is `{ ok: true, uptime }`. Both
+  // fields are checked: `ok: true` alone is a single word any app can return.
+  if (body !== null && typeof body === "object" && !Array.isArray(body)) {
+    const record = body as Record<string, unknown>
+    if (record.ok === true && typeof record.uptime === "number") {
+      return {
+        listening: true,
+        isNexusDashboard: true,
+        detail: `a nexus dashboard is serving ${host}:${port}`,
+      }
+    }
+  }
+
+  return {
+    listening: true,
+    isNexusDashboard: false,
+    detail: `something else is listening on ${host}:${port} and it is not a nexus dashboard`,
+  }
+}
+
+/** The address a `/nexus web [port] [host]` argument resolves to. */
+export interface WebDashboardTarget {
+  port: number
+  host: string
+}
+
+/**
+ * Parse a `/nexus web` argument against the configured defaults.
+ *
+ * Accepts a bare port, `port host`, or nothing. Returns an error string rather
+ * than a coerced number for an unparseable port: `parseInt("abc")` is `NaN`,
+ * and `NaN` used to reach a URL as the literal text `NaN`, which is a
+ * connection failure whose cause is invisible in the address that failed.
+ */
+export function parseWebDashboardTarget(
+  input: string | undefined,
+  fallback: WebDashboardTarget
+): { target: WebDashboardTarget } | { error: string } {
+  const parts = (input ?? "").trim().split(/\s+/).filter(Boolean)
+  let port = fallback.port
+  let host = fallback.host
+
+  if (parts.length > 0) {
+    // `Number` rather than `parseInt`, so "4747abc" is rejected instead of
+    // silently becoming 4747.
+    const parsed = Number(parts[0])
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+      return { error: `"${parts[0]}" is not a port number. Give a port between 1 and 65535.` }
+    }
+    port = parsed
+  }
+  if (parts.length > 1) {
+    host = parts[1]
+  }
+
+  return { target: { port, host } }
+}
+
+/** What the TUI needs from its host to run the `web` command. */
+export interface WebDashboardDeps {
+  /** The configured dashboard block — the same one the start gate reads. */
+  dashboard: { enabled: boolean; port: number; host: string }
+  showToast(options: { title: string; message: string; variant: "info" | "success" | "warning" | "error"; duration?: number }): void
+  openBrowser(url: string): Promise<void> | void
+  fetchImpl?: typeof fetch
+}
+
+/**
+ * The one implementation behind both `/nexus web` entry points.
+ *
+ * Never opens a browser at an address it has not confirmed is serving a nexus
+ * dashboard. The three refusals are all deliberate, and each says which of them
+ * happened:
+ *
+ * 1. disabled by config — nothing will ever listen, so say which key says so
+ *    and stop, rather than probing a port the user has switched off.
+ * 2. something else on the port — a bind would fail, and opening a browser at
+ *    the other process's page would be a worse answer than a clear error.
+ * 3. nothing on the port — the ordinary case, and the one this command exists
+ *    for: point the user at the single tool call that does work.
+ */
+export async function handleWebDashboard(
+  input: string | undefined,
+  deps: WebDashboardDeps
+): Promise<void> {
+  const parsed = parseWebDashboardTarget(input, {
+    port: deps.dashboard.port,
+    host: deps.dashboard.host,
+  })
+  if ("error" in parsed) {
+    deps.showToast({ title: "Nexus Web Dashboard", message: parsed.error, variant: "error" })
+    return
+  }
+
+  const { port, host } = parsed.target
+  const url = `http://${host}:${port}`
+
+  if (!deps.dashboard.enabled) {
+    deps.showToast({
+      title: "Nexus Web Dashboard — disabled",
+      message: [
+        `The dashboard is switched off: \`dashboard.enabled\` is false in your nexus.jsonc,`,
+        "so nothing will listen on any port and no browser was opened.",
+        "",
+        "Set it to true (or delete the `dashboard` block, which defaults to enabled),",
+        "then run /nexus web again.",
+      ].join("\n"),
+      variant: "error",
+      duration: 12000,
+    })
+    return
+  }
+
+  const probe = await probeDashboard(host, port, deps.fetchImpl)
+  if (probe.isNexusDashboard) {
+    await deps.openBrowser(url)
+    deps.showToast({
+      title: "⚡ Nexus Web Dashboard",
+      message: `Opened ${url} — a dashboard is already running there.`,
+      variant: "success",
+      duration: 6000,
+    })
+    return
+  }
+
+  if (probe.listening) {
+    deps.showToast({
+      title: "Nexus Web Dashboard — port in use",
+      message: [
+        `${probe.detail}.`,
+        "",
+        "No browser was opened: that address is not the dashboard.",
+        "Run /nexus web with a different port, e.g. /nexus web 4748.",
+      ].join("\n"),
+      variant: "error",
+      duration: 12000,
+    })
+    return
+  }
+
+  deps.showToast({
+    title: "⚡ Nexus Web Dashboard",
+    message: [
+      `No dashboard is running on ${url} (${probe.detail}), and no browser was opened.`,
+      "",
+      "The dashboard server cannot be started from the TUI: it runs in the OpenCode",
+      "server process, next to the orchestrator that feeds it, and the TUI has no",
+      "handle on either. So start it from the agent — this is the one call:",
+      "",
+      `  nexus.dashboard.start(port=${port}, host="${host}")`,
+      "",
+      `Then re-run /nexus web and it will open ${url} for you.`,
+    ].join("\n"),
+    variant: "info",
+    duration: 15000,
+  })
+}
+
+/** Shell out to the desktop's URL handler. Best-effort, never throws. */
+export async function openInBrowser(url: string): Promise<void> {
+  try {
+    const { exec } = await import("node:child_process")
+    const command =
+      process.platform === "darwin"
+        ? "open"
+        : process.platform === "win32"
+          ? "start"
+          : "xdg-open"
+    exec(`${command} ${url}`)
+  } catch {
+    // No shell, or no handler. The toast already told the user the URL, so a
+    // browser that refuses to open costs them nothing.
+  }
+}
+
 export default Plugin.define({
   id: "nexus.cli",
   setup(context) {
@@ -335,11 +587,30 @@ export default Plugin.define({
       })
     }
 
-    // Dashboard handler - shows config and orchestrator info
+    // Web dashboard handler - probes, and opens a browser only against a
+    // confirmed dashboard. See the note above `handleWebDashboard` for why the
+    // TUI cannot start the server itself. The address it probes comes from the
+    // SAME config the start gate reads, so the TUI and the tool agree on the
+    // port, the host, and whether the dashboard is switched off at all.
+    const runWebDashboard = async (input?: string) => {
+      await handleWebDashboard(input, {
+        dashboard: configManager.getConfig().dashboard,
+        showToast: options => context.ui.toast.show(options),
+        openBrowser: openInBrowser,
+      })
+    }
+
+    // Config summary handler.
+    //
+    // Renamed from `handleDashboard`, and the toast title with it: it prints
+    // the resolved config, and nothing about it starts, serves or connects to a
+    // dashboard. Calling that a "Dashboard" is the same false promise as the
+    // old `web` behaviour, one layer over — a user who runs it expecting a
+    // window has been told the feature exists when it has not been invoked.
     const handleDashboard = async () => {
       const config = configManager.getConfig()
       const lines = [
-        "⚡ Nexus Dashboard",
+        "⚡ Nexus Overview",
         "═══════════════════════════════════",
         "",
         "🤖 Agent Models:",
@@ -365,6 +636,7 @@ export default Plugin.define({
       lines.push("  /nexus status   - Show config summary")
       lines.push("  /nexus config   - Configure models & budget")
       lines.push("  /nexus model    - Select model for role")
+      lines.push("  /nexus web      - Open the web dashboard, if one is running")
       lines.push("  /nexus reset    - Reset to defaults")
       lines.push("")
       lines.push("🔧 Tools (use in agent prompt):")
@@ -372,9 +644,15 @@ export default Plugin.define({
       lines.push("  nexus.agents    - List spawned agents")
       lines.push("  nexus.costs     - Cost report")
       lines.push("  nexus.spawn     - Spawn a sub-agent")
+      lines.push("  nexus.dashboard.start - Start the web dashboard server")
+      lines.push("")
+      lines.push("📊 Web Dashboard:")
+      lines.push(`  Enabled: ${config.dashboard.enabled ? '✅' : '❌'}`)
+      lines.push(`  Address: http://${config.dashboard.host}:${config.dashboard.port} (when running)`)
+      lines.push("  Not running? Ask the agent for nexus.dashboard.start, then /nexus web.")
 
       context.ui.toast.show({
-        title: "Nexus Dashboard",
+        title: "Nexus Overview",
         message: lines.join('\n'),
         variant: "info",
         duration: 15000
@@ -422,34 +700,12 @@ export default Plugin.define({
                       break
                     case 'web':
                     case 'w':
-                      {
-                        const port = parts[1] ? parseInt(parts[1]) : 4747
-                        const host = parts[2] || '127.0.0.1'
-                        
-                        // Show instructions and start via toast action
-                        context.ui.toast.show({
-                          title: "⚡ Nexus Web Dashboard",
-                          message: [
-                            `Starting dashboard on port ${port}...`,
-                            "",
-                            `Ask the agent to run: nexus.dashboard.start(port=${port})`,
-                            "",
-                            `Or type: nexus.dashboard.start with port=${port} in your next message`,
-                            "",
-                            `Then open: http://${host}:${port}`
-                          ].join('\n'),
-                          variant: "success",
-                          duration: 8000
-                        })
-                        
-                        // Try to open browser
-                        try {
-                          const { exec } = await import('node:child_process')
-                          const cmd = process.platform === 'darwin' ? 'open' : 
-                                     process.platform === 'win32' ? 'start' : 'xdg-open'
-                          exec(`${cmd} http://${host}:${port}`)
-                        } catch {}
-                      }
+                      // A delegate, not a second implementation. `/nexus web
+                      // [port] [host]` and the `/nexus-web` palette command used
+                      // to be two code paths that disagreed — this one shelled
+                      // out to `open` and the other only showed a toast, and
+                      // neither started anything. One behaviour, one place.
+                      await runWebDashboard(parts.slice(1).join(' '))
                       break
                     case 'model':
                     case 'm':
@@ -510,7 +766,7 @@ export default Plugin.define({
             },
             {
               id: "nexus.dashboard",
-              title: "Nexus Dashboard",
+              title: "Nexus Overview (config, budget, dashboard status)",
               group: "Nexus",
               palette: true,
               slash: { name: "nexus-dashboard", aliases: ["nd"], arguments: true },
@@ -522,30 +778,15 @@ export default Plugin.define({
             },
             {
               id: "nexus.web",
-              title: "Start Nexus Web Dashboard",
+              title: "Open the Nexus Web Dashboard",
+              description: "Open the dashboard in your browser if one is already serving; otherwise say how to start it",
               group: "Nexus",
               palette: true,
               slash: { name: "nexus-web", aliases: ["nw"], arguments: true },
               enabled: () => true,
               suggested: true,
               run: async (input?: string) => {
-                const port = input ? parseInt(input) : 4747
-                const host = '127.0.0.1'
-                context.ui.toast.show({
-                  title: "⚡ Nexus Web Dashboard",
-                  message: [
-                    `Port: ${port}  Host: ${host}`,
-                    "",
-                    "To start the dashboard, ask the agent:",
-                    `  nexus.dashboard.start(port=${port}, host="${host}")`,
-                    "",
-                    `Then open: http://${host}:${port}`,
-                    "",
-                    "Tip: The dashboard shows live agent status, costs, and history."
-                  ].join('\n'),
-                  variant: "info",
-                  duration: 12000
-                })
+                await runWebDashboard(input)
               }
             },
             {

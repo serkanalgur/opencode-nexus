@@ -44,18 +44,17 @@
     "dev": "bun run --watch src/index.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "lint": "biome check src/",
-    "format": "biome format --write src/",
+    "lint": "biome check src/ test/ && tsc --noEmit && bun -e 'const page = \"dashboard/index.html\"; const html = await Bun.file(page).text(); const inline = [...html.matchAll(/<script(?![^>]*\\bsrc=)[^>]*>([\\s\\S]*?)<\\/script>/g)]; if (inline.length === 0) throw new Error(page + \" has no inline <script> to check\"); inline.forEach(m => { new Function(m[1]); }); console.log(\"lint: \" + page + \" - \" + inline.length + \" inline script(s) parse clean\");'",
     "prepublishOnly": "bun run build"
   },
   "dependencies": {
     "@opencode/plugin": "latest"
   },
   "devDependencies": {
+    "@biomejs/biome": "latest",
     "@opentui/core": "^0.5.8",
     "@opentui/solid": "^0.5.8",
     "@types/bun": "latest",
-    "biome": "latest",
     "bun-types": "^1.4.2",
     "solid-js": "^1.9.0",
     "typescript": "^5.5.0"

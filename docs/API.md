@@ -26,7 +26,9 @@ Creates a new orchestrator instance. If no config is provided, defaults from the
 initialize(ctx: PluginContext): Promise<void>
 ```
 
-Initialize the orchestrator with an OpenCode plugin context. This sets up internal systems (dashboard, health monitor, learning module) and loads persisted configuration.
+Initialize the orchestrator with an OpenCode plugin context. This loads persisted configuration, starts the health monitor and notification manager, sets up the registered plugin modules, and wires the `StateBroadcaster`.
+
+The broadcaster is wired here because it is the transport the dashboard's sockets register on, and because `initBroadcaster()` otherwise had no caller — every `notifyStateChange()` was a no-op in production. The **dashboard server is NOT started here.** `startDashboard()` is the only thing that binds a port, and nothing in the plugin calls it implicitly.
 
 ##### spawnAgent(config: SpawnConfig): Promise\<Agent\>
 
@@ -111,6 +113,46 @@ Retrieve a memory entry by key, optionally filtered by scope.
 
 Configuration management with file I/O. Accessed via `orchestrator.configManager`.
 
+#### The config file schema
+
+`.opencode/nexus.jsonc` (project) and `~/.config/opencode/nexus.jsonc` (global)
+are JSONC — comments allowed. Precedence is **storage (session override) >
+project > global > defaults**, and the whole set is re-read on reload, so
+editing any level takes effect without a restart.
+
+```jsonc
+{
+  "models": { "architect": "provider/model", "coder": "provider/model", /* ... */ },
+  "budget": { "maxTotalCost": 10, "maxCostPerTask": 1, "maxCostPerAgent": 2, "alertThreshold": 0.2 },
+  "selfHealing": { "enabled": true, "maxRetries": 3, "contextTransfer": true },
+  "dashboard": { "enabled": true, "port": 4747, "host": "127.0.0.1" }
+}
+```
+
+`dashboard.enabled` is **honoured**: `NexusOrchestrator.startDashboard()` refuses
+to start and names the key when it is `false`, and the TUI's `/nexus web` command
+reports the same reason instead of probing a port that is switched off. The
+other `dashboard` fields are the defaults for `startDashboard()`; explicit
+arguments to that method still win.
+
+`saveProjectConfig` and `saveGlobalConfig` write `models`, `budget`,
+`selfHealing` and `dashboard` — all four, unconditionally. They overwrite the
+whole file, so a block left out of that list would be a block *deleted* from the
+user's config on the first save.
+
+Blocks on the `NexusConfig` type that are **not** in this schema — `memory`,
+`security`, `learning`, `communication`, `cost` — are settable through the
+`NexusOrchestrator` constructor only, and are documented that way rather than
+as user-configurable, because they are not.
+
+#### getConfig(): NexusFullConfig
+
+```typescript
+getConfig(): NexusFullConfig
+```
+
+The resolved configuration, after all four precedence levels.
+
 #### getModelForRole(role: string): string
 
 ```typescript
@@ -125,7 +167,8 @@ Return the model identifier assigned to the given role.
 saveProjectConfig(basePath: string): void
 ```
 
-Persist the current configuration to `<basePath>/.opencode/nexus.jsonc`.
+Persist the current configuration to `<basePath>/.opencode/nexus.jsonc`. Writes
+`models`, `budget`, `selfHealing` and `dashboard` — see the schema above.
 
 #### saveGlobalConfig(): void
 
@@ -133,7 +176,8 @@ Persist the current configuration to `<basePath>/.opencode/nexus.jsonc`.
 saveGlobalConfig(): void
 ```
 
-Persist the current configuration to `~/.config/opencode/nexus.jsonc`.
+Persist the current configuration to `~/.config/opencode/nexus.jsonc`. Same four
+blocks.
 
 #### applyPreset(name: string): void
 
@@ -149,6 +193,11 @@ Apply a named preset. Available presets: `minimal`, `balanced`, `enterprise`, `c
 
 Web dashboard server providing real-time monitoring via HTTP and WebSocket.
 
+Reached through `NexusOrchestrator.startDashboard()` / `stopDashboard()`, which
+are the only callers. **The server is never started implicitly** — not by
+`initialize()`, not by a module, not by a config value. Nothing in this package
+listens on a port until `startDashboard()` is called.
+
 #### start(port: number, host: string): void
 
 ```typescript
@@ -157,21 +206,164 @@ start(port: number, host: string): void
 
 Start the HTTP + WebSocket server on the given port and host.
 
+Throws if the port cannot be bound (it is in use, or the process lacks
+permission). `NexusOrchestrator.startDashboard()` resolves `port` and `host`
+from the `dashboard` block of the resolved config when they are not passed, and
+**refuses to start at all when `dashboard.enabled` is `false`**, naming the
+config key in the error.
+
 #### stop(): void
 
 ```typescript
 stop(): void
 ```
 
-Stop the server and close all connections.
+Stop the server and close all connections. A no-op when nothing is running.
 
-#### broadcast(event: string, data: unknown): void
+#### isRunning(): boolean
 
 ```typescript
-broadcast(event: string, data: unknown): void
+isRunning(): boolean
 ```
 
-Broadcast an event to all connected WebSocket clients.
+Whether this module currently holds a bound server. `true` immediately after a
+successful `start()`, `false` after `stop()` and after a failed `start()`.
+
+#### getClientCount(): number
+
+```typescript
+getClientCount(): number
+```
+
+Number of connected WebSocket clients. Owned by the `StateBroadcaster`, not by
+this module — `DashboardModule` registers sockets on the broadcaster in its
+`websocket.open` handler so that there is exactly one client set and one message
+sequence.
+
+#### There is no `broadcast()`
+
+It was removed. It was a pass-through to `StateBroadcaster.broadcast()`, and
+`DashboardModule.start()` also used to hand-wire four events to it — which made
+every one of those events reach each client **twice**. Event delivery has
+exactly one owner now, the broadcaster, which subscribes to all thirteen events
+itself.
+
+#### HTTP routes
+
+All responses carry `Access-Control-Allow-Origin: *`. `OPTIONS` on any path
+returns the CORS preflight response with no body.
+
+| Route | Method | Response |
+|-------|--------|----------|
+| `/api/state` | GET | `OrchestratorState` — the object below, verbatim |
+| `/api/config` | GET | `NexusConfigManager.exportConfig()`: the resolved config file, i.e. `models`, `budget`, `selfHealing` and `dashboard`. This is the CONFIG FILE's resolved form; `state.config` below is the orchestrator's view, which can differ while a run is in progress |
+| `/api/agents` | GET | The `agents` array of `OrchestratorState` |
+| `/api/costs` | GET | The object form of `getCostReport()` (that method returns a JSON *string*; it is parsed before serialising, so callers get an object, not a double-encoded one) |
+| `/api/health` | GET | `{ ok: true, uptime: number }` — `uptime` is `process.uptime()` of the dashboard's own process. This is also the probe the TUI's `/nexus web` uses to tell a dashboard from any other process on the port |
+| `/ws/events` | GET (upgrade) | WebSocket upgrade; see below |
+| anything else | GET | The dashboard single-page app (the inlined `dashboard/index.html`) |
+
+An unmatched `/api/*` path is a **404 with a JSON body**, not the SPA. An
+`/api/*` handler that throws is a **500** with `{ error, detail }`. This is
+deliberate: a 200 of HTML for a missing endpoint means no client can fail loudly
+about a route that is not there, which is how the page's `state.config?.budget`
+and `a.sessionId` drifted from the server without anything noticing.
+
+#### `OrchestratorState` (the `/api/state` and `orchestrator:state` shape)
+
+```typescript
+{
+  running: boolean
+  paused: boolean
+  agents: Array<{
+    id, name, role, status, model,          // strings; `model` is "providerID/modelID"
+    sessionID?: string,                      // `sessionID`, not `sessionId`
+    spawnedAt: string,                       // ISO
+    tasksCompleted, tasksFailed, totalTokens: number
+    averageResponseTime: number,             // ms
+    errorRate: number,                       // 0-1
+    totalCost: number
+  }>
+  tasks: Array<{
+    id, name, role, priority, status: string
+    dependencies: string[]                   // DAG edge ids; [] means "no edges", never null
+    assignedAgent?: string
+    cost?: number
+    tokensUsed?: number
+    result?: { success: boolean, output?: string, error?: string, duration: number }
+  }>
+  config: {
+    models: Record<string, string>           // resolved role -> "providerID/modelID"
+    budget: BudgetConstraint                 // the budget IN FORCE, which execute() can replace
+    selfHealing: { enabled, maxRetries, contextTransfer }
+  }
+  sessions: SessionStateView[]               // see below
+  totalSpent: number
+  budgetRemaining: number
+  lastUpdated: string                        // ISO
+}
+```
+
+There are no aliases for these key names. `budget.maxTotalCost` is not
+`maxBudget`; `budget.hardLimit` is not `autoTerminate` and has the opposite
+sense (it means "stop at the ceiling"); `selfHealing.enabled` is not
+`retryOnFailure`. There is no `criticalThreshold`, `escalation` or
+`deadlockDetection` key, because no such configuration exists.
+
+`SessionStateView` is one row per session — `{ id, owned, agentId, taskId, role,
+model, state, spawnedAt, lastKnownTokens, observedUncollected }` — unioned from
+the three collections nexus holds: owned agents, pending timeout cost
+collection, and abandoned spend. It is **not** an enumeration of every open
+session on the server, and it is **not** built by walking `parentID` (a
+`ctx.session.create()` child is not parent-linked). `agentId: null` with
+`owned: false` marks an **orphan**: a session still running after its agent was
+terminated, which keeps spending with nothing collecting it. `state` is one of
+`running`, `idle`, `abandoned`, `settled`, and is inferred from nexus's own
+bookkeeping rather than observed from the server.
+
+#### WebSocket protocol
+
+Connect to `ws://<host>:<port>/ws/events`. **Server → client**, every frame is
+`{ type, data, timestamp }`:
+
+| `type` | When | `data` |
+|--------|------|--------|
+| `orchestrator:state` | Once on connect, then on every state change, throttled to at most one frame per second | `OrchestratorState` |
+| `agent:spawned` | An agent is spawned | event payload |
+| `agent:terminated` | An agent is terminated | event payload |
+| `agent:escalation` | The escalation chain fires | event payload |
+| `task:failed` | A task fails | event payload |
+| `cost:delta` | A cost delta is settled | event payload |
+| `security:issues-found` | The security module reports issues | event payload |
+| `memory:set` | A memory entry is written | event payload |
+| `budget:alert` | Spend crosses `alertThreshold` | event payload |
+| `budget:exceeded` | Spend crosses a budget ceiling | event payload |
+| `config:reloaded` | A config file changed and was re-read | event payload |
+| `orchestrator:paused` | `pause()` | event payload |
+| `orchestrator:resumed` | `resume()` | event payload |
+| `orchestrator:shutdown` | `shutdown()` | event payload |
+| `pong` | In reply to `ping` | absent |
+
+The thirteen event names are `BROADCAST_EVENTS` in `src/broadcast.ts`, and
+`test/broadcast-event-coverage.test.ts` ties that list to the `this.emit(...)`
+sites in `orchestrator.ts` in both directions — statically and by asserting each
+one really reaches a connected client. That test exists because the list used to
+be four names long while the orchestrator emitted thirteen, so nine events
+reached no client and nothing complained.
+
+**Client → server**, JSON text. Exactly two messages are understood; anything
+else is ignored:
+
+| `type` | Reply |
+|--------|-------|
+| `getState` | one immediate `orchestrator:state` frame — the explicit ask that no throttled push can serve |
+| `ping` | one `pong` frame |
+
+**There is no write path.** In particular there is no `config:update`: the
+dashboard's config panel once posted one, the button reported success, and
+nothing happened. There is no authentication and the server answers with
+`CORS: *`, so no write path was added to replace it. Change `nexus.jsonc` and
+let the config watcher reload it.
 
 ---
 

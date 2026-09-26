@@ -973,7 +973,9 @@ describe('config reload — mtime polling (the guaranteed trigger)', () => {
     writeConfig(file, { reviewer: 'opencode/before-cleanup' })
 
     const w = await startWatching(dir)
-    const signal = w.subscribeMock.mock.calls[0][0].signal as AbortSignal
+    const firstSubscription = w.subscribeMock.mock.calls[0]
+    expect(firstSubscription).toBeDefined()
+    const signal = firstSubscription?.[0]?.signal as AbortSignal
     expect(signal.aborted).toBe(false)
 
     w.stop()

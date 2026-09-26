@@ -110,7 +110,7 @@ async function withCapturedWarnings<T>(fn: () => Promise<T>): Promise<{ result: 
 }
 
 describe('spawnAgent — subagent tool path', () => {
-  let orchestrator: NexusOrchestrator
+  let orchestrator: InstanceType<typeof NexusOrchestrator>
   let ctx: any
   let subagentCalls: any[]
 
@@ -188,7 +188,7 @@ describe('spawnAgent — subagent tool path', () => {
 })
 
 describe('spawnAgent — session.create path (no tool context)', () => {
-  let orchestrator: NexusOrchestrator
+  let orchestrator: InstanceType<typeof NexusOrchestrator>
   let ctx: any
 
   beforeEach(async () => {

@@ -109,20 +109,37 @@ describe('DashboardModule', () => {
       expect(data).toBeDefined()
     })
 
-    it('should return welcome message at root', async () => {
+    it('should serve the inlined SPA at root', async () => {
       const res = await fetch('http://127.0.0.1:14750/')
       expect(res.status).toBe(200)
+      expect(res.headers.get('Content-Type')).toContain('text/html')
       const text = await res.text()
-      // Root returns either SPA HTML or API text
-      expect(text.length).toBeGreaterThan(0)
+      // Real assertions on the content, not merely "non-empty": the previous
+      // version of this test passed equally well for the SPA and for the
+      // `ENOENT: no such file ... dashboard/index.html` string the server
+      // returned from an unrelated working directory, which is why the bug
+      // shipped.
+      expect(text).toContain('<!DOCTYPE html>')
+      expect(text).toContain('Nexus Dashboard')
+      expect(text).toContain('id="stat-agents"')
+      expect(text).toContain('id="log-container"')
+      expect(text.length).toBeGreaterThan(10_000)
+      expect(text).not.toContain('SPA not found')
+      expect(text).not.toContain('ENOENT')
     })
   })
 
   describe('broadcast', () => {
     it('should broadcast to connected clients', () => {
       dashboard.start(14751, '127.0.0.1')
-      // broadcast with no clients should not throw
-      dashboard.broadcast('test:event', { key: 'value' })
+      // Broadcast with no clients should not throw. Sent through the
+      // broadcaster rather than the module: `DashboardModule.broadcast()` is
+      // GONE, because it existed only to give `startDashboard()`'s four
+      // hand-wired handlers somewhere to call, and those handlers were deleted
+      // for duplicating every delivery. `getClientCount()` is still a
+      // pass-through to the broadcaster, so it is the honest way to ask the
+      // question this test is really asking.
+      orchestrator.broadcaster?.broadcast('test:event', { key: 'value' })
       expect(dashboard.getClientCount()).toBe(0)
     })
   })

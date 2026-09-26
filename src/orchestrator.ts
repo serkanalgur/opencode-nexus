@@ -2,6 +2,7 @@ import type { Plugin } from "@opencode/plugin"
 import type {
   Agent, Task, DAG, DAGNode, ExecutionRequest, ExecutionResult,
   AgentRole, ComplexityScore, ModelSelection, BudgetConstraint,
+  AgentStatus,
   CostReport, AgentMessage, MemoryEntry, MemoryScope,
   SpawnConfig, RecoveryAction, HealthStatus, NexusConfig, TaskResult,
   CostProvenance, SpendSplit, CostReportUncollected
@@ -190,6 +191,32 @@ export class TaskTimeoutError extends Error {
 const DELTA_READ_BACKOFF_MS: readonly number[] = [1000, 2000, 4000]
 
 /**
+ * How many abandoned sessions `uncollected` itemises before the oldest is
+ * dropped into `uncollectedEvicted`.
+ *
+ * A CAP, not a TTL, and the choice is forced rather than preferred. A TTL would
+ * have to be keyed off the session's own `time.idle`, and that is exactly the
+ * value an abandoned session does not have: a session reaches `uncollected`
+ * precisely because it never went idle, or because the read that would have
+ * shown it idle failed every retry. `readSessionTokens` coerces a missing
+ * `time.idle` to 0 for precisely this reason. So an honest TTL would have to
+ * re-read the session API on a schedule — async work, from a synchronous
+ * projection, for a record whose whole content is "we stopped watching this" —
+ * and any TTL short enough to matter would be expiring entries that are still
+ * billing, which is worse than the leak it fixes.
+ *
+ * WHY 200. An entry here is far heavier than a history row: it becomes a
+ * `sessions[]` entry on EVERY throttled push and every `/api/state` request,
+ * and a full object in `/api/costs`. 200 itemised abandoned sessions is far
+ * past the number a real run reaches — an entry requires a task to time out AND
+ * its collection to be given up on, so this bounds the payload at a size no
+ * dashboard will visibly truncate, while still being a bound. It matches
+ * `ExecutionHistory`'s 500 as the same shape (newest-wins, FIFO) and is
+ * deliberately lower because these rows cost more to serialise.
+ */
+const MAX_UNCOLLECTED_SESSIONS = 200
+
+/**
  * One outstanding "bill the rest of this session" obligation, keyed by
  * SESSION id.
  *
@@ -290,6 +317,54 @@ interface UncollectedSpend {
    * generating, is unbounded. See `CostReportUncollected`.
    */
   observedUncollected: number
+}
+
+/**
+ * What the `uncollected` cap dropped, so that a bounded map does not become a
+ * silently shrinking number.
+ *
+ * The cost of evicting an abandoned session is that it stops appearing in the
+ * `uncollected` block's `entries` and in `getState().sessions[]`. The
+ * under-count does not go away — it is still real spend we did not bill — but
+ * after eviction the only place it is visible is here. So the aggregate travels
+ * with the entries rather than being discarded with them: a reader can always
+ * say "at least $X, across N sessions, some of which are no longer itemised".
+ *
+ * `observedUncollected` here is a LOWER BOUND in exactly the sense the
+ * surviving entries' is, and it is NOT added into the surviving total — see
+ * `uncollectedSummary` for why the two are reported side by side rather than
+ * summed into one number that would read as the under-count.
+ */
+export interface UncollectedEviction {
+  /** How many abandoned sessions have been dropped from `entries`. */
+  sessions: number
+  /** Sum of each dropped session's last successfully read token count. */
+  lastKnownTokens: number
+  /**
+   * Sum of each dropped session's observed-but-uncharged spend, in USD. A
+   * LOWER BOUND on the under-count of the dropped sessions, on the same terms
+   * as the surviving entries'.
+   */
+  observedUncollected: number
+  /** The cap in force, so a reader can tell "0 dropped" from "never hit". */
+  cap: number
+}
+
+/**
+ * `CostReportUncollected` plus the eviction block.
+ *
+ * Declared HERE rather than in `types.ts` because that file is outside this
+ * change's allowed paths, and it is worth naming why that matters: the honest
+ * shape of this report is `CostReportUncollected` MINUS a field. The public
+ * `uncollected` block must grow an `evicted` key, because the cap means
+ * "entries" is no longer the whole story, and a reader who cannot see the cap
+ * cannot tell a complete list from a truncated one. Growing the interface
+ * locally keeps the extension visible and typed at the one site that produces
+ * it, rather than leaving the report's real shape undocumented in its own
+ * declaration.
+ */
+export interface UncollectedSummary extends CostReportUncollected {
+  evicted: UncollectedEviction
 }
 
 /**
@@ -409,6 +484,106 @@ export interface ModelScore {
   reasoning: string
 }
 
+/**
+ * One session the orchestrator knows something about, as published on
+ * `OrchestratorState.sessions`.
+ *
+ * WHY THIS EXISTS, since it is not a collection anything else holds: on the
+ * timeout path the task is failed and `handleFailure` calls `terminateAgent`,
+ * which does `this.agents.delete(agentId)`. The session is NOT aborted — it
+ * keeps generating and keeps spending (see the `ExecutionResult.totalCost`
+ * note) — so a RUNNING SESSION WITH NO OWNING AGENT exists, and it was
+ * invisible on every layer: not in `agents` (deleted), not in the page's
+ * activity log, and not in the cost report, which could say it was
+ * under-billing but not WHICH session. `agentId: null` with `owned: false` is
+ * the field that makes that case visible rather than merely possible.
+ *
+ * SCOPE, deliberately narrow. This is a union of the three collections nexus
+ * already holds — owned agents, pending timeout collections, and abandoned
+ * spend. It is NOT an enumeration of every open session on the server:
+ * `SessionDomain` is a `Pick<SessionApi, …>` that excludes `list`, so the
+ * server cannot be asked. It is also NOT built by walking `parentID`, because a
+ * `ctx.session.create()` child is NOT parent-linked (see `lastDegradedSpawn`),
+ * which is exactly what the TUI's `family()`-based sidebar gets wrong.
+ *
+ * `state` is INFERRED FROM NEXUS'S OWN BOOKKEEPING, not observed from the
+ * server. `ctx.session.get` would give an authoritative `time.idle`, but
+ * `getState()` is synchronous and is called from every throttled push and from
+ * `/api/state`; making it await one request per session would turn a
+ * single-socket state push into an N-request fan-out against the same server
+ * that is running the agents. A field that is usually right because it is
+ * usually stale is worse than a field that is honestly derived, so this is
+ * derived.
+ */
+export interface SessionStateView {
+  /** OpenCode session id. The key: one row per session, never per agent. */
+  id: string
+  /** True iff an entry for this session's agent is in `this.agents` right now. */
+  owned: boolean
+  /**
+   * The owning agent's id, or null when the session is an ORPHAN — a session
+   * that is still running (or was, when we gave up collecting) after its agent
+   * was removed by `terminateAgent`. This is the field the whole view exists
+   * for: an orphan with a non-zero `observedUncollected` is spend that happened
+   * and was not billed, attached to a session nobody owns.
+   */
+  agentId: string | null
+  /** DAG node id, when known: the collection record's, else the task assigned to the agent. */
+  taskId: string | null
+  /** The owning agent's role, or null for an orphan. */
+  role: AgentRole | null
+  /** "providerID/model", or null when no collection record named one. */
+  model: string | null
+  /**
+   * - `running`   — actively doing work: an agent that is spawning/working, or a
+   *   session whose timed-out cost we are still collecting. On the DAG path
+   *   this is the whole of the task: `executeTask` sets `working` before it
+   *   issues the prompt, and the `finally` puts it back down.
+   * - `idle`      — an agent alive but BETWEEN tasks (`idle`, `blocked`). An
+   *   agent at `idle` holds a session and is expected to be given more work;
+   *   it is not spending. An agent that IS spending reports `running`.
+   * - `settled`   — an agent that is done (`completed`, `failed`, `terminated`)
+   *   and is not expected to spend more. Distinct from `idle` because "not
+   *   spending right now" and "finished" are different answers.
+   * - `abandoned` — we stopped collecting its cost while it was still running.
+   *   The only state that implies unbilled spend; see `observedUncollected`.
+   *
+   *   All four are reachable on the DAG path: `running` and `idle` by the
+   *   transition above, `settled` by a terminal status, and `abandoned` by a
+   *   `terminateAgent` that leaves a still-running session behind.
+   *
+   *   An `abandoned` row is ABSENT once the `uncollected` cap has evicted it,
+   *   because pass 3 of `sessionViews()` reads that map. A row vanishing here
+   *   therefore means "we dropped the detail", NOT "nothing was unbilled" — the
+   *   cost report's `uncollected.evicted` block carries the sums for whatever
+   *   left, and is the surface to read for the magnitude. This is the one place
+   *   the cap is visible as a disappearance rather than as a number, which is
+   *   why the doc says so here too.
+   */
+  state: 'running' | 'idle' | 'abandoned' | 'settled'
+  /** ISO timestamp, from the owning agent. null for an orphan. */
+  spawnedAt: string | null
+  /**
+   * The most recent token count we have actually observed for this session.
+   *
+   * Three sources, in descending order of precision: the abandoned record's
+   * `lastKnownTokens` (a real read), the ledger's cumulative `charged` usage
+   * (also a real read), and — for a plain owned session with no ledger — the
+   * owning agent's measured `metrics.totalTokens`. Nexus spawns one agent per
+   * task, so for an owned session that last figure is the same quantity. A
+   * session with no read at all reports 0, which means "unobserved", not
+   * "spent nothing"; the same convention `readSessionTokens` uses for a missing
+   * `time.idle`.
+   */
+  lastKnownTokens: number
+  /**
+   * Priced value of the increment we observed but did not charge, in USD. 0
+   * unless this session is in `uncollected`, where it is a LOWER BOUND on the
+   * under-count rather than an upper bound. See `CostReportUncollected`.
+   */
+  observedUncollected: number
+}
+
 export interface OrchestratorState {
   running: boolean
   paused: boolean
@@ -422,6 +597,16 @@ export interface OrchestratorState {
     spawnedAt: string
     tasksCompleted: number
     tasksFailed: number
+    /**
+     * Tokens measured for this agent, from `Agent.metrics`. Collected, and
+     * corrected by the timeout-delta settlement, but never read here — so the
+     * page had a cost per agent and no tokens for it.
+     */
+    totalTokens: number
+    /** `Agent.metrics.averageResponseTime`, in ms. */
+    averageResponseTime: number
+    /** `Agent.metrics.errorRate`, 0-1. */
+    errorRate: number
     totalCost: number
   }>
   tasks: Array<{
@@ -430,12 +615,76 @@ export interface OrchestratorState {
     role: string
     priority: string
     status: string
+    /**
+     * DAG edge ids — what this task waits on, per `Task.dependencies`. Absent
+     * from the projection before, so the page drew a flat list whose arrows
+     * meant nothing. Empty (never null) for a task with no dependencies, so a
+     * client can tell "no edges" from "not reported".
+     */
+    dependencies: string[]
     assignedAgent?: string
+    /** `TaskResult.cost` — the billed figure for this task. */
+    cost?: number
+    /** `TaskResult.tokensUsed`. */
+    tokensUsed?: number
     result?: { success: boolean; output?: string; error?: string; duration: number }
   }>
+  /**
+   * The live, resolved configuration, under its REAL key names.
+   *
+   * Present so a consumer does not have to invent a config. The names are the
+   * contract and no aliases are provided: `budget.maxTotalCost` (not
+   * `maxBudget`/`max`), `budget.hardLimit` (not `autoTerminate` — and with the
+   * opposite sense to what that name suggests, since `hardLimit: true` means
+   * "STOP at the ceiling"), `selfHealing.enabled` (not `retryOnFailure`).
+   * There is no `criticalThreshold`/`criticalPct`, `escalation` or
+   * `deadlockDetection` key on either side, because no such configuration
+   * exists: `alertThreshold` is the only budget threshold, and
+   * `selfHealing.maxRetries` is the retry knob.
+   */
+  config: {
+    /** Resolved `role -> model` map, after defaults -> global -> project -> session override. */
+    models: Record<string, string>
+    /**
+     * The budget actually in force. Read from `this.budget` rather than
+     * `this.config.budget` because `execute()` can replace the former with the
+     * caller's `ExecutionRequest.budget` for the duration of a run; a config
+     * panel reading the configured ceiling while spend is measured against
+     * another one would lie by omission.
+     */
+    budget: BudgetConstraint
+    selfHealing: NexusConfig['selfHealing']
+  }
+  /**
+   * Sessions nexus knows about, orphans included. See `SessionStateView` for
+   * why this is a union of three internal collections rather than a session
+   * list, and for the scope limits that keep it from being one.
+   */
+  sessions: SessionStateView[]
   totalSpent: number
   budgetRemaining: number
   lastUpdated: string
+}
+
+/**
+ * An agent's status as a session's `state`. Exhaustive over `AgentStatus` with
+ * no `default` arm on purpose: adding a status to that union then fails to
+ * compile HERE, which is the only place that would otherwise silently pick a
+ * wrong answer for a status nobody has thought about.
+ */
+function sessionStateOfAgent(status: AgentStatus): SessionStateView['state'] {
+  switch (status) {
+    case 'spawning':
+    case 'working':
+      return 'running'
+    case 'idle':
+    case 'blocked':
+      return 'idle'
+    case 'completed':
+    case 'failed':
+    case 'terminated':
+      return 'settled'
+  }
 }
 
 export interface EscalationPolicy {
@@ -542,8 +791,14 @@ export class NexusOrchestrator {
   // Todo enforcer for task tracking
   public todoEnforcer: TodoEnforcer = new TodoEnforcer()
 
-  // State update callback
-  private onStateChange: (() => void) | null = null
+  // The caller's own state-change callback, supplied to `initialize()`. Held
+  // SEPARATELY from the broadcaster rather than chained into it, so that
+  // `initBroadcaster()` is idempotent: chaining wrapped the previous callback
+  // in a new closure, so calling it twice — or calling it after a
+  // `shutdown()` that had already torn the first one down — left the old
+  // broadcaster reachable from a closure nothing could unwind. One notify
+  // method, two independent listeners, no nesting.
+  private stateChangeListener: (() => void) | null = null
 
   // State change debounce timer
   private stateChangeTimer: ReturnType<typeof setTimeout> | null = null
@@ -568,6 +823,17 @@ export class NexusOrchestrator {
   // whether the timer that drove it has fired.
   private deltaLedgers: Map<string, TimeoutDeltaLedger> = new Map()
   private uncollected: Map<string, UncollectedSpend> = new Map()
+
+  /**
+   * Sessions dropped by the `uncollected` cap, accumulated as they are dropped.
+   * See `UncollectedEviction` for why eviction is not free and why this exists.
+   */
+  private uncollectedEvicted: UncollectedEviction = {
+    sessions: 0,
+    lastKnownTokens: 0,
+    observedUncollected: 0,
+    cap: MAX_UNCOLLECTED_SESSIONS,
+  }
 
   /**
    * Every live delta timer. `unref`'d on creation so a pending collection can
@@ -623,7 +889,7 @@ export class NexusOrchestrator {
   constructor(config?: Partial<NexusConfig>, messageStoreConfig?: Partial<MessageStoreConfig>, memoryStoreConfig?: Partial<MemoryStoreConfig>) {
     this.config = this.mergeConfig(config)
     this.budget = this.config.budget
-    this.configManager = new NexusConfigManager()
+    this.configManager = new NexusConfigManager(this.config.dashboard)
     this.moduleRegistry = new ModuleRegistry()
     this.messageStore = new MessageStore(messageStoreConfig)
     this.memoryStore = new PersistentMemoryStore(memoryStoreConfig)
@@ -668,7 +934,7 @@ export class NexusOrchestrator {
    */
   async initialize(ctx: NexusPluginContext, onStateChange?: () => void) {
     this.ctx = ctx
-    this.onStateChange = onStateChange ?? null
+    this.stateChangeListener = onStateChange ?? null
 
     // Load project/global config files from disk
     // Use plugin location directory, not process.cwd() which may be wrong
@@ -697,6 +963,18 @@ export class NexusOrchestrator {
       on: (event: string, handler: (data: any) => void) => { this.on(event, handler) }
     }
     await this.moduleRegistry.setupAll(moduleCtx)
+
+    // The dashboard's transport, wired here rather than left to
+    // `startDashboard()`'s caller. Two reasons, and the second is the real one:
+    // it makes `docs/API.md`'s claim that `initialize()` sets up the dashboard
+    // true, and it is the only place the throttled state push gets an owner at
+    // all — `initBroadcaster()` had no caller anywhere in `src/`, so
+    // `this.broadcaster` was null in production and the `broadcastState()`
+    // chained onto the state-change callback was a no-op at every one of the
+    // ~10 `notifyStateChange()` sites. Called LAST so the listener installed by
+    // the line above is the one captured, and after the module setup so a module
+    // that emits during setup already has somewhere to broadcast to.
+    this.initBroadcaster()
   }
 
   /**
@@ -902,33 +1180,75 @@ export class NexusOrchestrator {
   }
 
   /**
-   * Wire up the StateBroadcaster so that every notifyStateChange() call
-   * also triggers a throttled broadcast to WebSocket clients.
+   * Wire up the StateBroadcaster so that every state change also triggers a
+   * throttled broadcast to WebSocket clients.
+   *
+   * Idempotent. A second call destroys the first broadcaster rather than
+   * stacking a second subscription set on top of it — the old implementation
+   * chained the previous state-change callback into a fresh closure, so
+   * calling this twice made every broadcast go out twice and left the first
+   * broadcaster's `destroy()` unable to unsubscribe it.
    */
   initBroadcaster(opts?: { throttleMs?: number }): void {
+    this.broadcaster?.destroy()
     this.broadcaster = new StateBroadcaster(this, opts)
-    // Chain into the existing onStateChange callback
-    const previousOnStateChange = this.onStateChange
-    this.onStateChange = () => {
-      previousOnStateChange?.()
-      this.broadcaster?.broadcastState()
-    }
   }
 
   /**
-   * Start the web dashboard server
+   * Start the web dashboard server.
+   *
+   * THE GATE LIVES HERE, and that is a deliberate placement: this is the single
+   * choke point every start path goes through (the `dashboard.start` tool, and
+   * anything else added later), so honouring `dashboard.enabled` anywhere else
+   * would be a second copy of the rule. It was readable from nowhere before —
+   * the field defaulted to `true`, was documented as a switch, and no code in
+   * `src/` read it.
+   *
+   * `enabled`/`port`/`host` resolve from the CONFIG MANAGER, not from
+   * `this.config.dashboard`, so a `dashboard` block in `nexus.jsonc` reaches
+   * them. The manager is seeded with `this.config.dashboard` at construction,
+   * which is what keeps a programmatic `new NexusOrchestrator({dashboard:
+   * {...}})` working — it is the bottom precedence level, so either file still
+   * wins. Explicit arguments to this method still win over all of it.
+   *
+   * Registers NO event handlers, and that is the whole point. It used to wire
+   * `agent:spawned`, `agent:terminated`, `budget:alert` and `budget:exceeded`
+   * by hand to `DashboardModule.broadcast()`, which was a pass-through to
+   * `broadcaster.broadcast()`. `StateBroadcaster` subscribes to all thirteen
+   * events itself, so those four lines made every one of them reach each
+   * connected client TWICE — and the page draws one activity row per delivery,
+   * so a user watched every spawn and every termination appear twice.
+   *
+   * Delivery has exactly one owner: the broadcaster. The page's sockets
+   * register on it in `DashboardModule`'s `websocket.open`, so there is one
+   * client set and one message sequence rather than two competing paths.
+   * `test/broadcast-event-coverage.test.ts` runs the dashboard and asserts one
+   * delivery for all thirteen, so a second registration cannot creep back in.
+   *
+   * @throws if `dashboard.enabled` is false, or if the port cannot be bound.
+   *   Both messages name the reason; neither leaves a half-built module
+   *   reachable through `this.dashboard`.
    */
   startDashboard(port?: number, host?: string): void {
-    const dashPort = port || this.config.dashboard.port
-    const dashHost = host || this.config.dashboard.host
-    this.dashboard = new DashboardModule(this)
-    this.dashboard.start(dashPort, dashHost)
+    const dashboardConfig = this.configManager.getConfig().dashboard
+    if (!dashboardConfig.enabled) {
+      throw new Error(
+        'Dashboard is disabled by configuration (`dashboard.enabled: false` in .opencode/nexus.jsonc or '
+        + '~/.config/opencode/nexus.jsonc). Set it to true — or remove the block, which defaults to enabled — '
+        + 'to start the server.',
+      )
+    }
 
-    // Wire up events for broadcasting
-    this.on('agent:spawned', (agent: any) => this.dashboard?.broadcast('agent:spawned', agent))
-    this.on('agent:terminated', (agent: any) => this.dashboard?.broadcast('agent:terminated', agent))
-    this.on('budget:alert', (data: any) => this.dashboard?.broadcast('budget:alert', data))
-    this.on('budget:exceeded', (data: any) => this.dashboard?.broadcast('budget:exceeded', data))
+    const dashPort = port || dashboardConfig.port
+    const dashHost = host || dashboardConfig.host
+    // Built into a local and published only on success. The previous
+    // `this.dashboard = new DashboardModule(this)` before `start()` left a
+    // module with a null server reachable through `this.dashboard` whenever the
+    // bind failed, so `stopDashboard()` had a phantom to act on and
+    // `dashboard.isRunning()` was answering about a server that never existed.
+    const dashboard = new DashboardModule(this)
+    dashboard.start(dashPort, dashHost)
+    this.dashboard = dashboard
   }
 
   /**
@@ -962,6 +1282,9 @@ export class NexusOrchestrator {
       spawnedAt: a.spawnedAt.toISOString(),
       tasksCompleted: a.metrics.tasksCompleted,
       tasksFailed: a.metrics.tasksFailed,
+      totalTokens: a.metrics.totalTokens,
+      averageResponseTime: a.metrics.averageResponseTime,
+      errorRate: a.metrics.errorRate,
       totalCost: a.metrics.totalCost
     }))
 
@@ -971,9 +1294,14 @@ export class NexusOrchestrator {
       role: t.requiredRole,
       priority: t.priority || 'normal',
       status: t.status,
+      dependencies: t.dependencies,
       assignedAgent: t.assignedAgent,
+      cost: t.result?.cost,
+      tokensUsed: t.result?.tokensUsed,
       result: t.result ? {
         success: t.result.success,
+        // Truncated, as before: a full task output is unbounded and this is a
+        // state snapshot, not the result archive.
         output: t.result.output?.slice(0, 500),
         error: t.result.error,
         duration: t.result.duration
@@ -985,10 +1313,148 @@ export class NexusOrchestrator {
       paused: this.paused,
       agents,
       tasks,
+      config: {
+        models: this.configManager.getResolvedModels(),
+        budget: this.budget,
+        selfHealing: this.config.selfHealing
+      },
+      sessions: this.sessionViews(),
       totalSpent: this.totalSpent,
       budgetRemaining: this.budget.maxTotalCost - this.totalSpent,
       lastUpdated: new Date().toISOString()
     }
+  }
+
+  /**
+   * Union the three session-keyed collections into one view per session. See
+   * `SessionStateView` for the case this makes visible and the scope limits it
+   * respects.
+   *
+   * Built in three passes, in ascending order of authority, so each later pass
+   * refines rather than replaces:
+   *   1. live agents            — what we own
+   *   2. pending delta ledgers  — a session still being billed after a timeout
+   *   3. abandoned spend        — a session we gave up on, and the ONLY pass
+   *                              that can set `observedUncollected`
+   *
+   * Pass 3 wins over everything, deliberately: on the abandon path
+   * `uncollected.set()` runs before the ledger's `finally` deletes it, so for a
+   * moment both describe the same session and "abandoned" is the terminal,
+   * accurate reading of the two.
+   *
+   * NOT `async`, and it makes no `ctx.session.get` call. See the note on
+   * `state` in `SessionStateView`: enriching per session would fan every
+   * throttled push out into N session reads.
+   */
+  private sessionViews(): SessionStateView[] {
+    const views = new Map<string, SessionStateView>()
+
+    for (const agent of this.agents.values()) {
+      // An agent with no session never got one (spawn not yet resolved). It is
+      // not a session row: there is no id to key it by, and inventing one
+      // would put a phantom in the list a user is meant to trust.
+      if (!agent.sessionID) continue
+      views.set(agent.sessionID, {
+        id: agent.sessionID,
+        owned: true,
+        agentId: agent.id,
+        taskId: this.taskIdForAgent(agent.id),
+        role: agent.role,
+        model: `${agent.model.provider}/${agent.model.model}`,
+        state: sessionStateOfAgent(agent.status),
+        spawnedAt: agent.spawnedAt.toISOString(),
+        lastKnownTokens: agent.metrics.totalTokens,
+        observedUncollected: 0
+      })
+    }
+
+    for (const ledger of this.deltaLedgers.values()) {
+      this.applyCollectionRecord(views, {
+        sessionID: ledger.sessionID,
+        taskId: ledger.taskId,
+        agentId: ledger.agentId,
+        model: ledger.model,
+        state: 'running',
+        lastKnownTokens: totalTokens(ledger.charged),
+        observedUncollected: 0
+      })
+    }
+
+    for (const spend of this.uncollected.values()) {
+      this.applyCollectionRecord(views, {
+        sessionID: spend.sessionID,
+        taskId: spend.taskId,
+        model: spend.model,
+        // The agent is deliberately NOT threaded through. An abandoned session
+        // reached by timeout is exactly the case where the agent has already
+        // been deleted, so keeping the id would put a plausible-looking
+        // `agentId` on a session that has no agent — the fabrication this whole
+        // view exists to remove. Resolved from `this.agents` instead, so it is
+        // null when and only when the session really is unowned.
+        state: 'abandoned',
+        lastKnownTokens: spend.lastKnownTokens,
+        observedUncollected: spend.observedUncollected
+      })
+    }
+
+    return [...views.values()]
+  }
+
+  /**
+   * Fold a timeout-collection record into the session view, creating it when the
+   * session is not already there. A created row is an ORPHAN by construction:
+   * pass 1 ran first, so the session is absent precisely because no agent owns
+   * it.
+   */
+  private applyCollectionRecord(
+    views: Map<string, SessionStateView>,
+    record: {
+      sessionID: string
+      taskId: string
+      agentId?: string
+      model: string
+      state: SessionStateView['state']
+      lastKnownTokens: number
+      observedUncollected: number
+    }
+  ): void {
+    const existing = views.get(record.sessionID)
+    // `record.agentId` is deliberately NOT used to fill a null `agentId` on an
+    // existing orphan row, and is not used to decide `owned` either: both are
+    // answered by `this.agents`, and only `this.agents` can answer them.
+    if (existing) {
+      existing.taskId = existing.taskId ?? record.taskId
+      existing.model = existing.model ?? record.model
+      // A ledger is a live collection and an `uncollected` entry is terminal, so
+      // the later pass always wins. `abandoned` is the more informative of the
+      // two and `observedUncollected` is only ever non-zero alongside it.
+      existing.state = record.state
+      existing.lastKnownTokens = record.lastKnownTokens
+      existing.observedUncollected = record.observedUncollected
+      return
+    }
+
+    const owner = record.agentId !== undefined ? this.agents.get(record.agentId) : undefined
+    views.set(record.sessionID, {
+      id: record.sessionID,
+      owned: owner !== undefined,
+      agentId: owner?.id ?? null,
+      taskId: record.taskId,
+      role: owner?.role ?? null,
+      model: record.model,
+      state: record.state,
+      spawnedAt: owner ? owner.spawnedAt.toISOString() : null,
+      lastKnownTokens: record.lastKnownTokens,
+      observedUncollected: record.observedUncollected
+    })
+  }
+
+  /** The id of the task currently assigned to `agentId`, or null. */
+  private taskIdForAgent(agentId: string): string | null {
+    for (const task of this.tasks.values()) {
+      if (task.assignedAgent === agentId) return task.id
+    }
+    return null
   }
 
   private mergeConfig(partial?: Partial<NexusConfig>): NexusConfig {
@@ -1079,8 +1545,18 @@ export class NexusOrchestrator {
     if (this.stateChangeTimer) return
     this.stateChangeTimer = setTimeout(() => {
       this.stateChangeTimer = null
-      this.onStateChange?.()
+      this.notifyStateListeners()
     }, 100) // 100ms debounce
+  }
+
+  /**
+   * Tell every state consumer that something moved: the caller's callback, and
+   * the broadcaster (which throttles). Kept as one method so the two listeners
+   * cannot be wired in an order that leaves one of them unreachable.
+   */
+  private notifyStateListeners(): void {
+    this.stateChangeListener?.()
+    this.broadcaster?.broadcastState()
   }
 
   /**
@@ -1416,6 +1892,23 @@ export class NexusOrchestrator {
         taskPrompt += `\nErrors encountered: ${transferContext.errorLog.join(', ') || 'None'}`
         taskPrompt += `\n\nPlease continue from where the previous agent left off.`
       }
+
+      // The agent is ACTIVELY WORKING from here until the `finally` below.
+      //
+      // This is the DAG `executeTask` path, and it is the primary execution
+      // path. Nothing here set a status before, so the agent sat at the
+      // `spawnAgent` value of `idle` for the whole duration of its task: the
+      // sessions table rendered a session burning tokens as `idle`, and the
+      // page's `Running` filter matched ZERO rows during a healthy run. The
+      // only prior writer of `'working'` was the `spawn` TOOL path in
+      // `index.ts` — a different, less common route in.
+      //
+      // Set immediately BEFORE the prompt, and notify, so the transition is
+      // observable by anyone holding a state view rather than appearing only
+      // when the task finally lands. The `finally` still owns the way back
+      // down, and it does not touch a terminal status.
+      agent.status = 'working'
+      this.notifyStateChange()
 
       // Send the task to the session
       await this.ctx.session.prompt({
@@ -2100,6 +2593,13 @@ export class NexusOrchestrator {
       ? priceUsageAtSettledTier(observedIncrement, pricing, known).total
       : 0
 
+    // Delete-then-set, so the entry lands at the BACK of the map's insertion
+    // order. A JS `Map` keeps a re-`set` key in its ORIGINAL position, which
+    // would leave a freshly abandoned session sitting at the front of the FIFO
+    // queue and eligible for immediate eviction. It cannot happen today — a
+    // ledger settles at most once, because the `finally` deletes it — but the
+    // one-line cost of not depending on that is zero.
+    this.uncollected.delete(ledger.sessionID)
     this.uncollected.set(ledger.sessionID, {
       sessionID: ledger.sessionID,
       taskId: ledger.taskId,
@@ -2108,6 +2608,7 @@ export class NexusOrchestrator {
       lastKnownTokens: totalTokens(known),
       observedUncollected,
     })
+    this.trimUncollected()
 
     this.emit('cost:delta', {
       taskId: ledger.taskId,
@@ -3246,14 +3747,88 @@ export class NexusOrchestrator {
     }, null, 2)
   }
 
-  /** The `uncollected` block of the cost report. See `CostReportUncollected`. */
-  private uncollectedSummary(): CostReportUncollected {
+  /**
+   * Keep `uncollected` at `MAX_UNCOLLECTED_SESSIONS`, dropping the OLDEST
+   * entries first.
+   *
+   * A `Map` iterates in insertion order, so the first key is the oldest — the
+   * same newest-wins shape `ExecutionHistory` and `PerformanceTracker` use, and
+   * the right way round here: the most recent abandonment is the one a reader is
+   * most likely to still be able to act on, because it is the one whose session
+   * is closest to having been terminated.
+   *
+   * THE PREVIOUS BEHAVIOUR WAS A LEAK THAT ALSO SHIPPED. The only `delete` was
+   * on the successful settle path, so the map grew by one entry per abandoned
+   * session for the life of the process. That was tolerable while the map was
+   * read only by `getCostReport()`. It stopped being tolerable when
+   * `sessionViews()` began iterating it on every `getState()` — which runs on
+   * every throttled socket push and every `/api/state` — so the leak began
+   * inflating every payload pushed to every client, for as long as the process
+   * lived. Bounded now.
+   *
+   * Eviction is not free, and `uncollectedEvicted` is the receipt: the dropped
+   * session disappears from `entries` and from `getState().sessions[]`, so the
+   * per-session detail is genuinely lost, while the sums are carried forward so
+   * the MAGNITUDE of what is missing is never lost with it.
+   */
+  private trimUncollected(): void {
+    while (this.uncollected.size > MAX_UNCOLLECTED_SESSIONS) {
+      const oldest = this.uncollected.keys().next()
+      // `size > cap >= 1` guarantees an entry exists, so this branch is
+      // unreachable — stated rather than asserted, because a bare
+      // `as UncollectedSpend` on an unchecked `.value` would be a lie the
+      // compiler could not catch.
+      if (oldest.done) return
+      const dropped = this.uncollected.get(oldest.value)
+      if (dropped) {
+        this.uncollectedEvicted.sessions += 1
+        this.uncollectedEvicted.lastKnownTokens += dropped.lastKnownTokens
+        this.uncollectedEvicted.observedUncollected += dropped.observedUncollected
+      }
+      this.uncollected.delete(oldest.value)
+    }
+  }
+
+  /**
+   * The `uncollected` block of the cost report. See `CostReportUncollected` for
+   * the figures and `UncollectedEviction` for `evicted`.
+   *
+   * THE TWO BLOCKS ARE NOT SUMMED, deliberately, and the reason is that
+   * `observedUncollected` must keep meaning one thing. The surviving totals are
+   * over surviving entries; adding `evicted.observedUncollected` into them
+   * would change what the existing field asserts — a reader of
+   * `uncollected.observedUncollected` has been promised the sum over the entries
+   * it can see, and quietly widening it to cover entries it cannot see would
+   * break that promise for anyone diffing two reports. So the two are reported
+   * side by side and the arithmetic is left to the reader, who can add a
+   * lower bound to a lower bound and still get a lower bound.
+   *
+   * The direction of both is unchanged by the cap: each is a LOWER BOUND on
+   * what was left unbilled, and the evicted block is one too. What the cap
+   * changes is only whether the money is itemised, not whether it is counted.
+   */
+  private uncollectedSummary(): UncollectedSummary {
     const all = [...this.uncollected.values()]
     return {
       sessions: all.length,
       lastKnownTokens: all.reduce((sum, u) => sum + u.lastKnownTokens, 0),
       observedUncollected: all.reduce((sum, u) => sum + u.observedUncollected, 0),
       taskIds: all.map(u => u.taskId),
+      // The identity `taskIds` throws away. Reporting the session id is what
+      // makes this actionable: "we are under-billing by at least $X" names no
+      // session, and a task id on its own does not survive the agent that was
+      // terminated to produce it.
+      entries: all.map(u => ({
+        sessionID: u.sessionID,
+        taskId: u.taskId,
+        agentId: u.agentId,
+        model: u.model,
+        lastKnownTokens: u.lastKnownTokens,
+        observedUncollected: u.observedUncollected,
+      })),
+      // Always present, even at zero, so a consumer can tell "nothing was
+      // dropped" from "this build does not report drops" without probing.
+      evicted: { ...this.uncollectedEvicted },
     }
   }
 
@@ -3313,8 +3888,17 @@ export class NexusOrchestrator {
     })
     this.agents.clear()
     this.running = false
+    // Emitted BEFORE the broadcaster is destroyed, so a connected client
+    // actually receives the shutdown rather than having the socket closed
+    // under it. This final state push is synchronous and undelayed for that
+    // reason: `broadcastState()` is throttled onto a timer, and destroying the
+    // broadcaster on the next line would clear that timer and drop the last
+    // snapshot. `notifyStateListeners()` still runs the caller's own callback —
+    // only the broadcaster's copy of the state is skipped.
     this.emit('orchestrator:shutdown', {})
-    this.onStateChange?.()
+    this.stateChangeListener?.()
+    this.broadcaster?.destroy()
+    this.broadcaster = null
   }
 
   // === Helpers ===
@@ -3396,9 +3980,35 @@ export class NexusOrchestrator {
     }
   }
 
+  /**
+   * Dispatch one event to every subscriber, ISOLATING each handler's failures.
+   *
+   * This is a fan-out to code nexus does not own: plugin listeners, and — since
+   * the state broadcaster subscribed to all thirteen events — a
+   * `JSON.stringify` of every payload leaving the orchestrator. That widened
+   * the blast radius of a throw from "the rest of this event's listeners" to
+   * "the rest of this event's listeners, once per event nexus emits", and
+   * `forEach` gives a throw no way to stop at the offender: it unwinds the
+   * whole loop.
+   *
+   * So each handler gets its own `try`. One bad subscriber now costs exactly
+   * one subscriber's delivery, and the throw is LOGGED rather than swallowed —
+   * an isolation boundary that says nothing is worse than no boundary at all,
+   * because it makes the failure invisible instead of merely contained.
+   *
+   * Note the ordering consequence, which is deliberate: handlers still run in
+   * registration order, and a throwing handler does not reorder or skip the
+   * ones after it. Delivery is not transactional and was never claimed to be.
+   */
   private emit(event: string, data: unknown): void {
     const handlers = this.eventHandlers.get(event) || []
-    handlers.forEach(handler => handler(data))
+    handlers.forEach((handler) => {
+      try {
+        handler(data)
+      } catch (error) {
+        console.error(`[nexus] event handler for "${event}" threw; other listeners were still notified:`, error)
+      }
+    })
   }
 
   // === Command Handling ===
