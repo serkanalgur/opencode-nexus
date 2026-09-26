@@ -5,6 +5,7 @@ import { TEMPLATES, instantiateTemplate, listTemplates } from "./templates"
 import { GoalManager } from "./goal"
 import { TeamManager } from "./team"
 import { AstGrep } from "./astgrep"
+import { describeDashboardStart, startDashboardServer } from "./dashboard"
 import { writeFileSync, readFileSync, mkdirSync, existsSync, statSync } from "node:fs"
 import { createHash } from "node:crypto"
 import { join, resolve, basename, dirname } from "node:path"
@@ -480,36 +481,21 @@ export async function runNotificationsTest(orchestrator: {
  *
  * The failure text is the important half. It must not contain a URL, and it
  * must say no browser was opened — this tool does not open one, and the TUI's
- * `nexus.web` command is what does. A "started at http://…" line after a failed
- * bind is the exact false confirmation this path is written to be unable to
- * give.
+ * `/nexus-dashboard` command is what does, and only after confirming the
+ * listen. A "started at http://…" line after a failed bind is the exact false
+ * confirmation this path is written to be unable to give.
+ *
+ * The work itself is `startDashboardServer()` in `src/dashboard.ts`, shared
+ * with `handleCommand("/nexus dashboard")`, because a caller that started the
+ * server one way and reported it another would be the bug this file's wording
+ * exists to prevent.
  */
 export function runDashboardStart(
   orchestrator: NexusOrchestrator,
   port?: number,
   host?: string
 ): string {
-  try {
-    orchestrator.startDashboard(port, host)
-  } catch (error: unknown) {
-    const detail = error instanceof Error ? error.message : String(error)
-    return `Dashboard NOT started: ${detail}\n`
-      + `No server is listening and no browser was opened. `
-      + `If the port is in use, either stop whatever holds it or pass a different \`port\`. `
-      + `Call this tool again once the port is free — the dashboard does not retry on its own.`
-  }
-
-  // Read the bound address back off the merged config rather than echoing the
-  // arguments: the arguments are optional, and the answer that matters is the
-  // one the server actually bound to.
-  const dashboardConfig = orchestrator.configManager.getConfig().dashboard
-  const boundHost = host || dashboardConfig.host
-  const boundPort = port || dashboardConfig.port
-  return `Dashboard started at http://${boundHost}:${boundPort}\n`
-    + `Open that exact URL in a browser. The page connects to the same host and port for its live `
-    + `state over WebSocket (ws://${boundHost}:${boundPort}/ws/events), so it works only while this `
-    + `server runs. The TUI's \`/nexus-web\` command opens the browser once this tool has succeeded.\n`
-    + `Call \`nexus.dashboard.stop\` to shut it down.`
+  return describeDashboardStart(startDashboardServer(orchestrator, port, host))
 }
 
 /**
@@ -2356,12 +2342,51 @@ You are a technical writer who creates documentation that developers actually wa
     })
 
     // Register session hook for /nexus commands
+    //
+    // CAN THIS HOOK SUPPRESS THE PROMPT? No. Checked against
+    // `@opencode/plugin` 2.0.12: `Hooks<Spec>` types the callback as
+    // `(input) => Promise<void> | void`, so there is no return channel, and
+    // `SessionPrompt` — the spec entry for `"prompt"` — carries only
+    // `sessionID`, `messageID`, `prompt`, `metadata?` and `delivery`. The two
+    // hooks that CAN skip a model request, `compaction` and `title`, are the
+    // two that have a `result?` field documented as "skip the model request";
+    // `prompt` has no equivalent. So a `/nexus …` prompt still reaches the
+    // model no matter what this hook does.
+    //
+    // Given that, the least confusing thing available is to REPLACE the text
+    // with the command's actual result. The alternative leaves the model
+    // holding a bare `/nexus dashboard 4747` with the answer in metadata it
+    // has no reason to read, and the obvious thing to do with that is to try
+    // to start a dashboard — which, for a command whose job is starting one,
+    // means asking the agent to do the thing that just happened.
     await ctx.session.hook("prompt", (event) => {
-      if (event.prompt.text.startsWith("/nexus")) {
-        const result = orchestrator.handleCommand(event.prompt.text)
-        // The result goes to the session as tool output context
-        event.metadata = { ...event.metadata, nexusResult: result }
+      if (!event.prompt.text.startsWith("/nexus")) return
+
+      let result: string
+      try {
+        result = orchestrator.handleCommand(event.prompt.text)
+      } catch (error: unknown) {
+        // A hook that throws takes the prompt down with it. `/nexus dashboard`
+        // starts a server, and a bind failure is an ordinary outcome it
+        // reports rather than throws — but nothing above it is a promise, so
+        // the failure is turned into text here instead of being allowed to
+        // escape into the session.
+        const detail = error instanceof Error ? error.message : String(error)
+        result = `The \`${event.prompt.text.trim()}\` command failed: ${detail}\nNothing was changed.`
       }
+
+      // The result goes to the session as tool output context…
+      event.metadata = { ...event.metadata, nexusResult: result }
+      // …and as the prompt text, because that is the only part of this hook's
+      // input the model actually reads. The original command is kept verbatim
+      // in the metadata, so nothing about what was asked is lost.
+      event.prompt.text = [
+        `The user ran \`${event.prompt.text.trim()}\`. The Nexus plugin already handled it and the `,
+        `result is below. Do not run the command again and do not try to start, stop or open `,
+        `anything yourself — report the result above in one or two sentences.`,
+        "",
+        result,
+      ].join("\n")
     })
 
     // Watch the two config files the config manager reads and reload on change.

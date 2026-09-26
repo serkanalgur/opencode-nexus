@@ -9,7 +9,7 @@ import type {
 } from "./types"
 import { NexusConfigManager, type NexusConfigLoadInfo, type NexusConfigReloadTrigger } from "./config"
 import { StateBroadcaster } from "./broadcast"
-import { DashboardModule } from "./dashboard"
+import { DashboardModule, describeDashboardStart, parseDashboardTarget, startDashboardServer } from "./dashboard"
 import { detectCycles } from "./dag"
 import { MessageStore, type MessageStoreConfig } from "./message-store"
 import { PersistentMemoryStore, type MemoryStoreConfig } from "./memory-store"
@@ -4088,6 +4088,22 @@ export class NexusOrchestrator {
 
   // === Command Handling ===
 
+  /**
+   * Handle a `/nexus …` command. Runs in the SERVER process — the one that owns
+   * this orchestrator — which is the only reason `/nexus dashboard` can start
+   * anything at all: see the note in `src/tui.tsx` on why the TUI cannot.
+   *
+   * `dashboard` is a family, and the bare form is the useful one:
+   *
+   * - `/nexus dashboard [port] [host]` — start the server, or report what
+   *   happened. Reached from the TUI's `/nexus-dashboard`, which submits this
+   *   text and then opens the browser only once it has confirmed the listen.
+   * - `/nexus dashboard stop` — stop it, honestly, if there was one.
+   * - `/nexus dashboard state` — the state dump this command used to be. It
+   *   was a JSON dump of `getState()` under a name that read like a server, and
+   *   it is kept under an explicit name rather than dropped: it is still the
+   *   only way to get orchestrator state as JSON from a prompt.
+   */
   handleCommand(text: string): string {
     const parts = text.split(' ')
     const command = parts[1]
@@ -4106,9 +4122,44 @@ export class NexusOrchestrator {
         this.resume()
         return "Orchestrator resumed"
       case 'dashboard':
-        return JSON.stringify(this.getState(), null, 2)
+        return this.handleDashboardCommand(parts.slice(2).join(' '))
       default:
-        return 'Unknown command. Available: status, agents, costs, pause, resume, dashboard'
+        return 'Unknown command. Available: status, agents, costs, pause, resume, dashboard [port] [host], dashboard stop, dashboard state'
     }
+  }
+
+  /**
+   * The `dashboard` branch of `handleCommand()`.
+   *
+   * Split out because a `switch` case that parses arguments, can start a
+   * server, can stop one and can serialise the orchestrator is four commands
+   * wearing one name — and the reason this is a method rather than three lines
+   * inline is that it is a public-ish surface: `docs/COMPATIBILITY.md` names
+   * the subcommands, and a test pins each of them.
+   */
+  private handleDashboardCommand(argument: string): string {
+    const sub = argument.trim().split(/\s+/).filter(Boolean)[0]?.toLowerCase()
+
+    if (sub === "state") {
+      return JSON.stringify(this.getState(), null, 2)
+    }
+
+    if (sub === "stop") {
+      const wasRunning = this.dashboard?.isRunning() ?? false
+      this.stopDashboard()
+      return wasRunning
+        ? "Dashboard stopped. The orchestrator, its agents and its sessions were not affected."
+        : "No dashboard was running, so nothing was stopped. The orchestrator, its agents and its "
+          + "sessions were not affected."
+    }
+
+    const fallback = this.configManager.getConfig().dashboard
+    const parsed = parseDashboardTarget(argument, { port: fallback.port, host: fallback.host })
+    if ("error" in parsed) {
+      return `Dashboard NOT started: ${parsed.error}\nNo server was started and no browser was opened.`
+    }
+    return describeDashboardStart(
+      startDashboardServer(this, parsed.target.port, parsed.target.host),
+    )
   }
 }
