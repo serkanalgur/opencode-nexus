@@ -1,6 +1,13 @@
 import { Plugin } from "@opencode/plugin"
 import { NexusOrchestrator, lastAssistantText, type NexusModelCost, type SpawnedAgent } from "./orchestrator"
-import { PRESETS, nexusProjectConfigPath, nexusGlobalConfigPath, type NexusConfigReloadTrigger } from "./config"
+import { PRESETS, nexusProjectConfigPath, nexusGlobalConfigPath, type NexusConfigReloadTrigger, type NexusGitFlowConfig } from "./config"
+import { CONVENTIONAL_COMMIT_TYPES, type GitState } from "./git-flow"
+import {
+  describeListResult,
+  describeSearchResult,
+  describeSetResult,
+} from "./memory-recall"
+import type { MemoryEntry, MemoryScope } from "./types"
 import { TEMPLATES, instantiateTemplate, listTemplates } from "./templates"
 import { GoalManager } from "./goal"
 import { TeamManager } from "./team"
@@ -719,9 +726,78 @@ function clearPresetOverride(orchestrator: NexusOrchestrator): PresetToolResult 
   }
 }
 
+/**
+ * The git convention, as markdown appended to every generated agent file.
+ *
+ * WHY IT IS A FUNCTION OF THE CONFIG BLOCK AND NOT A CONSTANT: each of the four
+ * keys has to be able to switch off the sentence it names, or the key would be
+ * a knob that reads as a control and is inert — the defect this repository has
+ * shipped twice (`dashboard.enabled`, `notifications.enabled`). Every clause
+ * below is therefore reachable from exactly one key, and a clause whose key is
+ * off is not emitted at all.
+ *
+ * The wording is DELIBERATELY about the agent's own conduct. It does not say
+ * "nexus will reject", because nothing here rejects anything: the check reports
+ * and the user decides. An agent told it will be blocked starts gaming the
+ * check; an agent told what is expected simply does the work.
+ */
+export function buildGitFlowConventionSection(
+  config: NexusGitFlowConfig,
+  state: GitState
+): string {
+  const lines: string[] = [
+    '## Git Convention',
+    '',
+    `This project is a git work tree${state.branch ? `, currently on \`${state.branch}\`` : ''}. Follow the conventions below unless the user tells you otherwise.`,
+    ''
+  ]
+
+  if (config.requireBranch) {
+    lines.push(
+      '- **Work on a branch.** Do not commit directly to the default branch. If the user asks for a change, create or use a feature branch for it.',
+      '- Never create a branch, switch branches, or run any git command that rewrites history unless the user asked for it in this conversation.',
+      ''
+    )
+  }
+
+  if (config.conventionalCommits) {
+    lines.push(
+      '- **Conventional commit subjects.** When you are asked to commit, the subject line is `type(scope): description`, where `type` is one of '
+        + CONVENTIONAL_COMMIT_TYPES.join(', ')
+        + '. A `!` before the colon marks a breaking change. Example: `feat(parser): support nested arrays`.',
+      '- Keep the subject under ~72 characters and in the imperative mood ("add", not "added").',
+      ''
+    )
+  }
+
+  if (config.prBeforeMerge) {
+    lines.push(
+      '- **Open a pull request; do not merge.** When work is ready for review, push the branch and open a PR rather than merging it into the branch you are on.',
+      ''
+    )
+  }
+
+  lines.push(
+    '- **Never commit, push, or merge on your own initiative.** Report the change you made and let the user decide. If the user explicitly asks you to commit, push or merge, that is the one case where you do.',
+    '',
+    'You can check where things stand with `nexus.git.check`. It only reports — it never changes anything and never refuses.',
+    '',
+    'The `gitFlow` block in `.opencode/nexus.jsonc` controls which of these apply. Setting `gitFlow.enabled: false` removes this section entirely on the next plugin start.'
+  )
+
+  return lines.join('\n')
+}
+
 export default Plugin.define({
   id: "nexus",
   async setup(ctx) {
+    // Held here rather than written here: the git convention section appended to
+    // each file depends on the RESOLVED config and the detected git state, and
+    // neither exists until the orchestrator has loaded `nexus.jsonc` and run
+    // detection. The write happens below, after `initialize()`; the content does
+    // not move with it.
+    const subagents: Record<string, string> = {}
+
     // Auto-create nexus-orchestrator agent if it doesn't exist
     try {
       const agentDir = join(homedir(), '.config', 'opencode', 'agents')
@@ -732,7 +808,7 @@ export default Plugin.define({
       writeFileSync(orchestratorFile, NEXUS_AGENT_CONTENT, 'utf-8')
 
       // Create subagent files for Nexus roles — always update to latest version
-      const subagents: Record<string, string> = {
+      Object.assign(subagents, {
         'nexus-architect.md': `---
 description: Nexus Architect agent — designs system architecture with cost-aware model selection
 mode: subagent
@@ -1022,12 +1098,7 @@ You are a technical writer who creates documentation that developers actually wa
 - Complex algorithms get a brief explanation of the approach
 - TODO/FIXME/HACK comments are tracked and explained
 - Changelog follows semantic versioning with clear descriptions`
-      }
-
-      for (const [filename, content] of Object.entries(subagents)) {
-        const filepath = join(agentDir, filename)
-        writeFileSync(filepath, content, 'utf-8')
-      }
+      })
     } catch {
       // Agent creation is best-effort
     }
@@ -1066,6 +1137,53 @@ You are a technical writer who creates documentation that developers actually wa
 
     const orchestrator = new NexusOrchestrator()
     const goalManager = new GoalManager()
+
+    // Write the subagent files, now that `gitFlow` has resolved against the
+    // loaded config and the checkout has been inspected.
+    //
+    // These files are rewritten on EVERY plugin load (documented in 2.9.0,
+    // because a hand-edit is destroyed at the next start), which is what makes
+    // this the durable place for a convention: there is nowhere else in the
+    // system a convention could live and survive a restart.
+    //
+    // THE FRICTION THIS ACCEPTS, stated plainly: these files live in the user's
+    // GLOBAL `~/.config/opencode/agents` and are therefore shared by every
+    // project they run nexus in. Injecting repo-specific guidance into a shared
+    // file is not project-scoped, and two projects open at once will overwrite
+    // each other's copy. That is a real limitation, not a hypothetical.
+    //
+    // The choice is to CONDITION on the detected state rather than always
+    // inject. Outside a work tree — and on a detached HEAD, which cannot hold a
+    // branch at all — the files come out byte-identical to what 2.9.0 wrote, so
+    // a user with no repository sees no change and the section never asserts a
+    // repo-specific fact it cannot see. The costs are stated rather than
+    // hidden: the convention is ABSENT in a repository whose state detection
+    // failed, and two projects disagree about the shared file's contents.
+    // Conditioning was chosen over an unconditional section because telling an
+    // agent to work on a branch in a directory that has no branches is the kind
+    // of confidently wrong instruction that costs a user an afternoon, and a
+    // generic always-on section would have to be vague enough to be true in both
+    // cases — which would make it too weak to be a convention at all.
+    try {
+      const gitState = orchestrator.getGitState()
+      const gitFlowResolved = orchestrator.resolveGitFlow()
+      const gitFlowSection = gitFlowResolved.active && gitState.isRepo && !gitState.detached
+        ? buildGitFlowConventionSection(gitFlowResolved.config, gitState)
+        : null
+
+      const agentDir = join(homedir(), '.config', 'opencode', 'agents')
+      for (const [filename, content] of Object.entries(subagents)) {
+        // Appended, never spliced into the role prose: a convention that
+        // rewrote the body would collide with the next release's version of that
+        // body, and the section is by construction independent of which role
+        // reads it.
+        writeFileSync(join(agentDir, filename), gitFlowSection ? `${content}\n\n${gitFlowSection}` : content, 'utf-8')
+      }
+    } catch {
+      // Best-effort, exactly as the primary agent file is. A convention layer
+      // that can prevent the agent files from being written is a convention
+      // layer that has broken something else to add guidance.
+    }
 
     // Initialize orchestrator with OpenCode context for real session API access
     await orchestrator.initialize(ctx, () => {
@@ -1121,7 +1239,16 @@ You are a technical writer who creates documentation that developers actually wa
       if (agent.spawnPath !== 'subagent-tool') {
         await ctx.session.prompt({
           sessionID: agent.sessionID!,
-          text: opts.task
+          // `agent.deliveredText`, NOT `opts.task`. This fallback re-delivers
+          // the task itself, and `spawnAgent` composes any recollection block
+          // into the text it delivers on the subagent-tool path. Sending
+          // `opts.task` here sent the caller's original string and dropped the
+          // block, so the degraded spawn — already the one flagged as
+          // `lastDegradedSpawn` — was also the one spawn that recalled nothing.
+          //
+          // Falls back to `opts.task` so a caller that built its own agent
+          // object cannot make this send `undefined`.
+          text: agent.deliveredText ?? opts.task
         })
       }
 
@@ -1765,6 +1892,168 @@ You are a technical writer who creates documentation that developers actually wa
         }
       })
 
+      // ── Memory ───────────────────────────────────────────────────────────
+      //
+      // Three tools, and the split between them is the point: `set` and
+      // `search`/`list` are REACTIVE (an agent has to remember to call them,
+      // and agents forget), while the recollection block injected at spawn is
+      // PROACTIVE and is what makes a written note actually get used. These
+      // tools are also the day-one value: the store ships EMPTY, so the
+      // injection half recalls nothing for anyone until something is written
+      // here.
+      //
+      // `scope` on `set` is a THREE-value enum, not the full `MemoryScope`,
+      // and the two excluded values are excluded on purpose:
+      //   - `session` is the orchestrator's own escalation-transfer channel.
+      //     Letting an agent write there would let it fabricate a context blob
+      //     that reads as one the orchestrator produced.
+      //   - `learning` is an unused string in the table that shares a name with
+      //     a different mechanism (`src/learning.ts`) which is written
+      //     AUTOMATICALLY on every failure. Never writable, never injected.
+
+      editor.add({
+        name: "memory.set",
+        description: "Write a durable note. Nothing is ever written automatically — this is the only way in, and nothing is injected into a task's prompt unless the key is `file:<path>` naming a file that task is scoped to. Appends, so correcting a note writes a new version rather than replacing the old. Scope is project (durable) or temp (scratch); session and learning are not writable.",
+        input: {
+          type: "object",
+          properties: {
+            key: {
+              type: "string",
+              description: "The note's key. Use `file:<path>` (e.g. `file:src/memory-store.ts`) to have it injected automatically into tasks touching that file. Any other key is reachable only by search."
+            },
+            value: { description: "The note. A string, or any JSON value." },
+            scope: {
+              type: "string",
+              enum: ["project", "temp"],
+              description: "project = durable and never evicted by count. temp = scratch, FIFO-evicted. Default: project."
+            },
+            author: {
+              type: "string",
+              description: "Who is writing this. Required, and SELF-REPORTED: nothing verifies it, and it is shown to readers as a claim rather than a record."
+            },
+            confidence: {
+              type: "number",
+              description: "How sure you are, 0–1. Optional. OMIT IT if you are not sure — an entry that records no confidence is not a low-confidence entry, and inventing a number makes your uncertainty invisible to whoever reads it later."
+            },
+            tags: { type: "array", items: { type: "string" }, description: "Optional labels." },
+            ttl: { type: "number", description: "Optional expiry in ms. Off by default, and for `project` notes that is deliberate: nothing revalidates or rewrites a note, so an expiry would delete it permanently." }
+          },
+          required: ["key", "value", "author"],
+          additionalProperties: false
+        },
+        options: { codemode: true },
+        execute: async (input: unknown) => {
+          const { key, value, scope, author, confidence, tags, ttl } = input as {
+            key: string; value: unknown; scope?: 'project' | 'temp'; author: string
+            confidence?: number; tags?: string[]; ttl?: number
+          }
+          const targetScope: MemoryScope = scope ?? 'project'
+          try {
+            const entry = orchestrator.memoryStore.set({
+              key,
+              value,
+              scope: targetScope,
+              author,
+              confidence: confidence ?? null,
+              tags: tags ?? [],
+              ...(ttl ? { ttl } : {})
+            })
+            orchestrator.notifyMemoryWritten(entry)
+            // Read AFTER the write, so the count is the number that exists now
+            // and includes the entry just written.
+            const versionsUnderKey = orchestrator.memoryStore.getByKey(key, targetScope).length
+            const eviction = orchestrator.memoryStore.takeEviction()
+            return {
+              content: describeSetResult({
+                entry,
+                versionsUnderKey,
+                evicted: eviction ? { scope: eviction.scope, count: eviction.count } : null,
+              })
+            }
+          } catch (err) {
+            // Reported as text, for the same reason `git.check` reports rather
+            // than throws: a tool result the agent can read and relay beats an
+            // exception it has to interpret. And it says what did NOT happen, so
+            // a failed write is never read as a successful one.
+            return { content: `memory.set did not write anything: ${err instanceof Error ? err.message : String(err)}. The store is unchanged.` }
+          }
+        }
+      })
+
+      editor.add({
+        name: "memory.search",
+        description: "Search notes by substring, over keys AND values. Unranked, so a result count is hits not relevance, and nothing is verified against the code. Project scope only unless you ask for internal session context.",
+        input: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "Substring to look for. A path or an identifier matches better than a description." },
+            includeSession: {
+              type: "boolean",
+              description: "Also return internal escalation context — snapshots a failed agent wrote when it exhausted its retries. Those are labelled, never presented as notes, and are never injected into a task. For debugging escalations only."
+            }
+          },
+          required: ["query"],
+          additionalProperties: false
+        },
+        options: { codemode: true },
+        execute: async (input: unknown) => {
+          const { query, includeSession } = input as { query: string; includeSession?: boolean }
+          // D1, enforced here rather than inside `searchMemory` so the allowlist
+          // is visible at the surface that could get it wrong: project by
+          // default, project + session only on an explicit opt-in, and never
+          // `learning` — which is not a note store at all but the name of a
+          // different, automatically-written mechanism.
+          const scopes: MemoryScope[] = includeSession ? ['project', 'session'] : ['project']
+          const results = orchestrator.searchMemory(query, scopes)
+          const stats = orchestrator.memoryStore.getStats()
+          return {
+            content: describeSearchResult({
+              query,
+              results,
+              storeTotal: stats.total,
+              dbPath: orchestrator.memoryStore.path,
+              includeSession: includeSession === true,
+            })
+          }
+        }
+      })
+
+      editor.add({
+        name: "memory.list",
+        description: "List notes in a scope, newest version of each key first, with the entry counts by scope and anything evicted for exceeding a per-scope cap. Nothing here is verified against the code.",
+        input: {
+          type: "object",
+          properties: {
+            scope: {
+              type: "string",
+              enum: ["project", "session", "temp"],
+              description: "Which scope to list. Default: project."
+            },
+            limit: { type: "number", description: "Maximum notes to show. Default 50." }
+          },
+          additionalProperties: false
+        },
+        options: { codemode: true },
+        execute: async (input: unknown) => {
+          const { scope, limit } = input as { scope?: MemoryScope; limit?: number }
+          const targetScope: MemoryScope = scope ?? 'project'
+          const cappedAt = Number.isFinite(limit) && (limit as number) > 0 ? Math.floor(limit as number) : 50
+          const { entries, versionsSuperseded } = orchestrator.listMemory(targetScope, cappedAt)
+          const stats = orchestrator.memoryStore.getStats()
+          return {
+            content: describeListResult({
+              scope: targetScope,
+              entries,
+              versionsSuperseded,
+              byScope: stats.byScope,
+              evicted: stats.evicted,
+              truncatedAt: cappedAt,
+              dbPath: orchestrator.memoryStore.path,
+            })
+          }
+        }
+      })
+
       editor.add({
         name: "roles.list",
         description: "List all custom agent roles",
@@ -1864,6 +2153,79 @@ You are a technical writer who creates documentation that developers actually wa
           const { repoRoot } = input as { repoRoot?: string }
           orchestrator.enableWorktrees(repoRoot || process.cwd())
           return { content: "Git worktree isolation enabled." }
+        }
+      })
+
+      // Reports, never blocks. The description says so in the tool's own
+      // listing, because the single most important property of this tool is the
+      // one a model cannot infer from its name: it does not change the
+      // repository, and it does not refuse.
+      editor.add({
+        name: "git.check",
+        description: "Report on the git convention for this repository: branch, conventional commit subjects, and whether the branch is published. Read-only — it runs no git commit, push or merge, and never refuses. With `decision`, record this repository's one-time answer instead.",
+        input: {
+          type: "object",
+          properties: {
+            decision: {
+              type: "string",
+              enum: ["on", "off"],
+              description: "Record the answer for this repository and stop asking. Omit to just report."
+            },
+            cwd: { type: "string", description: "Directory to inspect. Defaults to the working directory." }
+          },
+          additionalProperties: false
+        },
+        options: { codemode: true },
+        execute: async (input: unknown) => {
+          const { decision, cwd } = input as { decision?: 'on' | 'off'; cwd?: string }
+          try {
+            if (decision) {
+              const recorded = orchestrator.recordGitFlowDecision(decision, cwd)
+              return {
+                content: [
+                  `Recorded the git convention decision for this repository: ${recorded}.`,
+                  `It is keyed by the resolved repository root and stored in ~/.config/opencode/nexus-gitflow.json,`,
+                  `which is nexus's own global config directory — nothing was written to your repository and no git command was run.`,
+                  `This will not be asked again for this repository.`,
+                  `Current effective state: ${orchestrator.resolveGitFlow(cwd).reason}`
+                ].join(' ')
+              }
+            }
+            const report = orchestrator.checkGitFlow(cwd)
+            // STATUS-SHAPED, and the ask travels through here. A subagent is
+            // driven by tool calls and has no channel to a human, so the only
+            // way to ask is to TELL the agent it must ask: the instruction is
+            // in the tool result the agent is already reading, and the agent
+            // carries it to the user in its own next message. It is emitted only
+            // when the answer is genuinely undecided, so a second run in a repo
+            // that has already answered stays silent.
+            const lines = [
+              report.summary,
+              '',
+              ...report.commits.map(c => `  ${c.conventional ? '✅' : '❌'} ${c.sha.slice(0, 8)} ${c.subject}`),
+              report.commits.length === 0 ? '  (no commit subjects were read)' : '',
+              '',
+              `Scope: commits on this branch since \`${report.scope.base}\` (${report.scope.baseSource}).`,
+              `This check ${report.didNot.join('; ')}.`
+            ].filter(Boolean)
+            if (report.decision === null) {
+              lines.push('',
+                'ACTION FOR YOU, NOT FOR A TOOL: the git convention is enabled by default and no answer has been recorded for this repository.',
+                'Ask the user ONCE, in your own reply, and do not proceed past the question without an answer:',
+                '  1. whether nexus should follow the branch / conventional-commit / PR path in this repository, or stay out of its git entirely;',
+                '  2. then call this tool again with decision: "on" or decision: "off" to record the answer.',
+                'Report what you found either way — this tool never refuses and never writes to the repository.'
+              )
+            }
+            return { content: lines.join('\n') }
+          } catch (err) {
+            // The one failure this tool can surface is a decision recorded
+            // outside a repository, which is a genuine "there is nothing to
+            // record" rather than a crash. Reported as text, because a tool
+            // result the agent can read and relay beats an exception it has to
+            // interpret.
+            return { content: `git.check could not complete: ${err instanceof Error ? err.message : String(err)}. No git command was run and nothing was written.` }
+          }
         }
       })
 

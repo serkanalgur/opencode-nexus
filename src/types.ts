@@ -287,12 +287,72 @@ export interface MemoryEntry {
   scope: MemoryScope
   author: string
   timestamp: Date
-  confidence: number
+  /**
+   * How sure the WRITER was, on a 0–1 scale. `null` when they did not say.
+   *
+   * Nullable because a default is a guess presented as a fact. An earlier
+   * version defaulted this to `1.0` and had `setMemory` hardcode it, so every
+   * entry in the store carried a confidence nobody had expressed — and the
+   * retrieval path rendered it, which made an unexpressed confidence
+   * indistinguishable from a considered one. A reader discounting a doubtful
+   * note cannot discount a `1.0` that means only "nobody said otherwise".
+   *
+   * `null` renders as "not stated" and is NOT a low value. An entry that
+   * declined to state a confidence is not a claim of uncertainty; it is an
+   * absence, and the two must not be conflated.
+   */
+  confidence: number | null
   tags: string[]
   ttl?: number
 }
 
+/**
+ * The scopes `MemoryScope` admits, split by whether they may be injected into
+ * an agent's prompt automatically.
+ *
+ * `INJECTABLE_SCOPES` is the whole automatic-retrieval allowlist, and it is a
+ * one-element list. Two independent barriers keep `session` out, and both are
+ * load-bearing:
+ *
+ * 1. KEY CONVENTION. An auto-injected key is `file:<path>` or a `text:` slug
+ *    (see `src/memory-recall.ts`). The only `session` writer in the codebase
+ *    keys `context:<agentId>`, which cannot produce either shape.
+ * 2. THIS ALLOWLIST. Barrier 1 alone is not enough, because a `session` entry
+ *    is a CARRIER: `collectContext` copies the failing agent's own existing
+ *    memory entries into the blob it stores, so one escalation's blob can
+ *    contain another agent's content. Only never reading the row stops that.
+ *
+ * `learning` is excluded for a different reason and it is a trap rather than a
+ * policy: `'learning'` as a `MemoryScope` is an unused string in this table,
+ * and it shares a name with a DIFFERENT mechanism — `src/learning.ts` — which
+ * is an in-memory `Map`, is never persisted, and is written automatically on
+ * every task failure. Wiring automatic injection to that scope would either do
+ * nothing or smuggle automatic writing in through the back door, which is the
+ * one thing this feature is built not to do.
+ */
+export const INJECTABLE_SCOPES = ['project'] as const satisfies readonly MemoryScope[]
+
 export type MemoryScope = 'project' | 'session' | 'learning' | 'temp'
+
+/**
+ * What one spawn injected into its prompt, and how big it was.
+ *
+ * Exists so the cost of automatic retrieval is a NUMBER rather than an
+ * inference. The injected block is prepended to the task prompt and
+ * `readSessionTokens` counts it in `input`, so the bill is accurate — but
+ * nothing in the cost report says how much of a task's input was a note a human
+ * wrote once, and an uncapped block would be an uncapped bill. `characters` is
+ * the figure that makes a prompt-weight regression visible.
+ */
+export interface LastRecall {
+  agentId: string
+  taskId: string
+  taskName: string
+  /** Notes actually rendered. Never more than the block's cap. */
+  notes: number
+  /** Length of the rendered block in characters; 0 when nothing was injected. */
+  characters: number
+}
 
 export interface ExecutionRequest {
   tasks: Task[]
@@ -376,6 +436,31 @@ export interface SpawnConfig {
 }
 
 export interface NexusConfig {
+  /**
+   * There is deliberately NO `memory` block here, and its absence is the
+   * decision rather than an oversight.
+   *
+   * This interface used to carry `memory: { enabled, storage,
+   * maxEntriesPerScope, syncInterval }`. Nothing read any of it: not the
+   * orchestrator, not the store, not the config file parser. `enabled` was
+   * never a gate on anything — the store was unreachable from a tool because no
+   * tool existed, not because a switch said so — and `maxEntriesPerScope` was
+   * written into the defaults literal at `orchestrator.ts` and read by no
+   * consumer. A config block whose fields are inert is worse than no block,
+   * because a user who sets `memory.enabled: false` believes they have turned
+   * something off, and the only evidence they have is that it did not work.
+   *
+   * REMOVED rather than wired, because with no automatic writing an expiry
+   * would delete a note permanently: nothing revalidates, refreshes or
+   * re-writes, so a TTL is not a cache policy here, it is data loss with a
+   * delay. "Nothing expires" is the honest default, and a knob offering
+   * otherwise was a lie.
+   *
+   * This is a BREAKING type change for any external caller passing a
+   * `memory` block in a `NexusConfig` literal. It is called out in the release
+   * notes; the fix is to delete the block, because it was already doing
+   * nothing.
+   */
   maxConcurrency: number
   schedulerInterval: number
   defaultTimeout: number
@@ -398,12 +483,6 @@ export interface NexusConfig {
     messageTTL: number
     persistence: boolean
   }
-  memory: {
-    enabled: boolean
-    storage: 'sqlite' | 'memory'
-    maxEntriesPerScope: number
-    syncInterval: number
-  }
   dashboard: {
     enabled: boolean
     port: number
@@ -416,6 +495,34 @@ export interface NexusConfig {
      * `NexusOrchestrator.sendNotification()`.
      */
     enabled: boolean
+  }
+  /**
+   * The git convention layer: on by default, and VALIDATING rather than
+   * blocking.
+   *
+   * OPTIONAL, for the same reason `cost` and `customRoles` are: `NexusConfig`
+   * is an exported type, and a new REQUIRED block would stop every external
+   * literal from compiling for a field those callers never set. `mergeConfig`
+   * fills in the defaults, so an omitted block behaves exactly as a configured
+   * one.
+   *
+   * FILE-SETTABLE under the same key in `nexus.jsonc` — this block is the
+   * constructor seed of the ONE `gitFlow` block, beneath the project and global
+   * files. Every consumer resolves through the single gate in
+   * `src/git-flow.ts` (`resolveGitFlow`), which is also where the per-repo
+   * "ask once" decision is applied.
+   *
+   * Nothing in `src/` writes to git on the strength of this block.
+   */
+  gitFlow?: {
+    /** Whether the convention applies at all. */
+    enabled: boolean
+    /** Whether commit subjects are held to Conventional Commits. */
+    conventionalCommits: boolean
+    /** Whether agents are told to work on a branch, not the default one. */
+    requireBranch: boolean
+    /** Whether agents are told to open a PR rather than merge. */
+    prBeforeMerge: boolean
   }
   /**
    * Custom agent roles, as a programmatic starting point.

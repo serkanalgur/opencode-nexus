@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test'
-import { PersistentMemoryStore, type MemoryStoreConfig } from '../src/memory-store'
+import { PersistentMemoryStore, isNewerThan, type MemoryStoreConfig } from '../src/memory-store'
 import { unlinkSync, existsSync, mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -10,28 +10,34 @@ const TEST_DB_PATH = join(TEST_DIR, 'test-memory.db')
 function makeConfig(overrides?: Partial<MemoryStoreConfig>): Partial<MemoryStoreConfig> {
   return {
     dbPath: TEST_DB_PATH,
-    defaultTTL: 0,
-    maxEntries: 10000,
+    maxEntries: 1000,
     ...overrides,
   }
 }
 
-function cleanup() {
-  try {
-    if (existsSync(TEST_DB_PATH)) unlinkSync(TEST_DB_PATH)
-    if (existsSync(TEST_DB_PATH + '-wal')) unlinkSync(TEST_DB_PATH + '-wal')
-    if (existsSync(TEST_DB_PATH + '-shm')) unlinkSync(TEST_DB_PATH + '-shm')
-  } catch {}
+/** Remove one database and its sidecars. Tolerates an absent file. */
+function cleanupPath(path: string): void {
+  for (const suffix of ['', '-wal', '-shm']) {
+    try {
+      if (existsSync(path + suffix)) unlinkSync(path + suffix)
+    } catch {}
+  }
 }
 
 describe('PersistentMemoryStore', () => {
+  // THE WHOLE DIRECTORY IS REMOVED, not just `TEST_DB_PATH`. Tests here open
+  // their own databases under `TEST_DIR` (the ordering test opens 40 of them),
+  // and a file-scoped cleanup leaves those behind — so a second run of this file
+  // would find the first run's rows already present and fail with four entries
+  // where it expected two. That is a failure with no cause in the code under
+  // test, which is the worst kind to hand someone debugging a green-red-green.
   beforeEach(() => {
+    rmSync(TEST_DIR, { recursive: true, force: true })
     mkdirSync(TEST_DIR, { recursive: true })
-    cleanup()
   })
 
   afterEach(() => {
-    cleanup()
+    rmSync(TEST_DIR, { recursive: true, force: true })
   })
 
   describe('constructor', () => {
@@ -269,6 +275,221 @@ describe('PersistentMemoryStore', () => {
       expect(stats.total).toBe(3)
       expect(stats.byScope['project']).toBe(2)
       expect(stats.byScope['session']).toBe(1)
+      store.close()
+    })
+  })
+
+  describe('eviction', () => {
+    // `maxEntries` was declared, defaulted to 10000, and READ BY NOTHING until
+    // this change. These pin the enforcement, and the two things that make the
+    // enforcement defensible rather than merely present: the EXEMPTION, and the
+    // REPORTING.
+
+    it('evicts oldest-first once a capped scope is over maxEntries', () => {
+      const store = new PersistentMemoryStore(makeConfig({ maxEntries: 3 }))
+      for (const k of ['k1', 'k2', 'k3', 'k4']) {
+        store.set({ key: k, value: k, scope: 'temp', author: 'a', confidence: null, tags: [] })
+      }
+      // FIFO, like `ExecutionHistory` and `PerformanceTracker`.
+      expect(store.getByScope('temp').map(e => e.key)).toEqual(['k4', 'k3', 'k2'])
+      store.close()
+    })
+
+    it('NEVER evicts a project note, however many disposable entries arrive', () => {
+      // The exemption is the point. `ExecutionHistory` and `PerformanceTracker`
+      // are process-lifetime caches, so FIFO there loses a cache. Memory is the
+      // durable store: evicting a note someone deliberately wrote because a
+      // thousand `temp` entries arrived would destroy the only thing a user
+      // actually wrote down, in exchange for bounding rows nobody reads.
+      const store = new PersistentMemoryStore(makeConfig({ maxEntries: 2 }))
+      store.set({ key: 'durable', value: 'keep me', scope: 'project', author: 'a', confidence: null, tags: [] })
+      for (let i = 0; i < 20; i++) {
+        store.set({ key: `junk-${i}`, value: 'x', scope: 'temp', author: 'a', confidence: null, tags: [] })
+      }
+      expect(store.get('durable', 'project')?.value).toBe('keep me')
+      expect(store.getByScope('temp')).toHaveLength(2)
+      // And nothing was counted against the project scope.
+      expect(store.getEvictionTotals()['project']).toBeUndefined()
+      expect(store.getEvictionTotals()['temp']).toBe(18)
+      store.close()
+    })
+
+    it('REPORTS an eviction rather than dropping rows silently', () => {
+      const store = new PersistentMemoryStore(makeConfig({ maxEntries: 1 }))
+      expect(store.takeEviction()).toBeNull()
+      store.set({ key: 'a', value: '1', scope: 'temp', author: 'a', confidence: null, tags: [] })
+      // A write inside the cap evicts nothing and reports nothing.
+      expect(store.takeEviction()).toBeNull()
+      store.set({ key: 'b', value: '2', scope: 'temp', author: 'a', confidence: null, tags: [] })
+      const eviction = store.takeEviction()
+      expect(eviction).not.toBeNull()
+      expect(eviction!.scope).toBe('temp')
+      expect(eviction!.count).toBe(1)
+      // The time of the OLDEST thing removed, so a reader can say when the
+      // thing that disappeared was written.
+      expect(eviction!.oldestEvictedAt).toBeInstanceOf(Date)
+      // Draining, not reading: the same eviction is not reported twice.
+      expect(store.takeEviction()).toBeNull()
+      store.close()
+    })
+
+    it('reports `oldestEvictedAt` as null when nothing was actually removed', () => {
+      // "The oldest thing I deleted" is not a question with an answer when I
+      // deleted nothing, so it is not a date that means "the beginning of time".
+      const store = new PersistentMemoryStore(makeConfig({ maxEntries: 5 }))
+      for (let i = 0; i < 3; i++) {
+        store.set({ key: `k${i}`, value: 'v', scope: 'temp', author: 'a', confidence: null, tags: [] })
+      }
+      expect(store.takeEviction()).toBeNull()
+      store.close()
+    })
+
+    it('counts expired rows against the cap without counting them as evictable later', () => {
+      // Expired rows are unreadable already, so spending cap headroom on them
+      // would evict a LIVE row in their place for no gain.
+      const store = new PersistentMemoryStore(makeConfig({ maxEntries: 2 }))
+      store.set({ key: 'dead-1', value: 'v', scope: 'temp', author: 'a', confidence: null, tags: [], ttl: 1 })
+      store.set({ key: 'dead-2', value: 'v', scope: 'temp', author: 'a', confidence: null, tags: [], ttl: 1 })
+      const start = Date.now()
+      while (Date.now() - start < 5) {}
+      store.set({ key: 'live-1', value: 'v', scope: 'temp', author: 'a', confidence: null, tags: [] })
+      store.set({ key: 'live-2', value: 'v', scope: 'temp', author: 'a', confidence: null, tags: [] })
+      // Both live rows survive, because the two expired ones took the cap slots.
+      expect(store.get('live-1', 'temp')).not.toBeNull()
+      expect(store.get('live-2', 'temp')).not.toBeNull()
+      expect(store.get('dead-1', 'temp')).toBeNull()
+      store.close()
+    })
+
+    it('exposes evictions in getStats, so growth and loss are one question', () => {
+      const store = new PersistentMemoryStore(makeConfig({ maxEntries: 1 }))
+      store.set({ key: 'a', value: '1', scope: 'temp', author: 'a', confidence: null, tags: [] })
+      store.set({ key: 'b', value: '2', scope: 'temp', author: 'a', confidence: null, tags: [] })
+      const stats = store.getStats()
+      expect(stats.evicted['temp']).toBe(1)
+      expect(stats.byScope['temp']).toBe(1)
+      store.close()
+    })
+  })
+
+  describe('version ordering is a contract, not a rowid accident', () => {
+    // `getByKey` had no `ORDER BY` at all and `get` took `[length - 1]`, so
+    // "the newest version of this key" was correct only because SQLite scans a
+    // rowid table in insertion order. Worse, two writes in the same millisecond
+    // shared a `timestamp`, and the id used to end in random characters — so
+    // which version of a note was CURRENT, and therefore which one every agent
+    // was shown, was decided by `Math.random()`.
+
+    it('orders oldest-first, so the last element is the newest', async () => {
+      const store = new PersistentMemoryStore(makeConfig())
+      store.set({ key: 'k', value: 'v1', scope: 'project', author: 'a', confidence: null, tags: [] })
+      await new Promise(r => setTimeout(r, 2))
+      store.set({ key: 'k', value: 'v2', scope: 'project', author: 'a', confidence: null, tags: [] })
+      expect(store.getByKey('k', 'project').map(e => e.value)).toEqual(['v1', 'v2'])
+      expect(store.get('k', 'project')?.value).toBe('v2')
+      store.close()
+    })
+
+    it('resolves the newest version deterministically, INCLUDING on a timestamp tie', async () => {
+      // No sleeps anywhere in this test, on purpose: the hard case is two writes
+      // landing in ONE millisecond, and a sleep would remove it.
+      //
+      // Whether any given pair actually ties depends on where the millisecond
+      // boundary falls, so the test does not assert that it does — that would be
+      // asserting something untrue. It asserts the answer is always right, and
+      // then asserts that at least one attempt really did tie, so the loop cannot
+      // quietly stop covering the case it exists for. Before the monotonic id
+      // segment, the tied attempts were decided by `Math.random()`.
+      let ties = 0
+      for (let attempt = 0; attempt < 40; attempt++) {
+        // A FRESH DATABASE PER ATTEMPT, AND REMOVED AFTERWARDS. The outer
+        // `beforeEach` cleanup only deletes `TEST_DB_PATH`, so without both a
+        // unique name and an unlink, attempt 0 on a SECOND run of this file
+        // would find attempt 0's two rows already there and assert against four.
+        const path = join(TEST_DIR, `order-${attempt}.db`)
+        const store = new PersistentMemoryStore(makeConfig({ dbPath: path }))
+        const first = store.set({ key: 'k', value: 'v1', scope: 'project', author: 'a', confidence: null, tags: [] })
+        const second = store.set({ key: 'k', value: 'v2', scope: 'project', author: 'a', confidence: null, tags: [] })
+        if (first.timestamp.getTime() === second.timestamp.getTime()) ties++
+        expect(store.get('k', 'project')?.value).toBe('v2')
+        expect(store.getByKey('k', 'project').map(e => e.value)).toEqual(['v1', 'v2'])
+        // And the id comparison agrees with the query's own ordering, on a tie
+        // and off one.
+        expect(isNewerThan(second, first)).toBe(true)
+        expect(isNewerThan(first, second)).toBe(false)
+        store.close()
+        cleanupPath(path)
+      }
+      expect(ties).toBeGreaterThan(0)
+    })
+
+    it('orders getByScope and getRecent newest-first with no tie either', () => {
+      const store = new PersistentMemoryStore(makeConfig())
+      store.set({ key: 'a', value: 'v1', scope: 'project', author: 'x', confidence: null, tags: [] })
+      store.set({ key: 'b', value: 'v2', scope: 'project', author: 'x', confidence: null, tags: [] })
+      expect(store.getByScope('project').map(e => e.value)).toEqual(['v2', 'v1'])
+      expect(store.getRecent(1).map(e => e.value)).toEqual(['v2'])
+      expect(store.getByAuthor('x').map(e => e.value)).toEqual(['v2', 'v1'])
+      store.close()
+    })
+  })
+
+  describe('search scope filtering', () => {
+    // The underlying `search` matched over VALUES as well as keys and had no
+    // scope filter at all, so the moment a tool existed, a user asking what
+    // nexus remembered about retries got another agent's escalation blob back
+    // — nested `memoryEntries` and all — rendered as though it were a note.
+
+    it('returns only the requested scope', () => {
+      const store = new PersistentMemoryStore(makeConfig())
+      store.set({ key: 'k', value: 'shared text', scope: 'project', author: 'a', confidence: null, tags: [] })
+      store.set({ key: 'k', value: 'shared text', scope: 'session', author: 'agent-1', confidence: null, tags: [] })
+      expect(store.search('shared', 'project')).toHaveLength(1)
+      expect(store.search('shared', 'session')).toHaveLength(1)
+      // Unfiltered remains a superset, so this is not a breaking change.
+      expect(store.search('shared')).toHaveLength(2)
+      store.close()
+    })
+
+    it('matches on VALUES as well as keys, which is why the tool must say it is weak', () => {
+      const store = new PersistentMemoryStore(makeConfig())
+      // A stored value is arbitrary JSON, so `%q%` matches any field nested
+      // anywhere inside it. Searching 8080 returns an entry whose KEY says
+      // nothing about ports.
+      store.set({ key: 'k2', value: { note: 'the port is 8080' }, scope: 'project', author: 'a', confidence: null, tags: [] })
+      const results = store.search('8080')
+      expect(results).toHaveLength(1)
+      expect(results[0]!.key).toBe('k2')
+      store.close()
+    })
+  })
+
+  describe('the db path is reportable', () => {
+    it('names where the store is, so "empty" and "broken" can be told apart', () => {
+      // The two empty results look identical until the reader is told which one
+      // they are looking at and where to go and look.
+      const store = new PersistentMemoryStore(makeConfig())
+      expect(store.path).toBe(TEST_DB_PATH)
+      store.close()
+    })
+  })
+
+  describe('confidence is recorded as given, and null means unstated', () => {
+    it('keeps a stated number', () => {
+      const store = new PersistentMemoryStore(makeConfig())
+      store.set({ key: 'k', value: 'v', scope: 'project', author: 'a', confidence: 0.4, tags: [] })
+      expect(store.get('k', 'project')?.confidence).toBe(0.4)
+      store.close()
+    })
+
+    it('keeps an absent confidence as null, never inventing 1.0', () => {
+      // The column used to be `REAL DEFAULT 1.0` and `setMemory` hardcoded it,
+      // so every entry carried a confidence nobody had expressed — and the
+      // retrieval path rendered it, making an unexpressed confidence
+      // indistinguishable from a considered one.
+      const store = new PersistentMemoryStore(makeConfig())
+      store.set({ key: 'k', value: 'v', scope: 'project', author: 'a', confidence: null, tags: [] })
+      expect(store.get('k', 'project')?.confidence).toBeNull()
       store.close()
     })
   })
