@@ -142,12 +142,25 @@ Example (the model ids below are illustrative — use whatever your provider off
     "reviewer": "opencode/muse-spark-1.2-contributor-free",
     "tester": "opencode-go/mimo-v2.5",
     "explorer": "opencode/big-pickle",
-    "documenter": "opencode/big-pickle"
+    "documenter": "opencode/big-pickle",
+    "designer": "opencode/big-pickle"
   }
 }
 ```
 
-When you call `nexus.spawn(role="coder")`, the coder model from config is used automatically.
+Every role is configurable this way, `designer` included — it is a full role in the
+role picker, not a fixed one. When you call `nexus.spawn(role="coder")`, the coder
+model from config is used automatically. Leave a role unset and it falls back the
+way `getModelForRole` documents; a bundled default means that is only reachable if
+you write an empty string yourself.
+
+Which model a preset gives each role is a judgement, not a constant. The `minimal`
+preset puts the designer on a flash model because its thesis is cheap models against
+a $1 ceiling — a frontier model there would cost more than the six roles it plans
+for. The `enterprise` preset deliberately does *not* give the designer the frontier
+model the reviewer gets: the reviewer catches defects in a diff that exists, whereas
+the designer's output is a judgement about something that does not, where a confident
+wrong answer is caught by nobody downstream.
 
 `nexus.model.costs` with no arguments lists every loaded model, grouped under one
 heading per provider — `Anthropic`, `OpenCode Go` — so a multi-provider install

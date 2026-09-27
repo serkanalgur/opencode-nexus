@@ -55,7 +55,7 @@ bun test
 
 ```
 opencode-nexus/
-├── src/                    # 26 files, no subdirectories
+├── src/                    # 32 files, no subdirectories
 │   ├── index.ts            # Plugin entry: tool registration, agent-file
 │   │                       # generation, config watch. See "Adding a New Tool".
 │   ├── orchestrator.ts     # Core: spawn/cost/escalation/lifecycle. ~4,200 lines.
@@ -76,8 +76,13 @@ opencode-nexus/
 │   ├── notifications.ts    # OS notifications (osascript / notify-send / powershell)
 │   ├── health.ts           # HealthMonitor
 │   ├── memory-store.ts     # PersistentMemoryStore (bun:sqlite)
+│   ├── memory-recall.ts    # Injects relevant notes into a task prompt
 │   ├── message-store.ts    # MessageStore + MessageRouter (JSONL)
 │   ├── fanout.ts           # Fan-out routing between agents
+│   │
+│   ├── model-ref.ts        # The single model-reference grammar (provider/model#variant)
+│   ├── model-groups.ts     # Provider grouping + price formatting for model lists
+│   ├── skills-install.ts   # Writes the bundled skills to ~/.config/opencode/skills
 │   │
 │   ├── custom-roles.ts     # CustomRoleManager
 │   ├── todo.ts             # TodoEnforcer
@@ -85,7 +90,16 @@ opencode-nexus/
 │   ├── team.ts             # TeamManager
 │   ├── templates.ts        # Task templates
 │   ├── worktree.ts         # WorktreeManager (git worktrees)
+│   ├── config-flow.ts      # The config dialog flow (pure; the TUI adapts it)
+│   ├── git-flow.ts         # Branch/commit convention detection
 │   └── astgrep.ts          # AstGrep wrapper
+│
+├── skills/                 # SKILL.md files written to ~/.config/opencode/skills.
+│   │                       # Must be listed in package.json "files" or it does not ship.
+│   ├── nexus-design-taste/ #     Convergence catalogue the designer draws on
+│   ├── nexus-interface-a11y/ #   WCAG figures with their SC and level
+│   └── nexus-design-review/ #   Audits an existing UI; never edits it
+│   └── ask-if-clarify/     #     Repo document — NOT installed and NOT in NEXUS_SKILL_NAMES
 │
 ├── test/                   # The suite, one *.test.ts per subsystem
 │   └── helpers/            # Shared test harnesses (dashboard DOM, page parsing)
