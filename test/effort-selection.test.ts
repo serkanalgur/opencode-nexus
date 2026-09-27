@@ -259,10 +259,8 @@ describe('effortForDifficulty maps the whole 0-100 range', () => {
   // therefore fails here, which reading the expectation back out of the ladder
   // would not.
   const TABLE: readonly (readonly [number, ModelEffort])[] = [
-    [0, 'none'], [19, 'none'], [20, 'none'],
-    [21, 'minimal'], [40, 'minimal'],
-    [41, 'low'], [55, 'low'],
-    [56, 'medium'], [70, 'medium'],
+    [0, 'low'], [39, 'low'], [40, 'low'],
+    [41, 'medium'], [70, 'medium'],
     [71, 'high'], [85, 'high'],
     [86, 'xhigh'], [95, 'xhigh'],
     [96, 'max'], [100, 'max'],
@@ -274,7 +272,7 @@ describe('effortForDifficulty maps the whole 0-100 range', () => {
     })
   }
 
-  it('covers every integer from 0 to 100, and each is on the ladder', () => {
+  it('covers every integer from 0 to 100, and every one of them is a real rung', () => {
     // A sweep rather than a sample of the TABLE above, because a bucket table
     // with a gap — a score that fell through every arm — would satisfy the
     // sampled rows and answer `undefined` for the rest.
@@ -284,39 +282,66 @@ describe('effortForDifficulty maps the whole 0-100 range', () => {
       expect(isModelEffort(effort)).toBe(true)
       seen.add(effort)
     }
-    // And the sweep reached every rung, so no arm of the table is dead code.
-    expect([...seen].sort()).toEqual([...MODEL_EFFORT_LADDER].sort())
+    // RULE UNDER TEST: the mapping works UPWARD from a floor, so the set of
+    // efforts it can produce is a SUFFIX OF THE LADDER starting at `low` — five
+    // rungs, not seven. Written as literals rather than as
+    // `ladder.slice(indexOf('low'))`, which would pass on any ladder that
+    // merely contains `low`.
+    expect([...seen].sort()).toEqual(['high', 'low', 'max', 'medium', 'xhigh'])
   })
 
-  it('agrees with the existing quality/cost weight split where that split reasons', () => {
+  it('never returns a rung below the floor, at any score — the two easy buckets are gone', () => {
+    // The rule this change exists to establish: `minDifficulty` is the ONLY
+    // thing that says "too easy to bother", so the table must not have an
+    // opinion about it. `none` and `minimal` survive on the LADDER (they are
+    // published variant names) but no difficulty can select them.
+    for (let score = -50; score <= 150; score += 1) {
+      const effort = effortForDifficulty(score)
+      expect(effortIndex(effort)).toBeGreaterThanOrEqual(effortIndex('low'))
+    }
+    // And the two names that are gone from the table are still ladder members,
+    // so `reconcileEffort` can still serve a model that publishes them. Asserted
+    // from the LITERAL names, so this cannot pass by reading back the table.
+    expect(isModelEffort('none')).toBe(true)
+    expect(isModelEffort('minimal')).toBe(true)
+    expect(effortForDifficulty(0)).not.toBe('none')
+    expect(effortForDifficulty(0)).not.toBe('minimal')
+  })
+
+  it('agrees with the existing quality/cost weight split at BOTH of its boundaries', () => {
     // `scoreModel` splits at `overall > 70` and `> 40`, and the mapping's 40
     // and 70 boundaries are the SAME numbers. That is deliberate — the ranker
     // and the effort choice must not disagree about where "hard" starts — so it
     // is asserted rather than left as a comment.
     const rankerCallsItHard = (o: number): boolean => o > 70
-    const callsItMild = (o: number): boolean => o <= 40
+    const callsItCheap = (o: number): boolean => o <= 40
     for (let score = 0; score <= 100; score += 1) {
       if (rankerCallsItHard(score)) expect(effortIndex(effortForDifficulty(score))).toBeGreaterThan(effortIndex('medium'))
-      if (callsItMild(score)) expect(effortIndex(effortForDifficulty(score))).toBeLessThanOrEqual(effortIndex('medium'))
+      if (callsItCheap(score)) expect(effortIndex(effortForDifficulty(score))).toBeLessThanOrEqual(effortIndex('low'))
     }
-    // 70 itself is the inclusive top of the `medium` bucket, and 71 is the
-    // first `high` — the boundary the ranker's `> 70` implies.
+    // 40 itself is the inclusive top of the floor bucket, and 41 is the first
+    // `medium`; 70 is the top of `medium` and 71 the first `high`. Both are the
+    // boundaries the ranker's own comparisons imply, to the point.
+    expect(effortForDifficulty(40)).toBe('low')
+    expect(effortForDifficulty(41)).toBe('medium')
     expect(effortForDifficulty(70)).toBe('medium')
     expect(effortForDifficulty(71)).toBe('high')
   })
 
-  it('clamps out-of-range and non-finite input instead of falling off the ladder', () => {
+  it('clamps out-of-range and non-finite input to the floor and the top, never off the ladder', () => {
     // Every one of these must be a real rung. A `NaN` propagating into the
     // bucket walk returns `undefined`, and an `undefined` ceiling makes every
     // downstream comparison false — the quiet-wrong-answer shape this
-    // repository keeps paying for.
-    expect(effortForDifficulty(-1)).toBe('none')
-    expect(effortForDifficulty(-1e9)).toBe('none')
+    // repository keeps paying for. The floor is `low`: an input the mapping
+    // cannot place lands on the cheapest effort it is willing to name, never on
+    // "no effort", which is `minDifficulty`'s decision and not this function's.
+    expect(effortForDifficulty(-1)).toBe('low')
+    expect(effortForDifficulty(-1e9)).toBe('low')
     expect(effortForDifficulty(101)).toBe('max')
     expect(effortForDifficulty(1e9)).toBe('max')
-    expect(effortForDifficulty(Number.NaN)).toBe('none')
+    expect(effortForDifficulty(Number.NaN)).toBe('low')
     expect(effortForDifficulty(Number.POSITIVE_INFINITY)).toBe('max')
-    expect(effortForDifficulty(Number.NEGATIVE_INFINITY)).toBe('none')
+    expect(effortForDifficulty(Number.NEGATIVE_INFINITY)).toBe('low')
   })
 
   it('never reads riskLevel, so the unreachable "medium" risk cannot move it', () => {
@@ -593,35 +618,201 @@ describe('every effort key is read — no dead knob', () => {
     // `maxEffort: 'high'` the hardest task in the range does not get `xhigh`.
     const dir = writeProjectConfig('effort-ceil-default', { effort: { enabled: true } })
     const { orchestrator } = await harness(dir, CATALOGUE)
+    // Non-vacuity first: the hardest score really does map above the ceiling, so
+    // the sweep below is asserting a binding and not a table that never rises.
+    expect(effortForDifficulty(90)).toBe('xhigh')
     for (let overall = 0; overall <= 100; overall += 1) {
       const variant = select(orchestrator, 'coder', overall).variant
-      if (variant !== undefined) {
-        expect(effortIndex(variant)).toBeLessThanOrEqual(effortIndex('high'))
-      }
+      // The floor means no score is skipped at the default threshold, so every
+      // row has a variant and the ceiling is compared on all 101 of them.
+      expect(variant).not.toBeUndefined()
+      expect(effortIndex(variant as string)).toBeLessThanOrEqual(effortIndex('high'))
+    }
+    expect(select(orchestrator, 'coder', 90).variant).toBe('high')
+  })
+
+  // ── maxEffort against the table's FLOOR ──────────────────────────────
+  //
+  // The floor is `low`, so `none` and `minimal` are ceilings the mapping can
+  // never produce. These three cases say what happens anyway, because a ceiling
+  // the mapping cannot reach is the one place the two controls could disagree.
+
+  it('maxEffort AT the floor bounds every score at the floor, and does not skip anything', async () => {
+    const dir = writeProjectConfig('effort-ceil-floor', { effort: { enabled: true, maxEffort: 'low' } })
+    const { orchestrator } = await harness(dir, CATALOGUE)
+    // The easiest task, which the table would also have floored, and the
+    // hardest, which it would have put in `xhigh`. Both are `low`.
+    expect(select(orchestrator, 'coder', 0).variant).toBe('low')
+    expect(select(orchestrator, 'coder', 100).variant).toBe('low')
+  })
+
+  it('maxEffort ABOVE the floor changes nothing — a ceiling can only lower', async () => {
+    const dir = writeProjectConfig('effort-ceil-above', { effort: { enabled: true, maxEffort: 'max' } })
+    const { orchestrator } = await harness(dir, CATALOGUE)
+    // The two ends of the range, where a floor that behaved like a ramp would
+    // be visible: the table answers `low` at 0 and `max` at 100.
+    expect(effortForDifficulty(0)).toBe('low')
+    expect(effortForDifficulty(100)).toBe('max')
+    expect(select(orchestrator, 'coder', 0).variant).toBe('low')
+    expect(select(orchestrator, 'coder', 100).variant).toBe('max')
+  })
+
+  it('maxEffort BELOW the floor is honoured, and is never rounded UP to the floor', async () => {
+    // A catalogue whose lowest published rungs are the two the table no longer
+    // produces, so the answer can only be one of them.
+    const lowOnly = [
+      { id: 'anthropic', name: 'Anthropic', models: { 'claude-sonnet-4-6': { id: 'claude-sonnet-4-6', variants: v('none', 'minimal', 'high') } } },
+    ]
+    const dir = writeProjectConfig('effort-ceil-under', { effort: { enabled: true, maxEffort: 'minimal' } })
+    const { orchestrator } = await harness(dir, lowOnly)
+    const selection = select(orchestrator, 'coder', 0)
+    // `minimal`, NOT `low`: the ceiling is a ceiling, and the floor is a floor.
+    // Rounding up here would spend more reasoning budget than the user allowed,
+    // on a knob whose whole stated purpose is to bound that budget.
+    expect(selection.variant).toBe('minimal')
+    // The reasoning names BOTH operands, so "the ceiling beat the table" is
+    // visible rather than inferred: the table asked for the floor and the
+    // ceiling decided.
+    expect(selection.reasoning).toContain('asks for at most low')
+    expect(selection.reasoning).toContain('capped by effort.maxEffort minimal')
+  })
+
+  it('maxEffort BELOW the floor with nothing published under it yields no suffix, and says which bound bit', async () => {
+    // The realistic shape of the same case: most catalogues publish `low` as
+    // their lowest rung, so a ceiling of `minimal` excludes everything. The
+    // honest answer is no suffix with the ceiling named — NOT `low` pulled down
+    // from the floor, and NOT "below minDifficulty", which is a different fact.
+    const dir = writeProjectConfig('effort-ceil-under-none', { effort: { enabled: true, maxEffort: 'minimal', minDifficulty: 40 } })
+    const { orchestrator } = await harness(dir, CATALOGUE)
+    const selection = select(orchestrator, 'coder', 80)
+    expect(selection.variant).toBeUndefined()
+    expect(selection.reasoning).toContain('none of which is at or below the "minimal" ceiling')
+    // Both controls are named in the one string, so the two are distinguishable.
+    expect(selection.reasoning).toContain('effort.maxEffort is "minimal"')
+    expect(selection.reasoning).not.toContain('minDifficulty')
+  })
+
+  // ── minDifficulty: the ONE path to no suffix ─────────────────────────
+
+  it('minDifficulty: below the threshold nothing, at and above it the table’s answer', async () => {
+    // THE RULE, at both boundaries and one past each, with the VALUE asserted at
+    // every one — not a count, and not "something changed".
+    const dir = writeProjectConfig('effort-min', { effort: { enabled: true, maxEffort: 'max', minDifficulty: 70 } })
+    const { orchestrator } = await harness(dir, CATALOGUE)
+    expect(select(orchestrator, 'coder', 69).variant).toBeUndefined()
+    expect(select(orchestrator, 'coder', 69).reasoning).toContain('below effort.minDifficulty 70')
+    // 70 is the top of the `medium` bucket and 71 the first `high`, so the
+    // threshold boundary and a bucket boundary are asserted apart.
+    expect(select(orchestrator, 'coder', 70).variant).toBe('medium')
+    expect(select(orchestrator, 'coder', 71).variant).toBe('high')
+  })
+
+  it('a score between the threshold and the table’s top bucket gets a BUCKET, not nothing', async () => {
+    // The gap this change had to close: with a floor bucket of 40, a threshold
+    // of 40 and a score of 50, is the answer "nothing" or the floor? It is the
+    // bucket — the table tiles 0-100 with no hole, so the threshold has nothing
+    // to fall through. Asserted as the bucket's own value, because "not
+    // undefined" would also pass if the table returned nonsense.
+    const dir = writeProjectConfig('effort-min-mid', { effort: { enabled: true, maxEffort: 'max', minDifficulty: 40 } })
+    const { orchestrator } = await harness(dir, CATALOGUE)
+    expect(effortForDifficulty(50)).toBe('medium')
+    expect(select(orchestrator, 'coder', 49).variant).toBe('medium')
+    expect(select(orchestrator, 'coder', 50).variant).toBe('medium')
+    expect(select(orchestrator, 'coder', 51).variant).toBe('medium')
+  })
+
+  it('minDifficulty at 0 skips nothing, and the easiest task still gets the floor', async () => {
+    // The default is the one value that could be inert, and this asserts it is
+    // not: the sweep below is the "no gap" half of the rule across the whole
+    // range, at the threshold that skips the least.
+    const dir = writeProjectConfig('effort-min-zero', { effort: { enabled: true, maxEffort: 'max', minDifficulty: 0 } })
+    const { orchestrator } = await harness(dir, CATALOGUE)
+    for (let overall = 0; overall <= 100; overall += 1) {
+      const selection = select(orchestrator, 'coder', overall)
+      expect(selection.variant).toBe(effortForDifficulty(overall))
+      expect(selection.reasoning).not.toContain('minDifficulty')
     }
   })
 
-  it('minDifficulty is read: below the threshold no suffix is chosen at all', async () => {
-    const dir = writeProjectConfig('effort-min', { effort: { enabled: true, maxEffort: 'max', minDifficulty: 60 } })
-    const { orchestrator } = await harness(dir, CATALOGUE)
-    // 59 and 60 straddle the threshold, and the same task must flip.
-    const below = select(orchestrator, 'coder', 59)
-    const at = select(orchestrator, 'coder', 60)
-    expect(below.variant).toBeUndefined()
-    expect(below.reasoning).toContain('below effort.minDifficulty 60')
-    expect(at.variant).not.toBeUndefined()
+  it('minDifficulty: absent resolves to 0, and is told apart from an explicit 0', async () => {
+    const absent = writeProjectConfig('effort-min-absent', { effort: { enabled: true, maxEffort: 'max' } })
+    const explicit = writeProjectConfig('effort-min-explicit', { effort: { enabled: true, maxEffort: 'max', minDifficulty: 0 } })
+    const a = await harness(absent, CATALOGUE)
+    const b = await harness(explicit, CATALOGUE)
+    // Both are "every task", and both serve the EASIEST one — which under the
+    // old table mapped to `none` and now maps to the floor. The winner
+    // publishes `low`, so the answer is the floor and the reasoning must not
+    // blame `minDifficulty`, which is absent in one and zero in the other.
+    for (const selection of [select(a.orchestrator, 'coder', 0), select(b.orchestrator, 'coder', 0)]) {
+      expect(selection.variant).toBe('low')
+      expect(selection.reasoning).not.toContain('minDifficulty')
+      expect(selection.reasoning).toContain('effort:')
+    }
   })
 
-  it('minDifficulty: absent means every task, and the easiest one is still served', async () => {
-    const dir = writeProjectConfig('effort-min-absent', { effort: { enabled: true, maxEffort: 'max' } })
+  it('EVERY value of minDifficulty changes the outcome for at least one score', async () => {
+    // THE ANTI-DEAD-KNOB TEST, and the reason it is written as a sweep over all
+    // 101 effective values rather than as a spot check: the defect being fixed
+    // was a key that was read, testable, and INERT at its own default, and a
+    // spot check at a convenient score is exactly what let that ship. For each
+    // threshold t in 1..100 the witness is the score `t - 1`, which is the
+    // highest score the threshold suppresses; for t = 0 the witness is score 0
+    // against a threshold of 1. Every value therefore has a named score whose
+    // ANSWER moves, so "the default does nothing" cannot recur unnoticed — a
+    // test that asserted "nothing happened here for the default" is the defect,
+    // and none is written.
+    const dir = writeProjectConfig('effort-sweep', { effort: { enabled: true, maxEffort: 'max' } })
     const { orchestrator } = await harness(dir, CATALOGUE)
-    const selection = select(orchestrator, 'coder', 0)
-    // Difficulty 0 maps to `none`, and the winner publishes `none`… unless it
-    // does not, in which case nothing is at or below the ceiling and the honest
-    // answer is still no suffix, but for a different stated reason. Either way
-    // the reasoning must not blame `minDifficulty`, which is absent.
-    expect(selection.reasoning).not.toContain('minDifficulty')
-    expect(selection.reasoning).toContain('effort:')
+    const variantAt = (threshold: number, score: number): string | undefined => {
+      writeFileSync(
+        join(dir, '.opencode', 'nexus.jsonc'),
+        JSON.stringify({ effort: { enabled: true, maxEffort: 'max', minDifficulty: threshold } }),
+        'utf-8',
+      )
+      orchestrator.configManager.loadFromPath(dir)
+      return select(orchestrator, 'coder', score).variant
+    }
+
+    // The default: every score is served, and served at its own bucket.
+    for (let score = 0; score <= 100; score += 1) {
+      expect(variantAt(0, score)).toBe(effortForDifficulty(score))
+    }
+    // The default is itself distinguishable: threshold 0 serves score 0, and
+    // threshold 1 does not. A default that were inert could not pass this.
+    expect(variantAt(0, 0)).toBe('low')
+    expect(variantAt(1, 0)).toBeUndefined()
+
+    for (let threshold = 1; threshold <= 100; threshold += 1) {
+      const score = threshold - 1
+      // Both directions of the witness, so neither "ignores the key" nor
+      // "skips everything" can satisfy the loop.
+      expect(variantAt(threshold, score)).toBeUndefined()
+      expect(variantAt(threshold - 1, score)).toBe(effortForDifficulty(score))
+      // And one score on the far side of the threshold, which must still be
+      // served — a threshold that skipped everything would also pass the two
+      // lines above.
+      const above = threshold === 100 ? 100 : threshold
+      expect(variantAt(threshold, above)).toBe(effortForDifficulty(above))
+    }
+  })
+
+  it('an explicit #variant is untouched by both controls, at every difficulty', async () => {
+    // The interaction that must not have changed: a user who named the effort
+    // keeps it, whatever the table now says and whatever the threshold is. The
+    // table's floor cannot raise it and the threshold cannot suppress it, which
+    // is why the two are checked over the whole range rather than at one score.
+    const dir = writeProjectConfig('effort-explicit', {
+      models: { coder: 'anthropic/claude-sonnet-4-6#minimal' },
+      effort: { enabled: true, maxEffort: 'max', minDifficulty: 90 },
+    })
+    const { orchestrator } = await harness(dir, CATALOGUE)
+    for (let score = 0; score <= 100; score += 1) {
+      const selection = select(orchestrator, 'coder', score)
+      if (selection.variant !== undefined) {
+        expect(selection.variant).toBe('minimal')
+        expect(selection.reasoning).toContain('kept the explicit variant you set')
+      }
+    }
   })
 })
 

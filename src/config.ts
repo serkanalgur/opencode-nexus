@@ -173,21 +173,43 @@ export interface NexusEffortConfig {
    * mapping reaches for a given task changes nothing, and that is what a
    * ceiling means — not a dead knob, but a one-directional one.
    *
+   * It wins even when it is BELOW the mapping's floor. `effortForDifficulty`
+   * never returns anything under `low`, so `maxEffort: 'minimal'` is a level
+   * the mapping cannot produce; the ceiling is still applied, and the outcome is
+   * whatever the model publishes at or below `minimal` — which is frequently
+   * nothing, because most catalogues publish `low` as their lowest rung. That
+   * is reported, with the ceiling and the published list, rather than silently
+   * rounded UP to the floor: rounding up would spend more reasoning budget than
+   * the ceiling permits, and a cost control that can be overridden by the thing
+   * it controls is not a cost control.
+   *
    * A name off the ladder (`"enormous"`) is rejected, not clamped: see
    * `validateEffortConfig`.
    */
   maxEffort: ModelEffort
   /**
-   * The `overall` difficulty below which no effort is chosen at all, on
+   * The `overall` difficulty a task must REACH to be given an effort at all, on
    * `0-100`. Default `0`, which means "every task, however easy".
    *
-   * Defaults to 0 DELIBERATELY. The mapping already sends the easiest tasks to
-   * `none` and the next to `minimal`, so a nonzero default would be a second,
-   * overlapping policy rather than an additional control — and two knobs that
-   * both answer "how much effort is too much for a small task" is one too
-   * many. This one exists for the case the score cannot express: a user who
-   * wants the selection left completely alone on routine work and effort spent
-   * only where it can matter.
+   * THE RULE, as one sentence: a task is asked for the highest published level
+   * at or below `min(effortForDifficulty(overall), maxEffort)`, and is asked for
+   * nothing only when `overall < minDifficulty`. This key is the ONLY way that
+   * happens — the difficulty table in `src/model-ref.ts` runs from `low`
+   * upwards and has no bucket meaning "too easy to bother", precisely so that
+   * one setting owns that decision and a user moving this one is not
+   * contradicted by the table.
+   *
+   * Defaults to 0 DELIBERATELY, and that is now a statement rather than a
+   * consequence of the table happening to absorb the easy end. `0` says "never
+   * skip a task", which is the honest reading of a feature that is itself off by
+   * default: the user who sets `enabled: true` asked for effort on their work,
+   * and a nonzero default would quietly withhold it on routine tasks — a policy
+   * nobody asked for, chosen by a release rather than by a user. The cost of
+   * `0` is real and is the price of that: with the default, the floor bucket
+   * `low` applies to every task, including a one-line fix. A user who wants
+   * less sets this number, and every value of it changes the outcome of at least
+   * one score — the test that says so is in `test/effort-selection.test.ts`, and
+   * it is there because at the old default this key did nothing at all.
    *
    * Out-of-range and non-finite values are CLAMPED to `0-100` rather than
    * rejected, because a threshold outside the score's own range is a harmless

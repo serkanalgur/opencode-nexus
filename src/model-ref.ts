@@ -319,6 +319,25 @@ export function providerIDFromRefLoose(ref: string): string | undefined {
  * the effort enum the shipped CLI's variant builder injects as
  * `settings.reasoningEffort`.
  *
+ * ── TWO SENSES, and they are not the same question ───────────────────
+ *
+ * 1. **A PUBLISHED NAME.** Every rung here is a name a model may advertise in
+ *    its `variants` array, and `reconcileEffort` will hand one back as the
+ *    requested suffix. `none` and `minimal` live here for THIS reason and no
+ *    other: a real observed catalogue is `["none","medium","high","xhigh"]`, so
+ *    `none` is a variant a model genuinely publishes, and a model publishing
+ *    only `["none"]` under a `low` ceiling is correctly answered `none`.
+ * 2. **A BUCKET THE MAPPING CAN PRODUCE.** A strictly smaller set — see
+ *    {@link DIFFICULTY_BUCKETS}. The mapping never emits `none` or `minimal`:
+ *    "this task is too easy to think hard about" is `effort.minDifficulty`'s
+ *    job, and having the table also say it gave one setting two meanings and
+ *    left `minDifficulty` inert at its own default.
+ *
+ * Keeping the ladder complete and the bucket table a SUFFIX of it is what makes
+ * the two senses separable at all, and it is why `none` is not deleted from
+ * this tuple: deleting the rung would break `reconcileEffort` on exactly the
+ * catalogues the rung was transcribed from.
+ *
  * The ORDER is the load-bearing part. `maxEffort` and the difficulty mapping
  * are both stated as ceilings over this ladder, and the whole point of a
  * ceiling over an ordered scale is that "less than" is decidable. The host
@@ -346,16 +365,50 @@ export function isModelEffort(effort: string): effort is ModelEffort {
  * The difficulty buckets, as `overall` cut points, LOWEST FIRST and each one
  * the INCLUSIVE upper bound of its bucket.
  *
- * The 40 and 70 boundaries are the existing ones: `scoreModel` already splits
- * its quality/cost weight at `overall > 70` and `> 40`, so the effort choice
- * and the ranking agree about where "hard" starts. A model the ranker treats
- * as quality-favoured above 70 also gets the most effort below it. The interior
- * boundaries are new; what they cost is discussed on `effortForDifficulty`.
+ * ── THE TABLE ONLY EVER WORKS UPWARD ──────────────────────────────────
+ *
+ * Every bound here is the TOP of a bucket, and the buckets tile `0-100` with no
+ * gap: there is a bucket for every score, so this table is not a filter. The
+ * ONE thing that says "this task is not worth reasoning about" is
+ * `effort.minDifficulty`, checked before this table is consulted at all. That is
+ * why the two lowest rungs are absent: a `0-20 → none` bucket and a
+ * `minDifficulty` of `0` are two settings answering the same question, and the
+ * user has to be able to move one without the other moving underneath them.
+ *
+ * ── WHY THE FLOOR IS `low` ────────────────────────────────────────────
+ *
+ * `low` is what a task that has JUST cleared the threshold receives, and it is
+ * the answer to "what should the mapping give someone who has not configured
+ * anything". It is a policy, so it is argued rather than assumed: a user who
+ * does not want `low` on a one-line fix now has exactly one place to say so —
+ * `minDifficulty` — and a value that does something observable, which is
+ * precisely what the old `0-20 → none` bucket denied them. The alternative
+ * floors were both worse: a floor of `minimal` would keep a rung the table
+ * cannot justify from a score, and a floor of `none` would re-create the exact
+ * overlap this table just lost.
+ *
+ * ── WHY 40 AND 70 ─────────────────────────────────────────────────────
+ *
+ * They are `scoreModel`'s own cut points, and they are the only two boundaries
+ * here that are not a judgement call. `scoreModel` already splits its
+ * quality/cost weight three ways: cost-favoured at `overall <= 40`, balanced at
+ * `41-70`, quality-favoured above `70`. The table now mirrors those three
+ * regimes exactly, one bucket each, and the effort in each is the rung the
+ * regime's own label implies — the cheapest work gets the cheapest rung, the
+ * hard work gets the most. Because the two agree by construction, the effort
+ * choice and the model ranking cannot disagree about where "hard" starts: a
+ * task the ranker spent its quality weight on is a task the mapping spent its
+ * top bucket on, and a task the ranker called cheap is never asked to think
+ * above `low`.
+ *
+ * This is why the old interior `55` boundary is gone. It split the ranker's
+ * single "balanced" regime in two on a guess; with the floor moved, keeping it
+ * would have made `low` and `medium` straddle a boundary the ranker does not
+ * have. 85 and 95 remain a policy claim within the quality-favoured regime —
+ * what they cost is stated on `effortForDifficulty`.
  */
 const DIFFICULTY_BUCKETS: readonly { readonly atMost: number; readonly effort: ModelEffort }[] = [
-  { atMost: 20, effort: 'none' },
-  { atMost: 40, effort: 'minimal' },
-  { atMost: 55, effort: 'low' },
+  { atMost: 40, effort: 'low' },
   { atMost: 70, effort: 'medium' },
   { atMost: 85, effort: 'high' },
   { atMost: 95, effort: 'xhigh' },
@@ -364,6 +417,20 @@ const DIFFICULTY_BUCKETS: readonly { readonly atMost: number; readonly effort: M
 
 /**
  * The effort a task of this difficulty is CEILINGED at, from `overall` alone.
+ *
+ * ── THE RULE, AS ONE SENTENCE ─────────────────────────────────────────
+ *
+ * A task is asked for the highest published level at or below
+ * `min(effortForDifficulty(overall), maxEffort)`, and is asked for NOTHING only
+ * when `overall < minDifficulty`.
+ *
+ * The threshold is a PRECONDITION of this function, not one of its inputs, which
+ * is why the sentence reads "only": this table is total over `0-100` and has no
+ * bucket that means "too easy to bother" — the lowest thing it will ever say is
+ * `low`, and `low` is the answer for a task that has just cleared the threshold.
+ * `src/orchestrator.ts` checks `overall < minDifficulty` before calling here and
+ * returns before this is reached, so there is exactly one path to "no effort
+ * chosen" and it is the user's threshold.
  *
  * PURE, and that is the reason it lives here rather than inside the ranker: it
  * is a total function of one number, so it can be tested across the whole
@@ -384,9 +451,10 @@ const DIFFICULTY_BUCKETS: readonly { readonly atMost: number; readonly effort: M
  *  1. `overall` is a WEIGHTING key, not a difficulty measurement. It was tuned
  *     so that a split at 40/70 balances quality against price. Now it also
  *     chooses how much a model thinks. Those are correlated but not identical
- *     objectives, and the interior boundaries above are therefore a policy
- *     claim: "at 56 this task deserves `low`" is a decision, not a measurement.
- *     Changing the weight split to taste would silently move them.
+ *     objectives. The 40 and 70 boundaries above are inherited from that split
+ *     and would move with it; the 85 and 95 boundaries are therefore a policy
+ *     claim: "at 86 this task deserves `xhigh`" is a decision, not a
+ *     measurement.
  *  2. `codeLines` is SYNTHETIC — `fileCount * 50` at `analyzeComplexity`, with
  *     no file read — and contributes `codeLines / 10`, i.e. `fileCount * 5`, to
  *     `overall`. So a task listing more files scores higher, and half of that
@@ -414,6 +482,12 @@ const DIFFICULTY_BUCKETS: readonly { readonly atMost: number; readonly effort: M
  * resolves to the bottom and top buckets instead of falling off the ladder,
  * the infinities clamp to those same ends, and `NaN` — which every comparison
  * against it rejects — resolves to the bottom.
+ *
+ * The bottom bucket is `low`, not `none`, and that is the whole point of the
+ * table having a floor: clamping, an infinity and `NaN` all land on an effort
+ * rather than on "no effort". A caller that wants "no effort" is the caller
+ * holding the threshold, and the threshold is `minDifficulty` — a value in the
+ * user's config, not something inferred here.
  */
 export function effortForDifficulty(overall: number): ModelEffort {
   // `NaN` is the only value `Math.min`/`Math.max` cannot place, and it is the
@@ -425,6 +499,17 @@ export function effortForDifficulty(overall: number): ModelEffort {
   // The infinities need no special case: `Math.max(0, Infinity)` is `Infinity`
   // and `Math.min(100, …)` makes it `100`, and likewise `-Infinity` clamps to
   // `0`. An infinite difficulty is a very hard task, not an absent one.
+  //
+  // HONEST NOTE ON THIS CLAMP, since a mutation run says so: deleting it is an
+  // EQUIVALENT mutant and no assertion in the suite can catch it, because the
+  // walk below already lands where the clamp would put everything — the first
+  // arm's `<=` absorbs a negative, and the fall-through returns the top arm for
+  // a score above 100. It is kept anyway because the fall-through is the
+  // accidental kind of guarantee: an edit that added an intermediate arm
+  // returning early could remove it silently, and the clamp would then be the
+  // only thing keeping a score of 101 on the ladder. The tests assert the
+  // OBSERVABLE rule (a real rung at both ends, for every non-finite input)
+  // rather than this line, which is why the mutation survives.
   const score = Math.min(100, Math.max(0, overall))
   for (const bucket of DIFFICULTY_BUCKETS) {
     if (score <= bucket.atMost) return bucket.effort
