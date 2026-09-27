@@ -1,6 +1,7 @@
 // Core types for OpenCode Nexus
 
 import type { PricingSource, UsageSource } from "./forecast"
+import type { NexusCustomRoleConfig } from "./config"
 
 /**
  * How a task's cost and token count were arrived at. `usage` says whether the
@@ -416,6 +417,20 @@ export interface NexusConfig {
      */
     enabled: boolean
   }
+  /**
+   * Custom agent roles, as a programmatic starting point.
+   *
+   * OPTIONAL, for the same reason `cost` is: `NexusConfig` is an exported type
+   * and a new REQUIRED block would stop every external literal from compiling.
+   * `mergeConfig` carries an omitted one through as absent, which resolves to
+   * "no roles" exactly as an empty list does.
+   *
+   * FILE-SETTABLE under the same key in `nexus.jsonc` — this block is the
+   * constructor seed of the ONE `customRoles` block, beneath the project and
+   * global files, so a role defined in the file replaces this list and a role
+   * defined here survives a file that says nothing about it.
+   */
+  customRoles?: NexusCustomRoleConfig[]
   security: {
     sastEnabled: boolean
     secretsScanning: boolean

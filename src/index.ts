@@ -1776,7 +1776,7 @@ You are a technical writer who creates documentation that developers actually wa
         options: { codemode: true },
         execute: async () => {
           const roles = orchestrator.customRoles.list()
-          if (roles.length === 0) return { content: "No custom roles defined. Add them in .opencode/nexus.jsonc under 'customRoles'." }
+          if (roles.length === 0) return { content: "No custom roles defined. Add them in .opencode/nexus.jsonc under 'customRoles', or register one for this session with roles.add." }
           const lines = roles.map(r => `${r.emoji} ${r.displayName} (${r.name}): ${r.prompt.substring(0, 60)}...`)
           return { content: lines.join('\n') }
         }
@@ -1792,7 +1792,7 @@ You are a technical writer who creates documentation that developers actually wa
             displayName: { type: "string", description: "Display name" },
             emoji: { type: "string", description: "Emoji for the role" },
             prompt: { type: "string", description: "System prompt for this role" },
-            model: { type: "string", description: "Default model (optional)" }
+            model: { type: "string", description: "First-choice model for the role (optional). It is the first candidate the ranker considers, not the model the spawn necessarily uses: a models[role] entry takes precedence over it, and the ranker is free to select another candidate." }
           },
           required: ["name", "displayName", "prompt"]
         },
@@ -1800,7 +1800,11 @@ You are a technical writer who creates documentation that developers actually wa
         execute: async (input: unknown) => {
           const { name, displayName, emoji, prompt, model } = input as any
           orchestrator.customRoles.register({ name, displayName, emoji: emoji || '🤖', prompt, model })
-          return { content: `Custom role '${displayName}' registered` }
+          // Session-only, and said so here because it no longer is: a config
+          // reload replaces the registry from the file, so a role added this
+          // way and not written to `nexus.jsonc` stops resolving on the next
+          // reload. The tool used to imply it had registered something durable.
+          return { content: `Custom role '${displayName}' registered for this session. To keep it across config reloads and restarts, add it to .opencode/nexus.jsonc under 'customRoles'.` }
         }
       })
 
@@ -2428,7 +2432,7 @@ export type { SecurityIssue, SecurityScanResult, SecurityConfig } from "./securi
 export { PerformanceTracker } from "./performance"
 export type { PerformanceEntry, PerformanceScore } from "./performance"
 export { CustomRoleManager } from "./custom-roles"
-export type { CustomRole } from "./custom-roles"
+export type { CustomRole, CustomRoleLoadReport } from "./custom-roles"
 export { CostForecaster } from "./forecast"
 export type { CostEstimate, ForecastResult } from "./forecast"
 export { WorktreeManager } from "./worktree"

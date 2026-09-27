@@ -150,9 +150,20 @@ export async function readSourceFile(name: string): Promise<string> {
  * `strings: false` blanks comments only. The `emit` lookup needs the string
  * argument (`this.emit('cost:delta', …)`) to be visible, and then reads
  * structure out of a second, fully blanked copy at the same offsets.
+ *
+ * `split('')`, NOT `[...source]`, and that is load-bearing. The spread iterates
+ * CODE POINTS while every index below — `source[i]`, `matchBrace`, and each
+ * caller's own `slice` offsets — is a UTF-16 CODE UNIT, so a single astral
+ * character (an emoji, which this codebase uses in string literals AND in doc
+ * comments) silently shifts every position after it. The blanked copy was then
+ * SHORTER than its input and every offset into it was wrong, which surfaced as a
+ * field name read out of the middle of a comment: an unrelated doc comment
+ * containing an emoji above a declaration failed the completeness check with a
+ * member no declaration has. `split('')` gives one slot per code unit, so the
+ * blanked copy is index-for-index the same string it came from.
  */
 export function blankNonCode(source: string, strings = true): string {
-  const out = [...source]
+  const out = source.split('')
   const n = source.length
   const blank = (from: number, to: number): void => {
     for (let k = from; k < to && k < n; k++) if (out[k] !== '\n') out[k] = ' '
