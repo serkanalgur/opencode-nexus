@@ -1,29 +1,35 @@
 /** @jsxImportSource @opentui/solid */
 import { Plugin } from "@opencode/plugin/tui"
-// Type-only, so neither of these reaches the bundle. They name the renderables
-// the panel's keymap layers TARGET, which is the documented way to attach keys to
-// something this plugin drew (`context.keymap.layer({ target })`).
-import type { BoxRenderable, InputRenderable } from "@opentui/core"
 import { NexusConfigManager } from "./config"
 import {
-  applyPanelChoice,
-  applyPanelKey,
-  createPanelState,
-  panelNotice,
-  panelPathLabel,
-  panelSaveUpdate,
-  panelValueAt,
-  panelWindow,
-  panelKeyBuffer,
-  panelLayerSpec,
-  stateRows,
-  PANEL_BINDINGS,
-  PANEL_FOOTER_HINTS,
-  type PanelEffect,
-  type PanelKey,
-  type PanelRow,
-  type PanelState
-} from "./config-panel"
+  booleanOptions,
+  commitConfigModel,
+  commitConfigText,
+  commitConfigToggle,
+  configFieldsScreen,
+  configIsDirty,
+  configOptionDescription,
+  configOptionDisabled,
+  configOptionTitle,
+  configPathLabel,
+  configPromptDescription,
+  configSaveUpdate,
+  configScreenOptions,
+  configSelect,
+  configUp,
+  configValueAt,
+  describeConfigValue,
+  discoverConfig,
+  editorFor,
+  setConfigValue,
+  type ConfigCommit,
+  type ConfigDraft,
+  type ConfigField,
+  type ConfigOption,
+  type ConfigRow,
+  type ConfigScreen,
+  type ConfigScope
+} from "./config-flow"
 import {
   formatModelPrice,
   modelRef,
@@ -829,22 +835,25 @@ export default Plugin.define({
     }
 
     // Model selection handler
-    // Persistent save scope for the config session
-    let configSaveScope: 'project' | 'global' = 'global'
+    // Persistent save scope for the config session. Asked on the configuration
+    // flow's hub and honoured by `persistConfig`, so `/nexus model <role>` and
+    // `/nexus-config` agree about which file they write to.
+    let configSaveScope: ConfigScope = 'global'
 
     /**
      * The grouped model picker, as a function that RETURNS the choice.
      *
-     * Extracted so `/nexus model` and the configuration panel open the same
-     * widget rather than two that happen to look alike. The panel needs the
+     * Extracted so `/nexus model` and the configuration flow open the same
+     * widget rather than two that happen to look alike. The flow needs the
      * value back to put in its own draft instead of writing straight to disk,
      * and a picker that only knew how to save would force it to save on every
-     * selection — which is precisely the "staged edits" the panel exists to
+     * selection — which is precisely the "staged edits" the flow exists to
      * offer. Syncing, grouping and the reset row are therefore in one place.
      *
      * `undefined` means the user dismissed the dialog, and a `""` means they
      * chose "Use default" — two different outcomes, so the reset value is passed
-     * through rather than folded into the dismissal.
+     * through rather than folded into the dismissal. `commitConfigModel` is
+     * where that distinction is turned into a decision.
      */
     const chooseModel = async (title: string, current: string): Promise<string | undefined> => {
       const location = context.location ?? context.data.location.default()
@@ -889,408 +898,236 @@ export default Plugin.define({
       }
     }
 
-    // ── The fullscreen configuration panel ──────────────────────────────
+    // ── The configuration dialog flow ────────────────────────────────
     //
-    // WHAT THIS REPLACED, and why it was replaced. `handleFullConfig` was a
-    // linear wizard: one scope dialog, then SIX model dialogs in a row, then one
-    // free-text budget prompt. Adding the blocks' existing booleans would have
-    // made it about fourteen sequential dialogs — a linear sequence of questions
-    // about a tree of settings, which is the complaint this replaces.
+    // WHAT THIS IS, AND WHY IT IS DIALOGS. The user asked for the popup mode
+    // back, so nothing here draws anything. Every screen is a host dialog:
+    // `ui.dialog.select` for the two lists and for a boolean, `ui.dialog.prompt`
+    // for a number or a string, `ui.dialog.alert` for a rejected number, and
+    // the grouped provider picker for a model reference. The fullscreen panel
+    // that shipped in 2.12.0 — its own checkbox component, its `session.panel`
+    // claim, its `keymap.layer({ target })`, its own scroll window — is gone.
     //
-    // WHY A PANEL RENDERED BY THIS PLUGIN, AND NOT A HOST WIDGET. The host's
-    // TUI plugin API has no checkbox. `@opencode/plugin@2.0.12`'s `ui` object
-    // has exactly seven members — `dialog`, `toast`, `format`, `router`, `panel`,
-    // `tabs`, `slot` — and `DialogSelectOption` carries only `title`, `value`,
-    // `description?`, `footer?`, `category?`, `disabled?`, with `select` resolving
-    // a SINGLE value. There is no boolean widget, no multi-select, no form and no
-    // number input anywhere in it, so a checkbox here is a COMPONENT BUILT IN THIS
-    // PLUGIN, not an option passed to a host one. A reader can check that claim
-    // against the host's own declarations: `node_modules/@opencode/plugin/dist/
-    // tui/context.d.ts` is where to look.
+    // THREE LEVELS, NOT A MARCH. `handleFullConfig` before the panel was a flat
+    // sequence: a scope question, then six model dialogs, then one budget
+    // prompt. Restoring THAT shape was the other thing the user complained
+    // about, so the flow is a tree: the hub lists the blocks, a block lists its
+    // fields, and a field opens its widget. Escape goes UP one level from
+    // anywhere, and leaves the flow from the hub — and nothing has been written
+    // until `save`, so leaving cannot lose anything.
     //
-    // WHICH OF THE THREE AVAILABLE ROUTES. `ui.panel.open(name, { presentation:
-    // "fullscreen" })` is the frame — it is a host-sized, focus-owning panel that
-    // resolves key conflicts for us and renders the chrome (title, the
-    // fullscreen/close affordances) — and the content is this plugin's own JSX in
-    // the `session.panel` slot, using the `@opentui/solid` renderer this plugin
-    // ALREADY used for the sidebar. The three routes were not alternatives to each
-    // other so much as layers: the panel for the frame, the slot for the content,
-    // and `keymap.layer({ target })` for the keys. No new rendering stack is
-    // introduced; the one already here is reused.
-    //
-    // EVERY DECISION IS IN `src/config-panel.ts`, not here. This block is the
-    // adapter: it owns the renderer, the keymap layers and the host dialogs, and
-    // it does not decide anything. That split is what makes the keyboard paths
-    // testable without a terminal — see that file for what it does and does not
-    // cover.
-
-    /** The panel's name in the host's `session.panel` slot. */
-    const CONFIG_PANEL_NAME = 'nexus.config.panel'
+    // EVERY DECISION IS IN `src/config-flow.ts`, not here. This block is the
+    // adapter: it owns the host calls and translates a returned option into the
+    // next screen. Which block is offered, which field a row is for, what a
+    // boolean's two rows say, and why `12abc` is not `12` are all decisions, and
+    // they are all in that file where the tests can reach them without a
+    // terminal.
 
     /**
-     * Lines the panel reserves for its own chrome: the heading, the scope line,
-     * the notice/error line and the key footer. The rest of the terminal is for
-     * rows.
-     *
-     * A fixed constant rather than a measured layout because the row window has
-     * to be a pure function of `(cursor, total, height)` for its "the cursor is
-     * always on screen" property to be testable, and a header whose height
-     * depends on the longest setting name would put a measurement back in. The
-     * cost of getting it wrong is one clipped line, and it is subtracted from the
-     * real terminal height rather than assumed.
-     *
-     * EIGHT, and it is the WORST case rather than the common one. Counted from
-     * the render above: 2 header boxes, the rows themselves, and then every
-     * conditional line at once — the edit input, the error, the notice, the
-     * discard prompt, and the footer's `marginTop={1}` blank line above its text.
-     * That is 2 + 1 + 1 + 1 + 1 + 2 = 8 on top of the rows. The seven-line
-     * figure that was here clipped the notice and the footer in exactly the
-     * state a user is most likely to be in — a rejected cell edit, which is the
-     * only moment the error line exists at all, and a discarded-changes prompt.
-     */
-    const CONFIG_PANEL_CHROME_LINES = 8
-
-    const [panelStore, setPanelStore] = context.storage.memory<{ state: PanelState }>(
-      'nexus-config-panel',
-      {
-        initial: {
-          state: createPanelState(configManager.getConfig(), 'global', { closed: true })
-        }
-      }
-    )
-
-    /**
-     * The row window's scroll offset, carried between renders.
-     *
-     * `panelWindow` is a pure function precisely so its "the cursor is always
-     * inside the window" property is testable, which means it cannot hold the
-     * offset itself — it takes the previous one as an argument. This is where
-     * that argument is remembered. Not state in the panel's store because it is
-     * a VIEW concern, not something `esc` or `r` should reset.
-     */
-    let panelWindowStart = 0
-
-    /**
-     * The panel's renderables, so the keymap layers can TARGET them.
-     *
-     * Held in the setup closure rather than as locals of the slot's `render`
-     * because `keymap.layer({ target })` is registered from the `app` slot — the
-     * host resolves a layer's `target` at key-dispatch time, so a reference
-     * assigned during the panel's own render is in place by the time a key
-     * arrives, wherever the layer was created.
-     */
-    let panelRoot: BoxRenderable | undefined
-    let panelInput: InputRenderable | undefined
-
-    /**
-     * Open the panel over the config as it stands.
+     * Run the flow to its end.
      *
      * A FRESH draft every time, from the config as resolved now. Resuming a
      * previous session's draft would mean saving values the user last saw
-     * minutes or hours ago, and the panel's whole claim is that what is on screen
+     * minutes or hours ago, and the flow's whole claim is that what is on screen
      * is what gets written.
      *
-     * `ui.panel.open` returns `false` when it cannot open — the `session.panel`
-     * slot belongs to a SESSION, so there is nothing to open on the home screen.
-     * That is said out loud rather than swallowed: a command that does nothing
-     * and reports success is the same defect class as a dead knob, and the user
-     * would have no way to tell the panel from a command that lost its wiring.
+     * The loop is a state machine over `screen`, and it terminates because every
+     * branch either advances, retreats, or returns: `configSelect` and
+     * `configUp` have no transition that does none of those three, and a user
+     * cycling between the hub and a block does so deliberately. No counter, no
+     * cap, and no timeout.
      */
-    const openConfigPanel = () => {
-      if (!activeSessionID()) {
-        context.ui.toast.show({
-          title: "Nexus",
-          message:
-            'The configuration panel opens inside a session. Open one first, then run /nexus-config.',
-          variant: "info"
-        })
-        return
-      }
+    /**
+     * Run the flow to its end.
+     *
+     * A FRESH draft every time, from the config as resolved now. Resuming a
+     * previous session's draft would mean saving values the user last saw
+     * minutes or hours ago, and the flow's whole claim is that what is on screen
+     * is what gets written.
+     *
+     * The loop is a state machine over `screen`, and it terminates because every
+     * branch either advances, retreats, or returns: `configSelect` and
+     * `configUp` have no transition that does none of those three, and a user
+     * cycling between the hub and a block does so deliberately. No counter, no
+     * cap, and no timeout.
+     */
+    const runConfigFlow = async () => {
+      const base = configManager.getConfig() as unknown as ConfigDraft
+      let draft = base
+      // `discovery` is derived from `base`, not from the live draft, and that is
+      // the point: the SHAPE of the config does not change as it is edited, and
+      // re-deriving it per screen would make a block's field list depend on
+      // values the user has already typed in this session. The VALUES on each row
+      // are read from the draft, below.
+      const discovery = discoverConfig(base)
+      let screen: ConfigScreen = { kind: 'blocks' }
 
-      setPanelStore(draft => {
-        draft.state = createPanelState(configManager.getConfig(), configSaveScope)
+      /** The row for one option. The row's VALUE is the option itself. */
+      const toDialogRow = (option: ConfigOption): ConfigRow<ConfigOption> => ({
+        title: configOptionTitle(option, configSaveScope),
+        description: configOptionDescription(option, draft, configIsDirty(base, draft)),
+        value: option,
+        ...(configOptionDisabled(option) ? { disabled: true } : {})
       })
 
-      if (!context.ui.panel.open(CONFIG_PANEL_NAME, { presentation: 'fullscreen' })) {
+      /** Confirm a staged edit, saying plainly that nothing is on disk yet. */
+      const noteStaged = (field: ConfigField, value: unknown) => {
         context.ui.toast.show({
-          title: "Nexus",
-          message: 'This TUI could not open the configuration panel.',
-          variant: "error"
-        })
-        // Leave the state closed so the panel does not render without a frame.
-        setPanelStore(draft => {
-          draft.state = createPanelState(configManager.getConfig(), configSaveScope, { closed: true })
+          title: 'Nexus',
+          message: `${configPathLabel(field.path)} = ${describeConfigValue(value)} — not written yet, choose Save`,
+          variant: 'info'
         })
       }
-    }
 
-    /**
-     * Write the panel's draft out.
-     *
-     * The WHOLE draft, never the changed paths: `updateStorageConfig` replaces
-     * the blocks it names, and for `selfHealing` it falls back to
-     * `DEFAULT_CONFIG` rather than to the project/global levels for three of its
-     * four fields. A partial update would pin those to their defaults and shadow
-     * the user's `nexus.jsonc` — the "my file is being ignored" failure, reached
-     * by editing one unrelated number. See `panelSaveUpdate`.
-     *
-     * `configSaveScope` is set from the panel's own scope first, so the panel and
-     * the standalone commands share ONE persistence path instead of two that can
-     * disagree about which file they are writing.
-     */
-    const saveConfigPanel = () => {
-      const state = panelStore.state
-      configSaveScope = state.scope
-      try {
-        configManager.updateStorageConfig(panelSaveUpdate(state))
-        persistConfig()
-        context.ui.toast.show({
-          title: "Nexus",
-          message: `Configuration saved to ${configSaveScope === 'project' ? '.opencode/nexus.jsonc' : '~/.config/opencode/nexus.jsonc'}`,
-          variant: "success"
-        })
-      } catch (error) {
-        // A failed write must not look like a successful one, and the message
-        // says which file was being written.
-        setPanelStore(draft => {
-          draft.state = panelNotice(
-            draft.state,
-            `Could not save: ${error instanceof Error ? error.message : String(error)}`
-          )
-        })
+      /** Put a committed value on the draft, and say so. */
+      const stage = (commit: ConfigCommit): boolean => {
+        if (commit.kind !== 'accepted') return false
+        draft = setConfigValue(draft, commit.field.path, commit.value)
+        noteStaged(commit.field, commit.value)
+        return true
       }
-    }
 
-    /** Carry out an effect the reducer asked for. */
-    const performPanelEffect = async (effect: PanelEffect) => {
-      switch (effect.kind) {
-        case 'pick-model': {
-          const chosen = await chooseModel(`Model for ${effect.title}`, effect.current)
-          if (chosen === null || chosen === undefined) return
-          setPanelStore(draft => {
-            draft.state = applyPanelChoice(draft.state, effect.path, chosen)
-          })
-          return
-        }
-        case 'save':
-          saveConfigPanel()
-          return
-        case 'close':
-          context.ui.panel.close()
-          if (effect.discarded) {
-            context.ui.toast.show({
-              title: "Nexus",
-              message: 'Configuration panel closed without saving.',
-              variant: "info"
+      /**
+       * Answer one field's editor, and return the screen the flow lands on.
+       *
+       * The widget is `editorFor`'s decision, not a `switch` on the field's kind
+       * written out again here — the same four names, chosen in one place.
+       * Every branch ends on the block's own field list, so a user who answers a
+       * field, escapes it, or dismisses its picker all land in the same place and
+       * the flow has no way to skip past a block.
+       */
+      const runEditor = async (field: ConfigField): Promise<ConfigScreen> => {
+        const back = configFieldsScreen(field)
+        switch (editorFor(field)) {
+          case 'boolean': {
+            // TWO ROWS, because the host has no checkbox: `dialog.select`
+            // resolves a single value out of a list, and a switch in a list can
+            // only be two rows you pick between. The glyph is in the row's title.
+            const rows = booleanOptions(configValueAt(draft, field.path) === true)
+            const chosen = await context.ui.dialog.select({
+              title: configPathLabel(field.path),
+              options: rows.map(toDialogRow)
             })
+            if (chosen !== undefined) stage(commitConfigToggle(field, chosen))
+            return back
           }
-          return
-      }
-    }
-
-    /** Feed one key to the reducer and act on whatever it asks for. */
-    const runPanelKey = (key: PanelKey) => {
-      const state = panelStore.state
-      // WHICH buffer the reducer sees is `panelKeyBuffer`'s decision, not this
-      // adapter's: in `edit` the characters live in the host `<input>`, so
-      // `return` has to read the value the user actually typed rather than a
-      // mirrored copy of it, and every other key must not. That rule has a
-      // silent failure mode — commit the seeded value and lose every keystroke
-      // — so it lives in `src/config-panel.ts` where a test can reach it, and
-      // this line only supplies the input's current value.
-      const outcome = applyPanelKey({ ...state, buffer: panelKeyBuffer(state, key, panelInput?.value) }, key)
-      setPanelStore(draft => {
-        draft.state = outcome.state
-      })
-      if (outcome.effect !== undefined) void performPanelEffect(outcome.effect)
-    }
-
-    /**
-     * The panel's keymap layer, built from the one table in
-     * `src/config-panel.ts` and split by mode.
-     *
-     * All three decisions — which renderable receives the keys, which commands
-     * are live, and whether the layer answers at all while the panel is closed —
-     * are `panelLayerSpec`'s, in the pure file, where the tests can reach them.
-     * This adapter supplies the two renderables and the reducer call and hands
-     * the descriptor to the host.
-     */
-    const panelLayer = () => {
-      // `panelRoot`/`panelInput` are read through a thunk because the render's
-      // `ref` callbacks assign them AFTER this layer is registered — a plain
-      // object here would capture both as `undefined`.
-      context.keymap.layer(panelLayerSpec(
-        () => panelStore.state,
-        () => ({ root: panelRoot, input: panelInput }),
-        runPanelKey
-      ))
-    }
-
-    // ── Rendering ───────────────────────────────────────────────────────
-
-    /** The value column for one row, and whether it is editable. */
-    const panelValueCell = (row: PanelRow, state: PanelState): { text: string; editable: boolean } => {
-      const value = panelValueAt(state.draft, row.path)
-      switch (row.kind) {
-        case 'boolean':
-          // A checkbox, drawn as one. This is the whole of it: the host has no
-          // boolean widget, so `[x]`/`[ ]` plus the cursor row's colour IS the
-          // control, and `return`/`space` on this row inverts the value.
-          return { text: value === true ? '[x] on' : '[ ] off', editable: true }
-        case 'number':
-          return { text: String(value), editable: true }
-        case 'text':
-        case 'model':
-          return { text: value === '' ? '(default)' : String(value), editable: true }
-        case 'list': {
-          const entries = Array.isArray(value) ? value.length : 0
-          return { text: `${entries} ${entries === 1 ? 'entry' : 'entries'} — return to edit`, editable: false }
-        }
-        case 'opaque':
-          return { text: String(value), editable: false }
-      }
-    }
-
-    /**
-     * The panel's content, rendered into the host's `session.panel` slot.
-     *
-     * Claimed once at setup and shown only for THIS plugin's panel: the slot is
-     * shared, so a claim that rendered unconditionally would draw Nexus's
-     * configuration over another plugin's panel.
-     */
-    context.ui.slot({
-      append: 'session.panel',
-      render: panel => {
-        const state = panelStore.state
-        if (panel.name !== CONFIG_PANEL_NAME || state.closed) return null
-
-        // Focus owner for the keymap layers below. Set by the `ref` callbacks
-        // during this render and read at key-dispatch time, by which point it is
-        // populated — `target` is a thunk, not a value.
-        //
-        // `focus()` is called explicitly rather than relying on the `focused`
-        // prop: the layers are `target`-scoped, and a target that is not focused
-        // receives nothing at all, so a panel whose keys silently did nothing
-        // would look identical to a working one.
-        //
-        // Which is why the PANEL is focused here, not just the root box. Both
-        // callbacks below ask `panel.focused` before focusing their element, and
-        // that flag is the host's: a panel opened without host focus — restored
-        // from `context.storage.memory` after a reload, opened from a command
-        // that did not take focus, or focused and then blurred — would leave
-        // every target unfocused, so every keymap layer below would match
-        // nothing and the panel would be a screen that looks live and is not.
-        // There is no error to surface in that state, which is what makes it
-        // worth a line. Focusing is idempotent and guarded by the same flag, so
-        // the steady-state cost is one property read per render.
-        const takeRoot = (el: BoxRenderable) => {
-          panelRoot = el
-          if (!panel.focused) panel.focus()
-          if (panel.focused) el.focus()
-        }
-        const takeInput = (el: InputRenderable) => {
-          panelInput = el
-          if (panel.focused) el.focus()
-        }
-
-        // The row window. `panelWindow` guarantees the cursor is inside
-        // `[start, end)`, so the cursor row is ALWAYS one of the rows rendered —
-        // which is the guarantee a host scroll container cannot make testable.
-        const rows = stateRows(state)
-        const height = Math.max(4, context.renderer.terminalHeight - CONFIG_PANEL_CHROME_LINES)
-        const { start, end } = panelWindow(state.cursor, rows.length, height, panelWindowStart)
-        panelWindowStart = start
-
-        const shown = rows.slice(start, end)
-        // Rows whose value differs from the config the panel opened with, so a
-        // staged change is visible BEFORE saving and not only after.
-        const dirtyPaths = new Set(
-          rows
-            .filter(row => {
-              const now = panelValueAt(state.draft, row.path)
-              const was = panelValueAt(state.base, row.path)
-              return JSON.stringify(now) !== JSON.stringify(was)
+          case 'number':
+          case 'text': {
+            const typed = await context.ui.dialog.prompt({
+              title: configPathLabel(field.path),
+              description: configPromptDescription(field),
+              placeholder: describeConfigValue(configValueAt(draft, field.path))
             })
-            .map(row => panelPathLabel(row.path))
-        )
-
-        const scopeLabel = state.scope === 'project' ? '📁 project (.opencode/)' : '🌍 global (~/.config/opencode/)'
-        const editing = state.mode === 'edit'
-
-        // The value column starts after the LONGEST label on screen, not at a
-        // fixed offset, so a deep path like `customRoles[0].displayName` does not
-        // push its value out of alignment with every other row. Derived from the
-        // window rather than from all the rows, so it does not jump while
-        // scrolling.
-        const labelWidth = shown.reduce(
-          (widest, row) => Math.max(widest, panelPathLabel(row.path).length),
-          0
-        )
-
-        return (
-          <box ref={takeRoot} focused={panel.focused} flexDirection="column" width={panel.width}>
-            <box>
-              <text fg="#7dd3fc">⚡ Nexus configuration</text>
-              <text fg="#64748b">{'  '}{start + 1}-{Math.min(end, rows.length)} of {rows.length}</text>
-            </box>
-            <box>
-              <text fg={state.scope === 'project' ? '#fbbf24' : '#94a3b8'}>Saving to {scopeLabel}</text>
-              <text fg="#64748b">{'   '}tab switches scope · nothing is written until you save</text>
-            </box>
-
-            <box flexDirection="column">
-              {shown.map((row, offset) => {
-                const cursor = start + offset
-                const focused = cursor === state.cursor
-                const cell = panelValueCell(row, state)
-                const label = panelPathLabel(row.path)
-                return (
-                  <box>
-                    <text fg={focused ? '#7dd3fc' : '#475569'}>{focused ? '❯ ' : '  '}</text>
-                    <text fg={focused ? '#e2e8f0' : '#94a3b8'}>{label.padEnd(labelWidth)}</text>
-                    <text fg={cell.editable ? (focused ? '#f8fafc' : '#cbd5e1') : '#64748b'}>{` ${cell.text}`}</text>
-                    {dirtyPaths.has(label) && <text fg="#fbbf24">{'  *'}</text>}
-                  </box>
-                )
-              })}
-            </box>
-
-            {editing && (
-              <box>
-                <text fg="#7dd3fc">{'  '}edit: </text>
-                <input
-                  ref={takeInput}
-                  focused
-                  value={state.buffer}
-                  placeholder="type a value, enter to accept, esc to cancel"
-                />
-              </box>
-            )}
-
-            {state.error !== undefined && <text fg="#ef4444">{`  ${state.error}`}</text>}
-            {state.notice !== undefined && <text fg="#64748b">{`  ${state.notice}`}</text>}
-
-            {state.mode === 'discard' && (
-              <text fg="#ef4444">
-                {'  '}Unsaved changes. y discards them and closes · n keeps editing · nothing is written
-              </text>
-            )}
-
-            <box marginTop={1}>
-              <text fg="#475569">
-                {editing
-                  ? '  enter accept · esc cancel'
-                  : state.mode === 'discard'
-                    ? '  y discard · n keep'
-                    // Derived from the binding table rather than written out, so
-                    // the footer cannot advertise a key that is not bound.
-                    : `  ${PANEL_FOOTER_HINTS.map(hint => `${hint.bind} ${hint.label}`).join(' · ')}`}
-              </text>
-            </box>
-          </box>
-        )
+            // Escape on the prompt: no change, and back to the same list.
+            if (typed === undefined) return back
+            const commit = commitConfigText(field, typed)
+            if (commit.kind === 'rejected') {
+              // VISIBLE, and the whole point of the exercise. The old budget
+              // prompt parsed with `parseFloat` and on `NaN` fell through to
+              // nothing at all: the dialog closed, the value did not change, and
+              // a rejection was indistinguishable from a keypress that missed.
+              // This says what was wrong, leaves the value alone, and returns to
+              // the list so the row can be tried again.
+              await context.ui.dialog.alert({
+                title: `Not a number for ${configPathLabel(field.path)}`,
+                message: `${commit.message} Nothing was changed.`
+              })
+              return back
+            }
+            stage(commit)
+            return back
+          }
+          case 'model': {
+            const model = await chooseModel(
+              configPathLabel(field.path),
+              describeConfigValue(configValueAt(draft, field.path))
+            )
+            // A dismissal returns with nothing changed, which is what "I changed
+            // my mind" should do — and it is why `undefined` is not the picker's
+            // "Use default", which is the empty string.
+            stage(commitConfigModel(field, model))
+            return back
+          }
+          case 'none':
+            // Unreachable: the row for such a field is `disabled`, and
+            // `configSelect` gives it no screen to go to. Returning rather than
+            // writing anything is what a screen with no widget has to do.
+            return back
+        }
       }
-    })
+
+      for (;;) {
+        const options = configScreenOptions(screen, discovery, configSaveScope, field =>
+          configValueAt(draft, field.path)
+        )
+        const title =
+          screen.kind === 'blocks'
+            ? 'Nexus configuration'
+            : screen.kind === 'fields'
+              ? `Nexus configuration — ${screen.block}`
+              : `Nexus configuration — ${configPathLabel(screen.field.path)}`
+
+        // `undefined` from the host IS the escape key, and the only way out of a
+        // list. That is why escape needs no binding here: the host owns it, and
+        // `configUp` decides where it lands. There is no second commit path
+        // through this function, which is what keeps "typed" and "saved" from
+        // racing — the only way a value reaches the draft is `stage`.
+        const chosen = await context.ui.dialog.select({ title, options: options.map(toDialogRow) })
+
+        if (chosen === undefined) {
+          const up = configUp(screen)
+          if (up === undefined) return
+          screen = up
+          continue
+        }
+
+        const outcome = configSelect(screen, chosen)
+        switch (outcome.kind) {
+          case 'stay':
+            if (chosen.kind === 'scope') {
+              // A row, not a screen: the scope changes what every other staged
+              // edit in this flow will be written to, and nothing is written
+              // until save, so it is safe to change after staging them.
+              configSaveScope = chosen.scope === 'project' ? 'global' : 'project'
+            }
+            break
+          case 'to':
+            screen =
+              outcome.screen.kind === 'editor'
+                ? await runEditor(outcome.screen.field)
+                : outcome.screen
+            break
+          case 'save': {
+            // The WHOLE draft, never the changed paths — see `configSaveUpdate`
+            // for why a partial call would pin three of the four selfHealing
+            // keys to their defaults and shadow the user's file.
+            configManager.updateStorageConfig(configSaveUpdate(draft))
+            persistConfig()
+            const where =
+              configSaveScope === 'project'
+                ? '.opencode/nexus.jsonc'
+                : '~/.config/opencode/nexus.jsonc'
+            context.ui.toast.show({
+              title: 'Nexus',
+              message: configIsDirty(base, draft)
+                ? `Configuration saved to ${where}.`
+                : `Nothing changed — ${where} left as it was.`,
+              variant: 'success'
+            })
+            return
+          }
+          case 'close':
+            context.ui.toast.show({
+              title: 'Nexus',
+              message: configIsDirty(base, draft)
+                ? 'Closed without saving. Your file is unchanged.'
+                : 'Closed. Nothing was changed.',
+              variant: 'info'
+            })
+            return
+        }
+      }
+    }
 
 
     // The session a command submitted from the TUI has to land in: the one the
@@ -1407,13 +1244,12 @@ export default Plugin.define({
     context.ui.slot({
       append: "app",
       render: () => {
-        // The configuration panel's own layer, registered here beside the
-        // command layer so the two are created and torn down together. It is
-        // TARGETED at the panel's renderable and disabled while the panel is
-        // closed, so a `j` or an `s` typed in a normal session is never claimed
-        // by it — the difference between a panel that owns the keyboard and a
-        // panel that steals it.
-        panelLayer()
+        // No second layer here any more. The fullscreen panel registered its own
+        // `keymap.layer({ target })` beside this one, targeted at the renderable
+        // it drew, so that a `j` or an `s` typed in a normal session was never
+        // claimed by it. The configuration flow is the host's dialogs, and the
+        // host owns the keyboard while a dialog is open — so there is no layer
+        // to register and no key of ours that can be pressed underneath one.
         context.keymap.layer(() => ({
           mode: "global",
           priority: 10,
@@ -1434,7 +1270,7 @@ export default Plugin.define({
                   switch (cmd) {
                     case 'config':
                     case 'c':
-                      openConfigPanel()
+                      void runConfigFlow()
                       break
                     case 'status':
                     case 's':
@@ -1505,7 +1341,7 @@ export default Plugin.define({
                       })
                   }
                 } else {
-                  openConfigPanel()
+                  void runConfigFlow()
                 }
               }
             },
@@ -1518,7 +1354,7 @@ export default Plugin.define({
               enabled: () => true,
               suggested: true,
               run: async () => {
-                openConfigPanel()
+                void runConfigFlow()
               }
             },
             {

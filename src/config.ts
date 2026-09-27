@@ -556,7 +556,7 @@ function reportUndeclaredKeys(parsed: Record<string, unknown>, filePath: string)
   if (undeclared.length === 0) return
   console.warn(
     `[nexus] ${redactHome(filePath)} has ${undeclared.length} key(s) Nexus does not read: ` +
-    `${undeclared.join(', ')}. They are ignored, and the next save from the config panel will ` +
+    `${undeclared.join(', ')}. They are ignored, and the next save from the config dialogs will ` +
     'remove them from the file.'
   )
 }
