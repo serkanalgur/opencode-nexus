@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 400">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 400" width="1200" height="400">
   <defs>
     <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" style="stop-color:#0f0f23;stop-opacity:1" />
@@ -10,26 +10,10 @@
       <stop offset="50%" style="stop-color:#8b5cf6;stop-opacity:1" />
       <stop offset="100%" style="stop-color:#a855f7;stop-opacity:1" />
     </linearGradient>
-    <linearGradient id="nodeGrad1" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#6366f1;stop-opacity:0.8" />
-      <stop offset="100%" style="stop-color:#8b5cf6;stop-opacity:0.8" />
-    </linearGradient>
-    <linearGradient id="nodeGrad2" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#8b5cf6;stop-opacity:0.8" />
-      <stop offset="100%" style="stop-color:#a855f7;stop-opacity:0.8" />
-    </linearGradient>
-    <linearGradient id="nodeGrad3" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#a855f7;stop-opacity:0.8" />
-      <stop offset="100%" style="stop-color:#c084fc;stop-opacity:0.8" />
-    </linearGradient>
-    <filter id="glow">
-      <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
-      <feMerge>
-        <feMergeNode in="coloredBlur"/>
-        <feMergeNode in="SourceGraphic"/>
-      </feMerge>
-    </filter>
-    <filter id="softGlow">
+    <linearGradient id="nodeGrad1" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style="stop-color:#4338ca" /><stop offset="100%" style="stop-color:#6d28d9" /></linearGradient>
+    <linearGradient id="nodeGrad2" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style="stop-color:#6d28d9" /><stop offset="100%" style="stop-color:#7c2fd4" /></linearGradient>
+    <linearGradient id="nodeGrad3" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style="stop-color:#7c2fd4" /><stop offset="100%" style="stop-color:#9333ea" /></linearGradient>
+<filter id="softGlow">
       <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
       <feMerge>
         <feMergeNode in="coloredBlur"/>
@@ -64,24 +48,24 @@
   </g>
   
   <!-- Connection lines (DAG visualization) -->
-  <g stroke="url(#accentGrad)" stroke-width="2" fill="none" opacity="0.4">
+  <g stroke="#8b5cf6" stroke-width="2" fill="none" opacity="0.85">
     <!-- Main flow -->
-    <path d="M 150 200 L 300 150" stroke-dasharray="5,5">
+    <path d="M 150 215 L 300 165" stroke-dasharray="5,5">
       <animate attributeName="stroke-dashoffset" from="0" to="10" dur="1s" repeatCount="indefinite"/>
     </path>
-    <path d="M 150 200 L 300 250" stroke-dasharray="5,5">
+    <path d="M 150 215 L 300 265" stroke-dasharray="5,5">
       <animate attributeName="stroke-dashoffset" from="0" to="10" dur="1s" repeatCount="indefinite"/>
     </path>
-    <path d="M 300 150 L 500 150" stroke-dasharray="5,5">
+    <path d="M 300 165 L 500 165" stroke-dasharray="5,5">
       <animate attributeName="stroke-dashoffset" from="0" to="10" dur="1s" repeatCount="indefinite"/>
     </path>
-    <path d="M 300 250 L 500 250" stroke-dasharray="5,5">
+    <path d="M 300 265 L 500 265" stroke-dasharray="5,5">
       <animate attributeName="stroke-dashoffset" from="0" to="10" dur="1s" repeatCount="indefinite"/>
     </path>
-    <path d="M 500 150 L 700 200" stroke-dasharray="5,5">
+    <path d="M 500 165 L 700 165" stroke-dasharray="5,5">
       <animate attributeName="stroke-dashoffset" from="0" to="10" dur="1s" repeatCount="indefinite"/>
     </path>
-    <path d="M 500 250 L 700 200" stroke-dasharray="5,5">
+    <path d="M 500 265 L 700 265" stroke-dasharray="5,5">
       <animate attributeName="stroke-dashoffset" from="0" to="10" dur="1s" repeatCount="indefinite"/>
     </path>
   </g>
@@ -89,46 +73,54 @@
   <!-- Agent nodes -->
   <g filter="url(#softGlow)">
     <!-- Architect node -->
-    <circle cx="150" cy="200" r="35" fill="url(#nodeGrad1)" opacity="0.9">
+    <circle cx="150" cy="215" r="35" fill="url(#nodeGrad1)" opacity="0.9">
       <animate attributeName="r" values="35;37;35" dur="2s" repeatCount="indefinite"/>
     </circle>
-    <text x="150" y="195" text-anchor="middle" fill="white" font-family="system-ui, -apple-system, sans-serif" font-size="10" font-weight="600">🏗️</text>
-    <text x="150" y="215" text-anchor="middle" fill="white" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="500">Architect</text>
+    <text x="150" y="210" text-anchor="middle" fill="white" font-family="system-ui, -apple-system, sans-serif" font-size="10" font-weight="600">🏗️</text>
+    <text x="150" y="230" text-anchor="middle" fill="white" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="500">Architect</text>
     
     <!-- Coder node -->
-    <circle cx="300" cy="150" r="30" fill="url(#nodeGrad2)" opacity="0.9">
+    <circle cx="300" cy="165" r="30" fill="url(#nodeGrad2)" opacity="0.9">
       <animate attributeName="r" values="30;32;30" dur="2.5s" repeatCount="indefinite"/>
     </circle>
-    <text x="300" y="145" text-anchor="middle" fill="white" font-family="system-ui, -apple-system, sans-serif" font-size="10" font-weight="600">💻</text>
-    <text x="300" y="165" text-anchor="middle" fill="white" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="500">Coder</text>
+    <text x="300" y="160" text-anchor="middle" fill="white" font-family="system-ui, -apple-system, sans-serif" font-size="10" font-weight="600">💻</text>
+    <text x="300" y="180" text-anchor="middle" fill="white" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="500">Coder</text>
     
     <!-- Reviewer node -->
-    <circle cx="300" cy="250" r="30" fill="url(#nodeGrad2)" opacity="0.9">
+    <circle cx="300" cy="265" r="30" fill="url(#nodeGrad2)" opacity="0.9">
       <animate attributeName="r" values="30;32;30" dur="2.2s" repeatCount="indefinite"/>
     </circle>
-    <text x="300" y="245" text-anchor="middle" fill="white" font-family="system-ui, -apple-system, sans-serif" font-size="10" font-weight="600">🔍</text>
-    <text x="300" y="265" text-anchor="middle" fill="white" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="500">Reviewer</text>
+    <text x="300" y="260" text-anchor="middle" fill="white" font-family="system-ui, -apple-system, sans-serif" font-size="10" font-weight="600">🔍</text>
+    <text x="300" y="280" text-anchor="middle" fill="white" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="500">Reviewer</text>
     
     <!-- Tester node -->
-    <circle cx="500" cy="150" r="30" fill="url(#nodeGrad3)" opacity="0.9">
+    <circle cx="500" cy="165" r="30" fill="url(#nodeGrad3)" opacity="0.9">
       <animate attributeName="r" values="30;32;30" dur="2.3s" repeatCount="indefinite"/>
     </circle>
-    <text x="500" y="145" text-anchor="middle" fill="white" font-family="system-ui, -apple-system, sans-serif" font-size="10" font-weight="600">🧪</text>
-    <text x="500" y="165" text-anchor="middle" fill="white" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="500">Tester</text>
+    <text x="500" y="160" text-anchor="middle" fill="white" font-family="system-ui, -apple-system, sans-serif" font-size="10" font-weight="600">🧪</text>
+    <text x="500" y="180" text-anchor="middle" fill="white" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="500">Tester</text>
     
     <!-- Explorer node -->
-    <circle cx="500" cy="250" r="30" fill="url(#nodeGrad3)" opacity="0.9">
+    <circle cx="500" cy="265" r="30" fill="url(#nodeGrad3)" opacity="0.9">
       <animate attributeName="r" values="30;32;30" dur="2.7s" repeatCount="indefinite"/>
     </circle>
-    <text x="500" y="245" text-anchor="middle" fill="white" font-family="system-ui, -apple-system, sans-serif" font-size="10" font-weight="600">🔬</text>
-    <text x="500" y="265" text-anchor="middle" fill="white" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="500">Explorer</text>
+    <text x="500" y="260" text-anchor="middle" fill="white" font-family="system-ui, -apple-system, sans-serif" font-size="10" font-weight="600">🔬</text>
+    <text x="500" y="280" text-anchor="middle" fill="white" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="500">Explorer</text>
+    
+    <!-- Designer node (hub: "Designer" is too wide to sit inside an r=30 disc
+         at the cy+15 label baseline, where the disc is only 52px across) -->
+    <circle cx="700" cy="165" r="35" fill="url(#nodeGrad1)" opacity="0.9">
+      <animate attributeName="r" values="35;37;35" dur="2.4s" repeatCount="indefinite"/>
+    </circle>
+    <text x="700" y="160" text-anchor="middle" fill="white" font-family="system-ui, -apple-system, sans-serif" font-size="10" font-weight="600">🎨</text>
+    <text x="700" y="180" text-anchor="middle" fill="white" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="500">Designer</text>
     
     <!-- Docs node -->
-    <circle cx="700" cy="200" r="35" fill="url(#nodeGrad1)" opacity="0.9">
-      <animate attributeName="r" values="35;37;35" dur="2.1s" repeatCount="indefinite"/>
+    <circle cx="700" cy="265" r="30" fill="url(#nodeGrad1)" opacity="0.9">
+      <animate attributeName="r" values="30;32;30" dur="2.1s" repeatCount="indefinite"/>
     </circle>
-    <text x="700" y="195" text-anchor="middle" fill="white" font-family="system-ui, -apple-system, sans-serif" font-size="10" font-weight="600">📝</text>
-    <text x="700" y="215" text-anchor="middle" fill="white" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="500">Docs</text>
+    <text x="700" y="260" text-anchor="middle" fill="white" font-family="system-ui, -apple-system, sans-serif" font-size="10" font-weight="600">📝</text>
+    <text x="700" y="280" text-anchor="middle" fill="white" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="500">Docs</text>
   </g>
   
   <!-- Cost indicator -->
@@ -136,7 +128,7 @@
     <rect x="0" y="0" width="200" height="80" rx="8" fill="#1e1e3a" stroke="#6366f1" stroke-width="1" opacity="0.8"/>
     <text x="20" y="25" fill="#a5b4fc" font-family="system-ui, -apple-system, sans-serif" font-size="12" font-weight="500">💰 Cost-Aware Routing</text>
     <text x="20" y="50" fill="#6366f1" font-family="system-ui, -apple-system, sans-serif" font-size="24" font-weight="700">$0.42</text>
-    <text x="80" y="50" fill="#94a3b8" font-family="system-ui, -apple-system, sans-serif" font-size="12">/ $10.00</text>
+    <text x="95" y="50" fill="#94a3b8" font-family="system-ui, -apple-system, sans-serif" font-size="12">/ $10.00</text>
     <rect x="20" y="62" width="160" height="6" rx="3" fill="#1e293b"/>
     <rect x="20" y="62" width="67" height="6" rx="3" fill="url(#accentGrad)">
       <animate attributeName="width" values="60;67;60" dur="3s" repeatCount="indefinite"/>
@@ -145,21 +137,21 @@
   
   <!-- Features -->
   <g transform="translate(900, 220)">
-    <rect x="0" y="0" width="200" height="120" rx="8" fill="#1e1e3a" stroke="#8b5cf6" stroke-width="1" opacity="0.8"/>
+    <rect x="0" y="0" width="200" height="150" rx="8" fill="#1e1e3a" stroke="#8b5cf6" stroke-width="1" opacity="0.8"/>
     <text x="20" y="25" fill="#c4b5fd" font-family="system-ui, -apple-system, sans-serif" font-size="12" font-weight="500">⚡ Features</text>
-    <text x="20" y="48" fill="#e2e8f0" font-family="system-ui, -apple-system, sans-serif" font-size="11">• Dynamic DAG Execution</text>
-    <text x="20" y="68" fill="#e2e8f0" font-family="system-ui, -apple-system, sans-serif" font-size="11">• Real Pub/Sub Comms</text>
-    <text x="20" y="88" fill="#e2e8f0" font-family="system-ui, -apple-system, sans-serif" font-size="11">• Self-Healing Agents</text>
-    <text x="20" y="108" fill="#e2e8f0" font-family="system-ui, -apple-system, sans-serif" font-size="11">• Shared Memory Store</text>
+    <text x="20" y="50" fill="#e2e8f0" font-family="system-ui, -apple-system, sans-serif" font-size="11">• Effort-Aware Routing</text>
+    <text x="20" y="68" fill="#e2e8f0" font-family="system-ui, -apple-system, sans-serif" font-size="11">• Git-Flow Convention</text>
+    <text x="20" y="86" fill="#e2e8f0" font-family="system-ui, -apple-system, sans-serif" font-size="11">• Provider-Grouped Picker</text>
+    <text x="20" y="104" fill="#e2e8f0" font-family="system-ui, -apple-system, sans-serif" font-size="11">• Bundled Design Skills</text>
+    <text x="20" y="122" fill="#e2e8f0" font-family="system-ui, -apple-system, sans-serif" font-size="11">• Custom Roles &amp; Presets</text>
+    <text x="20" y="140" fill="#e2e8f0" font-family="system-ui, -apple-system, sans-serif" font-size="11">• Web Dashboard</text>
   </g>
   
   <!-- Main title -->
-  <g filter="url(#glow)">
-    <text x="600" y="80" text-anchor="middle" fill="url(#accentGrad)" font-family="system-ui, -apple-system, sans-serif" font-size="48" font-weight="800" letter-spacing="-1">OpenCode Nexus</text>
-  </g>
+  <text x="600" y="80" text-anchor="middle" fill="#ffffff" font-family="system-ui, -apple-system, sans-serif" font-size="48" font-weight="800" letter-spacing="-1">OpenCode Nexus</text>
   <text x="600" y="115" text-anchor="middle" fill="#94a3b8" font-family="system-ui, -apple-system, sans-serif" font-size="18" font-weight="400">Adaptive Multi-Agent Orchestration with Cost Intelligence</text>
   
   <!-- Bottom bar -->
   <rect x="0" y="380" width="1200" height="20" fill="#0f0f23" opacity="0.8"/>
-  <text x="600" y="395" text-anchor="middle" fill="#6366f1" font-family="monospace" font-size="12" font-weight="500">@serkanalgur/opencode-nexus • MIT License</text>
+  <text x="600" y="395" text-anchor="middle" fill="#818cf8" font-family="monospace" font-size="12" font-weight="500">@serkanalgur/opencode-nexus • MIT License</text>
 </svg>
