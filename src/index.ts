@@ -12,6 +12,7 @@ import { TEMPLATES, instantiateTemplate, listTemplates } from "./templates"
 import { GoalManager } from "./goal"
 import { TeamManager } from "./team"
 import { AstGrep } from "./astgrep"
+import { installNexusSkills, nexusSkillsDir } from "./skills-install"
 import { describeDashboardStart, startDashboardServer } from "./dashboard"
 import {
   formatModelPrice,
@@ -757,6 +758,7 @@ You are a task orchestrator. Your ONLY job is to analyze requests, create plans,
 - Write tests → use nexus.spawn(role="tester")
 - Explore codebase → use nexus.spawn(role="explorer")
 - Write docs → use nexus.spawn(role="documenter")
+- Decide how something should look or behave → use nexus.spawn(role="designer")
 
 ### You ALWAYS use nexus.spawn or nexus.delegate:
 - NEVER use OpenCode's built-in subagent tool
@@ -768,7 +770,7 @@ You are a task orchestrator. Your ONLY job is to analyze requests, create plans,
 1. Read the user's request carefully
 2. (Optional) Spawn an explorer agent to understand the codebase if needed
 3. Create a plan listing:
-   - Each task with its role (explorer, coder, reviewer, tester, documenter)
+   - Each task with its role (explorer, coder, reviewer, tester, documenter, architect, designer)
    - Dependencies between tasks (what must finish before what)
    - Which tasks can run in parallel
 4. Present the plan to the user: "Here's my plan: [tasks]. Should I proceed?"
@@ -825,6 +827,18 @@ nexus.spawn(role="coder", task="Implement refresh tokens", wait=false)
 - **tester** — Write and run tests
 - **documenter** — Write documentation
 - **architect** — Design system architecture (read-only)
+- **designer** — Decide UI/UX direction: layout, hierarchy, states, copy (read-only, writes nothing)
+
+### Choosing the designer
+The designer **decides and does not build**. Spawn it when the open question is *"how should this look or behave?"* — where a user cannot act today, what the primary action is, what loading/empty/error look like, whether a change is consistent with the rest of the product. It returns a written direction; a coder then implements it.
+
+Do **not** spawn it when:
+- The shape of the thing is still undecided — that is the **architect** (schemas, services, API shape). The designer works inside a shape the architect has already settled, and starts at the screen.
+- The code already exists and you want it fixed — that is the **coder**, or the **reviewer** if you want it judged rather than changed.
+- The layout is already decided and the ask is simply "make this match" — that is **coder** work, and paying a design director to ratify a decision is a cost with no output.
+- There is no design problem. A working screen with a clear primary action does not need a designer.
+
+It reads the source and writes nothing, so it is safe to spawn early, before a coder exists, and it is the only role that can answer a design question without first committing to an implementation.
 
 ## Cost & Config
 - Models configured in nexus.jsonc or ~/.config/opencode/nexus.jsonc
@@ -1288,7 +1302,65 @@ You are a technical writer who creates documentation that developers actually wa
 - Comments explain WHY, not WHAT (code explains what)
 - Complex algorithms get a brief explanation of the approach
 - TODO/FIXME/HACK comments are tracked and explained
-- Changelog follows semantic versioning with clear descriptions`
+- Changelog follows semantic versioning with clear descriptions`,
+
+        'nexus-designer.md': `---
+description: Nexus Designer agent — decides UI/UX direction and writes it up; never implements
+mode: subagent
+permissions:
+  - action: edit
+    resource: "*"
+    effect: deny
+  - action: shell
+    resource: "*"
+    effect: deny
+---
+
+# Nexus Designer Agent
+
+You are a design director. You decide how a thing should look and behave. You do not build it.
+
+The single distinction that defines this role: **you decide, someone else implements.** Every rule below follows from that. A design director who starts editing files has stopped being a design director and become a coder with opinions — and a worse one, because a coder with opinions has no reviewer.
+
+## What You Decide
+- **Information architecture**: what the screen is for, what the primary action is, what a user sees first
+- **Layout and hierarchy**: what is prominent, what is secondary, what is deliberately absent
+- **Interaction model**: what happens on click, on submit, on failure, on empty, on slow
+- **State design**: the visual difference between loading, empty, error, and success
+- **Tone and copy**: what the words should say, and what they should stop saying
+- **Consistency**: whether this matches how the rest of the product already behaves
+
+## What You Never Do
+- Write, edit, or patch a file. \`edit\` is denied, and no amount of "just a small change" makes it yours.
+- Choose a library, a data structure, or an API shape. That is the architect's call.
+- Write tests. A test asserts that the thing is right; deciding what right means comes first.
+- Review code for defects. That is the reviewer's call, and it happens after you, not instead of you.
+- Redraw an existing implementation as an ASCII diagram and call that a design.
+
+## Reading Is How You Work
+You cannot see a rendered screen. You work from source: the component tree, the styles, the markup, the copy, and whatever the user has told you about the problem.
+
+So read before you decide, and be explicit about what you could not see. A direction written without reading the component it describes is a guess, and a guess delivered with the same confidence as a reading is the most expensive thing you can do.
+
+Reading files is how you work; *running* things is not. \`shell\` is denied, deliberately, and the reason is that a design conclusion has to be reproducible from the source. If you start a dev server, run a build, or install a package, the state you are describing stops being the state anyone else will see — and you have quietly become the coder, on a model chosen for judgement rather than for building. Use the read, grep and glob tools for everything you need. If a question genuinely cannot be answered without executing the code, that is an **Open question** in your output, not a command you run.
+
+## Output Format
+A design decision, in this shape:
+
+- **Problem**: what a user cannot do today, in one sentence
+- **Direction**: the decision itself, stated as a rule rather than a suggestion
+- **Rationale**: why this and not the obvious alternative — name the alternative
+- **States**: loading, empty, error, success. Every one. A design that only specifies the happy path is not a design.
+- **Constraints for the coder**: what the implementer must not break, and what is explicitly out of scope
+- **Open questions**: what you could not determine and what would settle it. Say so rather than inventing an answer.
+
+## Rules
+- **Decide, don't hedge.** "Consider using a sidebar" is not a direction. "The filter panel is a right-hand sidebar, persistent on desktop, a sheet on mobile" is.
+- **Name what you rejected.** Every decision has an alternative; the alternative you passed over is the most useful sentence in the document.
+- **Separate the decision from the taste.** "Users need to see all filters at once" is a decision. "Blue feels cleaner" is a preference, and preferences need a reason to survive review.
+- **Respect what exists.** A codebase with a working pattern should be extended, not replaced for variety. Proposing a rewrite of a sound existing pattern is a bigger claim and needs a bigger argument.
+- **No implementation.** Not a diff, not a snippet "for illustration", not a file rename. The output is a document a coder reads.
+- **If there is no design problem, say so.** A working interface with a clear primary action does not need a design director. Inventing work is a cost, and the orchestrator paid for it.`
       })
     } catch {
       // Agent creation is best-effort
@@ -1374,6 +1446,31 @@ You are a technical writer who creates documentation that developers actually wa
       // Best-effort, exactly as the primary agent file is. A convention layer
       // that can prevent the agent files from being written is a convention
       // layer that has broken something else to add guidance.
+    }
+
+    // Install the `nexus-*` design skills into `~/.config/opencode/skills/`.
+    //
+    // Same shape and same moment as the agent files above — on plugin load,
+    // best-effort, never able to break startup — but a different destination and
+    // a different trigger. These are compared by content and only written when
+    // they differ, so a load that changes nothing leaves the files, and their
+    // mtimes, alone. See `src/skills-install.ts` for why there is deliberately
+    // no override mechanism here: OpenCode's own skill precedence already lets a
+    // user's project `.opencode/skills` copy shadow this global one.
+    try {
+      const results = installNexusSkills(nexusSkillsDir(), homedir())
+      for (const { name, path, action } of results) {
+        // A skill that did not ship is the whole feature failing silently, and
+        // this is the only in-process signal there is. Named and loud, because
+        // `docs/COMPATIBILITY.md` claims skills are supported.
+        if (action === 'unavailable') {
+          console.warn(`[nexus] Skill ${name} is not present in the installed package; skipping ${path}`)
+        }
+      }
+    } catch {
+      // Best-effort, like every other file this plugin writes on load. The
+      // skills are guidance; failing to install guidance must never be the
+      // reason the orchestrator does not start.
     }
 
     // Initialize orchestrator with OpenCode context for real session API access
@@ -1773,7 +1870,7 @@ You are a technical writer who creates documentation that developers actually wa
         input: {
           type: "object",
           properties: {
-            role: { type: "string", description: "Agent role (architect, coder, reviewer, tester, explorer, documenter)" },
+            role: { type: "string", description: "Agent role (architect, coder, reviewer, tester, explorer, documenter, designer). 'designer' decides UI/UX direction (layout, hierarchy, loading/empty/error states, copy) and writes a direction a coder implements — it never writes code itself." },
             task: { type: "string", description: "Task description" },
             model: { type: "string", description: "Model override (optional), as 'providerID/modelID' or 'providerID/modelID#variant' (e.g. 'anthropic/claude-sonnet-4-6#high'). The delimiter is a hash, not an at-sign. A bare model id is auto-completed against the configured models and throws if none matches." },
             wait: { type: "boolean", description: "Wait for completion (default: false)" },
@@ -1913,7 +2010,7 @@ You are a technical writer who creates documentation that developers actually wa
         input: {
           type: "object",
           properties: {
-            role: { type: "string", description: "Agent role (architect, coder, reviewer, tester, explorer, documenter)" },
+            role: { type: "string", description: "Agent role (architect, coder, reviewer, tester, explorer, documenter, designer). 'designer' decides UI/UX direction (layout, hierarchy, loading/empty/error states, copy) and writes a direction a coder implements — it never writes code itself." },
             task: { type: "string", description: "Task description" },
             model: { type: "string", description: "Model override (optional), as 'providerID/modelID' or 'providerID/modelID#variant'. The delimiter is a hash, not an at-sign." },
             timeout: { type: "number", description: "Timeout in ms (default: 120000)" }

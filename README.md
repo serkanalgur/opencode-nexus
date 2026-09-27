@@ -72,7 +72,7 @@ Or manually add to `~/.config/opencode/opencode.jsonc`:
 
 On every plugin load, Nexus:
 - Writes `nexus-orchestrator` to `~/.config/opencode/agents/nexus-orchestrator.md`
-- Writes the six subagent files: `nexus-coder`, `nexus-explorer`, `nexus-reviewer`, `nexus-tester`, `nexus-architect`, `nexus-documenter`
+- Writes the seven subagent files: `nexus-coder`, `nexus-explorer`, `nexus-reviewer`, `nexus-tester`, `nexus-architect`, `nexus-documenter`, `nexus-designer`
 - Reads role→model mappings from `.opencode/nexus.jsonc` (and the global config) and resolves them per spawn; the generated agent files carry no model pin
 - Best-effort: if `~/.config/opencode/opencode.jsonc` already exists and does not already mention `"lsp"`, inserts `"lsp": true`; silently does nothing if the file is absent
 
@@ -772,7 +772,7 @@ const solutions = orchestrator.learning.findSolutions('TypeScript TS2345 error')
 
 ## Agents
 
-Nexus creates 7 agent files in `~/.config/opencode/agents/`:
+Nexus creates 8 agent files in `~/.config/opencode/agents/`:
 
 | Agent | Mode | Purpose |
 |-------|------|---------|
@@ -783,6 +783,7 @@ Nexus creates 7 agent files in `~/.config/opencode/agents/`:
 | `nexus-tester` | subagent | Write and run tests |
 | `nexus-explorer` | subagent | Explore codebases (read-only) |
 | `nexus-documenter` | subagent | Write documentation |
+| `nexus-designer` | subagent | Decide UI/UX direction — layout, hierarchy, states, copy (read-only) |
 
 ### Clarify
 
@@ -800,9 +801,46 @@ nexus.clarify(question="Should I use JWT or OAuth?", options="JWT, OAuth", assum
   💡 Default: JWT
 ```
 
-The repository also contains a `skills/ask-if-clarify/SKILL.md` prompt. Nothing
-in `src/` loads it and it is not in `package.json`'s `files` list, so it is not
-installed with the package — treat it as a repo document, not a shipped feature.
+### Skills
+
+Three design skills are installed to `~/.config/opencode/skills/` on plugin
+load, alongside the generated agent files:
+
+| Skill | What it is for |
+|-------|----------------|
+| `nexus-design-taste` | The convergence catalogue — uniform card grids, one radius everywhere, a gradient hero, all-caps eyebrows, middot slogans, arrows on every link — each with a concrete alternative, plus when structure carries information and when it is decoration |
+| `nexus-interface-a11y` | WCAG 2.2 AA thresholds to write into a design direction: contrast, target size, focus, colour, motion, reflow. Every figure cites its success criterion and level |
+| `nexus-design-review` | Auditing an existing interface, severity-ordered, reporting in the same six fields a design brief uses. Reports; does not edit |
+
+**The installed files are plugin-managed.** A file is written when it is missing
+or when the content this version ships differs from what is on disk, so an
+ordinary plugin load never rewrites an unchanged file and never churns its
+mtime. A release that changes a skill's text does update the installed copy, and
+**that update will overwrite a hand-edited global copy** — the file is treated as
+owned by the plugin.
+
+**To customise a skill, do not edit the global copy.** Put your version in your
+project's `.opencode/skills/` instead:
+
+```
+.opencode/skills/nexus-design-taste/SKILL.md
+```
+
+OpenCode registers skill sources in precedence order — built-in, then
+`.claude/skills` and `.agents/skills`, then `~/.config/opencode/skills`, then
+**project `.opencode/skills`**, then explicit `skills` config entries — and later
+sources win. A project copy therefore shadows the installed one, per project,
+with no configuration and no nexus setting involved. This is the intended
+extension point; there is deliberately no in-plugin override flag, because
+OpenCode's own precedence already resolves it and a second mechanism would be a
+second source of truth that could disagree with the first.
+
+The `nexus-` prefix is what makes that work: a user copy *shadows* the installed
+skill rather than appearing beside it as two unrelated skills.
+
+The repository also contains `skills/ask-if-clarify/SKILL.md`. It is not in
+`NEXUS_SKILL_NAMES` in `src/skills-install.ts`, so nothing installs it — it is
+a repo document, not a shipped feature.
 
 ---
 
@@ -1173,14 +1211,14 @@ convention is decided; an off answer recorded for a specific repository
 (see below) still wins over `enabled: true`, because the more specific statement
 does.
 
-**Where the convention lands.** The six generated subagent files in
+**Where the convention lands.** The seven generated subagent files in
 `~/.config/opencode/agents` (`nexus-architect`, `-coder`, `-explorer`, `-tester`,
-`-reviewer`, `-documenter`) are rewritten on every plugin load, so a hand-edit
-there does not survive a restart. That is what makes them the durable place for
-a convention, and each of the six gains a `## Git Convention` section when the
-convention is active *and* the working directory is a git work tree on a branch.
-Outside a repository, or on a detached HEAD, the files are written exactly as
-before and the section is absent — the condition is deliberate, because
+`-reviewer`, `-documenter`, `-designer`) are rewritten on every plugin load, so a
+hand-edit there does not survive a restart. That is what makes them the durable
+place for a convention, and each of the seven gains a `## Git Convention` section
+when the convention is active *and* the working directory is a git work tree on a
+branch. Outside a repository, or on a detached HEAD, the files are written exactly
+as before and the section is absent — the condition is deliberate, because
 unconditionally telling an agent to work on a branch in a directory that has no
 branches is worse than saying nothing.
 
@@ -1310,7 +1348,8 @@ nexus.template(name="documentation") — Documentation update
 │  │              AGENTS (auto-created)                   │     │
 │  │  nexus-orchestrator (primary)                       │     │
 │  │  nexus-architect, nexus-coder, nexus-reviewer        │     │
-│  │  nexus-tester, nexus-explorer, nexus-documenter      │     │
+│  │  nexus-tester, nexus-explorer, nexus-documenter,      │     │
+│  │  nexus-designer                                       │     │
 │  └────────────────────────────────────────────────────┘     │
 └─────────────────────────────────────────────────────────────┘
 ```

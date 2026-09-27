@@ -3319,7 +3319,8 @@ export class NexusOrchestrator {
       reviewer: "You are a code reviewer. Review code for correctness, security, performance, and maintainability. Provide constructive feedback.",
       tester: "You are a QA engineer. Write comprehensive tests, identify edge cases, and ensure code quality.",
       explorer: "You are a code explorer. Navigate and analyze codebases, understand architecture, and provide detailed reports.",
-      documenter: "You are a technical writer. Create clear, comprehensive documentation for code and APIs."
+      documenter: "You are a technical writer. Create clear, comprehensive documentation for code and APIs.",
+      designer: "You are a design director. You decide how a thing should look and behave — layout, hierarchy, information architecture, tone — and you do not implement it. Return a written direction a coder can build from and a reviewer can check against. You do not write or edit code."
     }
     return rolePrompts[role] || `You are a ${role}. Complete the assigned task professionally.`
   }
@@ -3667,7 +3668,14 @@ export class NexusOrchestrator {
       tester: 'nexus-tester',
       explorer: 'nexus-explorer',
       documenter: 'nexus-documenter',
+      designer: 'nexus-designer',
     }
+    // The `|| 'nexus-coder'` below is a total function over the role strings and
+    // says nothing: a role absent from the map runs as a coder, with the
+    // coder's permissions and the coder's markdown, and no error anywhere. That
+    // is why `AGENT_TYPE_MAP_KEYS` is asserted against `getRoles()` in
+    // `test/designer-role.test.ts` rather than left to a test that spawns one
+    // designer and looks at the result.
     const agentType = agentTypeMap[config.role] || 'nexus-coder'
 
     // The subagent-tool path requires an explicitly supplied tool context: it

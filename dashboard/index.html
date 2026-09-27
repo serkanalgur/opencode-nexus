@@ -19,6 +19,10 @@
     --purple: #bc8cff;
     --cyan: #39d2c0;
     --orange: #f0883e;
+    /* Added for the designer badge. Pink, not the explorer's yellow: six roles
+       already own purple/blue/cyan/green/yellow/grey, and two badges sharing a
+       hue is how a role becomes unreadable in a list of six. */
+    --pink: #f778ba;
   }
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -262,6 +266,7 @@
   .agent-role-badge.tester { background: rgba(63, 185, 80, 0.15); color: var(--green); }
   .agent-role-badge.explorer { background: rgba(210, 153, 34, 0.15); color: var(--yellow); }
   .agent-role-badge.documenter { background: rgba(139, 148, 158, 0.15); color: var(--text-muted); }
+  .agent-role-badge.designer { background: rgba(247, 120, 186, 0.15); color: var(--pink); }
   .status-dot {
     width: 8px;
     height: 8px;
@@ -1700,13 +1705,14 @@
   // Role emojis
   var ROLE_EMOJI = {
     architect: '🏗️', coder: '💻', reviewer: '🔍',
-    tester: '🧪', explorer: '🔭', documenter: '📝'
+    tester: '🧪', explorer: '🔭', documenter: '📝', designer: '🎨'
   };
 
   // Role colors for cost bars
   var ROLE_COLORS = {
     architect: '#bc8cff', coder: '#58a6ff', reviewer: '#39d2c0',
-    tester: '#3fb950', explorer: '#d29922', documenter: '#8b949e'
+    tester: '#3fb950', explorer: '#d29922', documenter: '#8b949e',
+    designer: '#f778ba'
   };
   var BAR_COLOR_PALETTE = ['#58a6ff', '#bc8cff', '#39d2c0', '#3fb950', '#d29922', '#f0883e', '#f85149'];
 
