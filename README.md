@@ -145,6 +145,34 @@ Example (the model ids below are illustrative — use whatever your provider off
 
 When you call `nexus.spawn(role="coder")`, the coder model from config is used automatically.
 
+`nexus.model.costs` with no arguments lists every loaded model, grouped under one
+heading per provider — `Anthropic`, `OpenCode Go` — so a multi-provider install
+reads as sections instead of one flat run of `providerID/modelID` keys. The
+heading is the provider's display name, and a provider OpenCode has not published
+a name for falls back to its raw id. Groups are ordered by display name and
+models by id within their group, and a model priced by hand under a bare id goes
+into a `No provider (bare model id)` bucket rather than being dropped or filed
+under a provider it does not belong to. A long catalogue is cut at 12 providers,
+and the closing line states how many groups and models were left out.
+
+Each row shows its input and output price in USD per 1K tokens, in the same
+format the TUI model picker uses — the two surfaces share one formatter, so they
+cannot print different numbers for the same model. The list prints **one rate
+pair per model**: it is a catalogue, and a four-rate-per-tier block per model is
+unreadable in a list column. Cache rates and every tier above the first are
+therefore **not in the list** — pass `model=<provider/id>` and you get that one
+model in full, every tier, with `cache_read` and `cache_write`. The threshold a
+row names is where its displayed rate stops applying; the rate that takes over is
+in the per-model view.
+
+Provider names come from a single snapshot the server loads at startup, and the
+dashboard and this tool both read it — so the two can never print different
+headings for the same models. The cost of one snapshot is that a provider added,
+renamed or removed mid-session keeps its boot-time label (or its raw id, if it
+had none) until the server restarts; the TUI model picker memoises names per
+project directory for the same reason. A stale name is a wrong *label* on rows
+that are otherwise correct — never a missing model and never a wrong price.
+
 ### Self-Healing with Escalation
 
 Failed tasks follow a 4-step escalation chain:
@@ -232,14 +260,36 @@ shows how old the last snapshot is, and labels it stale past 15 seconds.
   snapshot, self-edges, and cycles are counted and reported in the section note
   rather than silently not drawn.
 - **Cost breakdown** — by agent and by model, read from `/api/costs`, which
-  covers the full history rather than only the live agents
+  covers the full history rather than only the live agents. The by-model chart
+  is grouped into one run per provider; a bar's length and value are still that
+  model's own cost, and the footer still sums every bar, so grouping moves rows
+  and changes no figure. A model whose key has no provider — a bare model id —
+  is drawn first with no group header rather than filed under a provider it does
+  not have.
 - **Configuration (read-only)** — the resolved config the orchestrator reports
   as in force, plus a `read-only` JSON viewer. The write path was deliberately
   removed rather than left broken: it used to post a `config:update` message
   that the server does not handle, so the Apply button reported success and
   nothing happened. There is no auth story for writes and the socket is a
   localhost server answering with `CORS: *`, so no write path was added to
-  replace it — edit `nexus.jsonc` instead.
+  replace it — edit `nexus.jsonc` instead. **Models per Role** is grouped by
+  provider with the roles nested beneath, every role still shown exactly once;
+  the role→model rows are the panel's own key/value grid, so a provider is a
+  header rather than a third column. Both the chart and this panel head their
+  groups with the host's provider **display name** (`OpenCode Go`), carried by
+  the `providers` list that `/api/costs` now reports — so they agree with the
+  TUI model picker, which reads the same names from the host's provider list. A
+  provider the host published no name for keeps its raw id (`opencode-go`)
+  rather than going blank. In **this panel**, grouping is keyed on the raw
+  provider id, so a display name can never merge two providers: two providers
+  that share one name stay two groups under two headers. That is a property of
+  the dashboard, not of every surface — `nexus.model.costs` with no arguments
+  does merge two providers that share a display name, because there the heading
+  *is* the group key. All three surfaces order groups by display name, so the
+  panel, the tool and the picker agree on which provider comes first; they do not
+  share a comparator, so the two Node surfaces (locale-aware) and the page
+  (code-unit) can order differently on a name that sorts differently under the
+  two rules. The panel says all of this on its face.
 - **Activity log** — every event the broadcaster forwards, each delivered once.
   Two of them carry a fact the line used to leave out:
   - `cost:delta` names **where the price came from** (`settledTier.pricing`) and
@@ -523,7 +573,7 @@ installed with the package — treat it as a repo document, not a shipped featur
 | `nexus.dashboard` | Full orchestrator state as JSON | `{}` |
 | `nexus.queue` | Current task list with priorities, as JSON | `{}` |
 | `nexus.forecast` | Predict costs | `{ tasks }` |
-| `nexus.model.costs` | Show/set model pricing | `{ model?, setInput?, setOutput? }` |
+| `nexus.model.costs` | Show/set model pricing; with no `model`, lists all models grouped by provider | `{ model?, setInput?, setOutput? }` |
 | `nexus.preset` | Apply a preset config, or drop the session override | `{ mode?: 'apply' \| 'clear', name? }` — `clear` (2.6.0+) drops the in-process preset/TUI override so `nexus.jsonc` is in control again; no file is modified |
 | `nexus.template` | List or instantiate a task template | `{ name?, baseDir? }` — `name: 'list'` (or omitted) lists; `baseDir` resolves the template's file paths, defaulting to cwd |
 | `nexus.roles.list` | List custom agent roles from `nexus.jsonc` | `{}` |
@@ -599,6 +649,34 @@ answer it has no reason to read. The table above is the TUI palette.
 Press **Ctrl+N** or type `/nexus` to pick a model per role, then choose project
 or global. That writes the `models` block of `nexus.jsonc`; the example in
 [Cost-Aware Model Selection](#cost-aware-model-selection) shows its shape.
+
+The model list is grouped under a heading per provider — `OpenCode Go`,
+`Claude` — so a multi-provider install reads as sections rather than one flat
+run of models. The heading is the provider's display name, and a provider
+OpenCode has not published a name for falls back to its raw id. Searching
+matches the heading as well as the model name, so typing a provider name
+narrows the list to that provider's models.
+
+> That search behaviour is a property of OpenCode's own model-picker dialog, not
+> of Nexus, and it is not published in the plugin's type declarations. It was
+> verified against the installed CLI's dialog code, where the fuzzy finder is
+> invoked with `keys: ["title", "category", "searchText"]` and a score of
+> `title×2 + category + searchText` — so the heading genuinely is a search key.
+> Treat it as a snapshot of the installed version rather than a stable contract;
+> if a future OpenCode drops `category` from those keys, this paragraph is the
+> claim that becomes false. The evidence is quoted in full at the
+> `buildModelOptions` docstring in `src/tui.tsx`.
+
+Each row shows its input and output price in USD per 1K tokens, in the same
+format `nexus.model.costs` prints. A model that only publishes tiered pricing
+shows its lowest published tier and names the prompt size above which a
+different rate applies, rather than rendering blank or as free. A model that
+published no price at all shows no price, which is deliberately not `$0`: no
+published price is not the same as a price of zero.
+
+**Use default** resets the role to its default model. It carries an empty
+value, and that empty string is what performs the reset — it is not a model
+reference.
 
 The resolved map is read at spawn time, so an edit to `nexus.jsonc` applies to
 the next spawn without a restart.

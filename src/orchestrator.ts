@@ -1008,6 +1008,19 @@ export class NexusOrchestrator {
   // valued in **USD per 1K tokens** — the same unit as the hardcoded table.
   public modelCosts: Map<string, NexusModelCost> = new Map()
 
+  // Provider id → the human label from models.dev (populated via
+  // loadProviderNames). PRESENTATION ONLY: nothing prices, ranks, bills or
+  // totals from this map, and no key of it is a spend figure. It exists so a
+  // surface holding only a `"provider/id"` ref can print `OpenCode Go` where
+  // the TUI picker does. A provider with no label here degrades to its raw id.
+  //
+  // The VALUE is `unknown` on purpose: it is whatever the host's wire put there,
+  // and a `name` of `42` is a thing that has been observed. The loader does not
+  // vet it, because a usable-looking name has an owner (`providerLabels` in
+  // `src/model-groups.ts`) and two copies of one rule is the failure mode this
+  // feature exists to remove; `getProviderList` narrows it on the way out.
+  private providerNames: Map<string, unknown> = new Map()
+
   // Set when a spawn fell back to ctx.session.create() instead of the built-in
   // subagent tool (child session not parent-linked). null when the last spawn
   // used the subagent tool.
@@ -1078,6 +1091,12 @@ export class NexusOrchestrator {
 
     // Load real model pricing from OpenCode
     await this.loadModelCosts()
+
+    // Load provider display names. Independent of the above and best-effort: a
+    // failure here costs a label, never a price, so it must not be able to stop
+    // pricing from loading. Sequential only because both are one-shot awaits at
+    // startup and neither depends on the other.
+    await this.loadProviderNames()
 
     // Start periodic cleanup of stale data (every 5 minutes)
     this.cleanupInterval = setInterval(() => this.cleanupStaleData(), 300000)
@@ -1196,6 +1215,100 @@ export class NexusOrchestrator {
       }
     } catch {
       // Cost loading is best-effort — the labelled fallback table will be used
+    }
+  }
+
+  /**
+   * Load provider id → display name from OpenCode's provider list.
+   *
+   * WHY `ctx.provider` AND NOT `data.location.provider`
+   *
+   * The TUI picker reads names from `context.data.location.provider`, a
+   * `LocationCollection<ProviderInfo>` that exists ONLY on the TUI's
+   * `Plugin.Context` (`@opencode/plugin/tui`, whose `Data` interface declares
+   * it). The orchestrator is a different process on a different context type:
+   * `NexusPluginContext = Plugin.Context` from `@opencode/plugin`
+   * (`src/orchestrator.ts:82`), and that `Context` has no `data` member at all
+   * — it is a headless, RPC-shaped context of domains. It does, however, carry
+   * `readonly provider: ProviderDomain` (`@opencode/plugin`'s `plugin.d.ts`),
+   * and `ProviderDomain extends ProviderApi`, whose `list()` returns
+   * `{ location, data: Array<ProviderInfo> }` with `ProviderInfo` carrying both
+   * `id` and `name`. So the names ARE reachable from the server; the path to
+   * them just is not the TUI's.
+   *
+   * This is a LABEL LOOKUP and nothing more. It prices nothing, selects no
+   * tier, ranks nothing and contributes to no total: a provider name is not a
+   * quantity, and the whole map is excluded from every figure in the cost
+   * report (see `getCostReport`).
+   *
+   * Best-effort, like `loadModelCosts`: an absent `ctx.provider` or a throw
+   * leaves `providerNames` empty, and every consumer then falls back to the raw
+   * provider id — which is exactly the label it would have used before this
+   * existed. A malformed ROW is not dropped here; see below.
+   *
+   * ── WHAT THIS LOADER DELIBERATELY DOES NOT DECIDE ──
+   *
+   * It stores what the host said, and the ONE thing it filters is the map key:
+   * a row whose `id` is absent, non-string or empty cannot be looked up by
+   * anything, and keying a `Map` on `undefined` would be a broken data structure
+   * rather than a formatting preference, so those rows are dropped.
+   *
+   * It does NOT filter the NAME. Deciding what counts as a usable label belongs
+   * to `providerLabels` in `src/model-groups.ts`, which every surface already
+   * calls, and restating that rule here is what produced two loaders that could
+   * disagree about the same provider. A row named `""` or `42` is therefore
+   * STORED, and `getProviderList` omits the unusable name on the way out, where
+   * it degrades to `{ id }` — which is exactly what `providerLabels` already
+   * resolves through its raw-id fallback. `test/cost-report-providers.test.ts`
+   * proves the whole chain: a malformed row reaches the consumer and still
+   * yields a usable, non-blank label.
+   *
+   * ── WHY THERE IS NO `reload()` HERE, DELIBERATELY ──
+   *
+   * `ProviderDomain` declares `reload(): Promise<void>`
+   * (`@opencode/plugin/dist/promise/provider.d.ts:33`) and nothing calls it, so
+   * a provider added, removed or RENAMED mid-session keeps its boot-time label
+   * until the server restarts. That is a real gap and it is stated here, in the
+   * dashboard page and in the README, rather than left to be discovered.
+   *
+   * The alternative was weighed and rejected for three reasons:
+   *
+   *  1. The host declares the method with no contract at all — no parameters
+   *     documented, no statement of whether it is idempotent, atomic, or even
+   *     when the refreshed data becomes visible to `list()`. Calling it on a
+   *     timer is a guess about an API whose only specification is its name, and
+   *     a guess that runs forever in a background interval.
+   *  2. It would not make the label FRESH, only less stale, so it buys a
+   *     narrower version of a defect that is already the mildest kind: a wrong
+   *     LABEL on rows that are otherwise correct, never a missing model and
+   *     never a wrong price. The raw-id fallback is always true.
+   *  3. It would make the surfaces DISAGREE AGAIN. The TUI is a separate process
+   *     with its own per-directory memo (`src/tui.tsx`) that this module cannot
+   *     reach, so a server-side reload would make the tool and the dashboard
+   *     fresh while the picker stayed permanently boot-stale — re-creating, in a
+   *     narrower form, exactly the two-snapshot split that having the tool read
+   *     this map just removed.
+   *
+   * So: one snapshot, taken at `initialize()`, shared by the dashboard and the
+   * `model.costs` tool by construction, with the staleness documented on all
+   * three surfaces rather than papered over on one of them.
+   */
+  private async loadProviderNames(): Promise<void> {
+    try {
+      if (!this.ctx?.provider) return
+
+      const { data } = await this.ctx.provider.list()
+      if (!Array.isArray(data) || data.length === 0) return
+
+      for (const provider of data) {
+        if (!provider || typeof provider.id !== 'string' || provider.id.length === 0) continue
+        // First writer wins, so the order of the host's list decides nothing but
+        // stability — the same rule the shared helper uses, and the reason two
+        // rows disagreeing about one id is not a case worth guessing at.
+        if (!this.providerNames.has(provider.id)) this.providerNames.set(provider.id, provider.name)
+      }
+    } catch {
+      // Provider naming is best-effort — every consumer falls back to the raw id
     }
   }
 
@@ -4322,8 +4435,45 @@ export class NexusOrchestrator {
       // everything those sessions spend after our last read is unbilled too —
       // so a reader learns "we are under-counting by at least $X, and by an
       // unknown amount on top", which is the true shape of the gap.
-      uncollected: this.uncollectedSummary()
+      uncollected: this.uncollectedSummary(),
+      // Provider id → display name, for rendering only. See the provenance note.
+      providers: this.getProviderList()
     }, null, 2)
+  }
+
+  /**
+   * The provider label catalogue, as `{ id, name? }` entries.
+   *
+   * PUBLIC, AND IT IS THE ONLY PROVIDER-NAME SOURCE ON THE SERVER. The
+   * `model.costs` tool used to run its own `ctx.provider.list()` on every call,
+   * which meant the dashboard was reading this boot-time snapshot while the tool
+   * was reading a live one: rename a provider mid-session and the two surfaces
+   * printed different headings for the same models. Both now read THIS, so they
+   * agree by construction rather than by hoping. See `loadProviderNames` for why
+   * the snapshot is not refreshed.
+   *
+   * `name` is emitted only when we have a usable one, so an entry is `{ id }`
+   * rather than `{ id, name: "" }` or `{ id, name: 42 }` for a provider the host
+   * named not at all or named wrongly. That makes the omitted-name case
+   * structurally the same thing the shared `providerLabels` helper and the
+   * dashboard page both already handle: fall back to the raw id. A consumer
+   * therefore needs no notion of "empty name" and no local sanitising pass, and
+   * the raw-id fallback stays the SINGLE path for a provider we could not name.
+   *
+   * NOT SPEND, AND NOT IN ANY TOTAL. This is a label lookup, so it is excluded
+   * from `totalSpent`, from `measuredSpend`/`estimatedSpend`, from every entry
+   * of `byModel`, `byAgent` and `tokensByModel`, and from the `provenance` /
+   * `measuredEntries` / `estimatedEntries` block that documents where pricing
+   * came from (README "Pricing provenance"). None of those are computed from
+   * `providerNames`, and `CostProvenance` is untouched: a provider list cannot
+   * change which rate a model was billed at, only what a reader calls the group
+   * those bills are printed under. `test/model-costs-report.test.ts` asserts
+   * that directly by diffing the whole report with and without a provider list.
+   */
+  getProviderList(): Array<{ id: string; name?: string }> {
+    return [...this.providerNames].map(([id, name]) =>
+      typeof name === 'string' && name.length > 0 ? { id, name } : { id },
+    )
   }
 
   /**

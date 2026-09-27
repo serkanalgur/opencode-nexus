@@ -972,6 +972,19 @@
     letter-spacing: 0.5px;
     margin-bottom: 4px;
   }
+  /* One header per provider run. A block-level, muted, rule-underlined label so
+     a provider reads as a group and not as a bar of its own — the bar rows below
+     it keep the same geometry whether or not grouping is on. */
+  .provider-group-title {
+    display: block;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    letter-spacing: 0.3px;
+    padding-bottom: 2px;
+    border-bottom: 1px solid var(--border);
+    margin-top: 4px;
+  }
   .cost-bar-row {
     display: flex;
     align-items: center;
@@ -1119,6 +1132,7 @@
   .config-val.warning { color: var(--yellow); }
   .config-val.model { color: var(--blue); }
   .config-val.unreported { color: var(--text-muted); font-style: italic; }
+  .config-group-head { font-size: 11px; }
   .config-explainer {
     margin-top: 12px;
     font-size: 11px;
@@ -1531,6 +1545,23 @@
           <div id="config-models">
             <div class="config-row"><span class="config-key">—</span><span class="config-val unreported">No state received</span></div>
           </div>
+          <!-- Stated rather than left to be discovered. Headers are the host's
+               provider DISPLAY names, taken from the `providers` list on
+               /api/costs, so this agrees with the TUI model picker (which reads
+               the same names from the host's own provider collection) and shows
+               "OpenCode Go" where a bare ref would read "opencode-go". A
+               provider the host reported no name for falls back to its raw ID
+               rather than to a blank header, and /api/config still carries no
+               provider names at all — so the fallback is a real case, not a
+               theoretical one. Grouping is keyed on the raw ID, so a name can never
+               merge two providers; ORDERING follows the display name, which is what
+               nexus.model.costs and the TUI picker do as well. -->
+          <p class="config-explainer">Grouped by provider. Headers are the host's provider display names,
+            carried by the <code>providers</code> list on <code>/api/costs</code> — the same names the TUI
+            model picker uses, so <code>opencode-go</code> is shown here as <code>OpenCode Go</code>.
+            A provider the host reported no name for keeps its raw ID, so a header is never blank.
+            Groups are ordered by display name, the same as <code>nexus.model.costs</code> and the TUI picker.
+            The same headers appear in <strong>Cost Breakdown → By Model</strong>.</p>
         </div>
         <div class="config-group">
           <div class="config-group-title">💰 Budget</div>
@@ -1871,6 +1902,166 @@
     return Array.isArray(v) ? v : [];
   }
 
+  // ── Provider grouping ──
+  //
+  // The provider half of a `"provider/id"` ref, or null when there is none.
+  //
+  // ── WHY THIS IS A COPY ──
+  //
+  // This page is one hand-written inline script block with no build step, no module
+  // system and no bundler, and it is inlined into the server bundle as TEXT
+  // (`src/dashboard.ts`), so it cannot `import` `src/model-groups.ts` and there
+  // is no step at which the two copies could be made one. The rules below are
+  // therefore restated, and `test/dashboard-model-groups.test.ts` runs this page
+  // and asserts its output against `providerIDFromRef` on the same inputs — that
+  // test is the only thing keeping the two copies honest, so it is load-bearing
+  // rather than decorative.
+  //
+  // The `slash > 0` guard is the part that must not be "simplified": it is what
+  // makes a bare id report no provider instead of chopping its last character,
+  // and it is the same condition `providerIDFromRef` uses. A ref is split on the
+  // FIRST slash and never on every one, so the two-segment
+  // `openrouter/anthropic/claude-sonnet-4-5` keeps its `anthropic/` namespace.
+  function providerIDOfRef(ref) {
+    if (typeof ref !== 'string') return null;
+    var slash = ref.indexOf('/');
+    return slash > 0 ? ref.slice(0, slash) : null;
+  }
+
+  /**
+   * `items` split into provider runs, in the order they should be rendered.
+   *
+   * NO-PROVIDER FIRST, then one run per provider. The ungrouped bucket leads
+   * because a row with no provider must not read as belonging to the group above
+   * it, and leading is the only position where that is guaranteed — this mirrors
+   // the TUI picker, where an option with no `category` sorts under the empty
+   * one. Such a row is still rendered and still labelled with its own ref; it
+   * simply has no header, because inventing a provider for it would be a guess.
+   *
+   * ONE RUN PER PROVIDER, and the runs are CONTIGUOUS, because the renderer
+   * emits a header at each change of provider: an item list that interleaved two
+   * providers would print two headers for one provider. Ordering is done here
+   * rather than left to the caller so that cannot be got wrong per call site.
+   *
+   * ORDER IS BY DISPLAY NAME, NOT BY ID.
+   *
+   * Every other surface that groups by provider orders by the label it PRINTS in
+   * the heading: `renderModelCostReport` in `src/index.ts` and
+   * `buildModelOptions` in `src/tui.tsx` both do. This page used to order by raw
+   * provider id, which made it the one surface that did not: with `zeta` labelled
+   * `Alpha` and `alpha` labelled `Zeta`, the tool listed `OpenCode Go` where the
+   * dashboard listed `zeta`. Ordering by the label makes that divergence stop
+   * existing rather than documenting it, and it costs one call to the
+   * `providerLabelFor` this page already needs for the heading text.
+   *
+   * The LABEL orders the runs; the ID is only a TIE-BREAK. Two providers sharing
+   * one display name are still two separate runs with two separate headers — a
+   * display name can never MERGE two providers, only order them. The id
+   * tie-break is also what makes the order total: without it, two same-named
+   * providers would keep whichever order the caller happened to hand over.
+   *
+   * Deliberately a CODE-UNIT comparison, not `localeCompare`. This page is a
+   * plain inline script with no `Intl` to assume, so the order is identical on
+   * every machine that loads it. The tool and the picker DO use `localeCompare`,
+   * which is locale-dependent — a provider named `Émile` could order differently
+   * on a user's machine than on CI — which is a real hazard on those two Node
+   * surfaces and the reason the page's own ordering assertions are scoped to
+   * plain ASCII. The page deliberately does not join them: ordering by the LABEL
+   * is what the three surfaces share, and the comparator is an implementation
+   * detail underneath that.
+   *
+   * `refFor` is a function from an item to its `"provider/id"` ref. The incoming
+   * order is preserved inside each run, so a caller that pre-sorted by its own
+   * axis (the cost chart, by spend) keeps that ordering within the provider.
+   */
+  function groupByProvider(items, refFor) {
+    var byProvider = {};
+    var order = [];
+    var ungrouped = [];
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i];
+      var provider = providerIDOfRef(refFor(item));
+      if (provider === null) {
+        ungrouped.push(item);
+        continue;
+      }
+      if (!Object.prototype.hasOwnProperty.call(byProvider, provider)) {
+        byProvider[provider] = [];
+        order.push(provider);
+      }
+      byProvider[provider].push(item);
+    }
+    function byCodeUnit(a, b) { return a < b ? -1 : (a > b ? 1 : 0); }
+    // Label first, raw id as the tie-break. `providerLabelFor` never returns an
+    // empty string for a real provider (it falls back to the id), so the `||` is
+    // belt-and-braces rather than a real case: it keeps a nameless provider from
+    // becoming a sort key that sorts before everything.
+    order.sort(function(a, b) {
+      return byCodeUnit(providerLabelFor(a) || a, providerLabelFor(b) || b) || byCodeUnit(a, b);
+    });
+
+    var groups = [];
+    if (ungrouped.length > 0) groups.push({ provider: null, items: ungrouped });
+    for (var p = 0; p < order.length; p++) {
+      groups.push({ provider: order[p], items: byProvider[order[p]] });
+    }
+    return groups;
+  }
+
+  // ── Provider display names ──
+  //
+  // Provider id → the human label from models.dev, as reported by
+  // `getCostReport().providers`. Populated from the cost payload when it loads,
+  // and EMPTY until then, which is the point of `providerLabelFor`'s fallback:
+  // an unresolved name must degrade to the raw id, exactly as it did before
+  // this existed, and must never be a blank heading.
+  var providerNames = {};
+
+  /**
+   * The heading to print for a provider id.
+   *
+   * ── WHY THIS IS A COPY ──
+   *
+   * Same reason as `providerIDOfRef` above, and the same load-bearing test: this
+   * page cannot reach `providerLabels` in `src/model-groups.ts`.
+   * `test/dashboard-model-groups.test.ts` drives this page and asserts its
+   * output against the shared helper on the same inputs.
+   *
+   * The rules are restated exactly, because the interesting cases are all
+   * degenerate ones:
+   *
+   *  - a known provider  → its label (`opencode-go` → `OpenCode Go`);
+   *  - an unknown id     → the RAW ID, so a provider the host did not report
+   *                        still gets a heading, just an ugly one;
+   *  - `null` (no provider at all, i.e. a bare model id) → `null`, which the
+   *                        callers read as "print no heading".
+   *
+   * An entry whose name is missing, empty or not a string is SKIPPED rather
+   * than stored, so it falls to the raw-id arm above. Storing it would print an
+   * empty heading, and a blank group header is strictly worse than an ugly one:
+   * it cannot be told apart from "provider exists but has no name yet".
+   *
+   * First writer wins, so the order the server happened to list providers in
+   * decides nothing but stability.
+   */
+  function providerLabelFor(providerID) {
+    if (typeof providerID !== 'string' || providerID.length === 0) return null;
+    var name = providerNames[providerID];
+    return typeof name === 'string' && name.length > 0 ? name : providerID;
+  }
+
+  /** Record the provider labels carried by a cost payload. */
+  function setProviderNames(providers) {
+    providerNames = {};
+    var list = asArray(providers);
+    for (var i = 0; i < list.length; i++) {
+      var p = list[i];
+      if (!p || typeof p.id !== 'string' || p.id.length === 0) continue;
+      if (typeof p.name !== 'string' || p.name.length === 0) continue;
+      if (!Object.prototype.hasOwnProperty.call(providerNames, p.id)) providerNames[p.id] = p.name;
+    }
+  }
+
   /**
    * Age of the last snapshot, labelled. A page holding a stale snapshot is
    * presenting numbers that are no longer true, so the staleness is stated
@@ -1978,10 +2169,24 @@
         costReport = data;
         costReportStatus = 'ready';
         costReportError = '';
+        // Provider display names ride on the cost payload, so they are recorded
+        // here, BEFORE anything renders, and before the render calls below. The
+        // Models-per-Role panel reads the same labels but is driven by the
+        // socket rather than by this fetch, so it is re-rendered when the names
+        // land: otherwise the two panels would disagree for up to one refresh
+        // cycle, the panel being the one showing raw ids. Absent or empty
+        // `providers` leaves the map empty and every heading falls back to the
+        // raw id, which is what this page did before names existed at all.
+        var before = Object.keys(providerNames).length;
+        setProviderNames(data.providers);
+        var namesChanged = before !== Object.keys(providerNames).length;
         renderCost();
         // The cost report is a separate channel from the socket, so the unbilled
         // card would otherwise wait for the next state push to notice it landed.
-        if (lastState) renderUnbilledStat();
+        if (lastState) {
+          renderUnbilledStat();
+          if (namesChanged) renderConfig(lastState);
+        }
       })
       .catch(function(err) {
         costReportStatus = 'failed';
@@ -3608,13 +3813,46 @@
         return (emoji === null ? null : emoji + ' ') + key + ' · ' + (text(a.name) || key);
       });
 
+    // By model, GROUPED BY PROVIDER. A `byModel` key is the `"provider/id"` ref
+    // the model was billed under, so the provider is already in the data and
+    // needs no server help to read.
+    //
+    // Sorted by spend first and grouped after, so the chart keeps the axis it is
+    // read on — a bar's LENGTH is its own cost and its position within its
+    // provider is still most-costly-first — and only the order of the providers
+    // themselves is alphabetical. The alternative, dropping the spend sort so
+    // that the list is one flat alphabetical run of providers, would make the
+    // most expensive model on the chart appear in the middle of it.
+    //
+    // The label stays the WHOLE ref even though the header above it already says
+    // the provider. A ref is split on its first slash only, so
+    // `openrouter/anthropic/claude-sonnet-4-5` has a model id that itself
+    // contains a slash; shortening the label to the tail would need that same
+    // rule a second time in this file, and two keys differing only in provider
+    // would then be indistinguishable. The bar is worth the repetition.
     var byModel = asObject(costReport.byModel) || {};
     var modelKeys = Object.keys(byModel);
     modelKeys.sort(function(a, b) { return num(byModel[b]) - num(byModel[a]); });
+    var modelGroups = groupByProvider(modelKeys, function(key) { return key; });
+    var groupedModelKeys = [];
+    var groupOfModel = {};
+    for (var g = 0; g < modelGroups.length; g++) {
+      var run = modelGroups[g];
+      for (var m = 0; m < run.items.length; m++) {
+        groupedModelKeys.push(run.items[m]);
+        // The provider each key sits under, read back off the group it was
+        // placed in — so a header is emitted for exactly the runs that exist,
+        // and an ungrouped key (`null`) produces none.
+        groupOfModel[run.items[m]] = run.provider;
+      }
+    }
     var tokensByModel = asObject(costReport.tokensByModel) || {};
-    $costByModel.innerHTML = costBars('By Model', modelKeys, byModel, useCeiling ? ceiling : null,
+    $costByModel.innerHTML = costBars('By Model', groupedModelKeys, byModel, useCeiling ? ceiling : null,
       function(key) { return key; },
-      function(key) { return fmtInt(tokensByModel[key]) + ' tok'; });
+      function(key) { return fmtInt(tokensByModel[key]) + ' tok'; },
+      function(key) {
+        return Object.prototype.hasOwnProperty.call(groupOfModel, key) ? groupOfModel[key] : null;
+      });
 
     renderCostAccounting();
   }
@@ -3624,8 +3862,20 @@
    * says so in the caption, so the reader always knows what a bar length means.
    * The footer sums what is on screen and calls it that, because a per-dimension
    * sum is not the run's `totalSpent` and the two are allowed to disagree.
+   *
+   * `groupFor` is optional. Given, it returns the provider a key belongs to or
+   * null, and a header is emitted whenever that value CHANGES — so it is the
+   * caller's job to hand over keys already in grouped order (`groupByProvider`),
+   * and a `null` group gets no header at all. Omitted, the chart is one flat
+   * list, which is what the By Agent chart still is: an agent id has no provider
+   * half to split, so grouping it by anything would be invented.
+   *
+   * Grouping MOVES NOTHING ELSE. `sum` is still taken over every key, the
+   * palette index is still the key's position in the incoming list, and a bar's
+   * length is still its own value against the same divisor. Only the vertical
+   * position of a bar changes.
    */
-  function costBars(title, keys, source, divisor, labelFor, valueSuffixFor) {
+  function costBars(title, keys, source, divisor, labelFor, valueSuffixFor, groupFor) {
     var head = '<div class="cost-chart-title">' + escHtml(title) + '</div>';
     if (keys.length === 0) {
       return head + '<div class="empty-message" style="padding:8px">Nothing recorded yet</div>';
@@ -3635,8 +3885,21 @@
     for (var i = 0; i < keys.length; i++) sum += num(source[keys[i]]) || 0;
 
     var html = head;
+    var currentGroup = null;
     for (var k = 0; k < keys.length; k++) {
       var key = keys[k];
+      if (groupFor !== undefined) {
+        var group = groupFor(key);
+        if (group !== null && group !== currentGroup) {
+          html += '<div class="provider-group-title">' + escHtml(providerLabelFor(group)) + '</div>';
+        }
+        // Compared on the RAW id, never on the label. This is what keeps "one
+        // contiguous run, one header, per provider" true: sorting and grouping
+        // are both keyed on the id, and two providers that happen to share a
+        // display name must still be two runs, not silently merged into one by
+        // a label collision.
+        currentGroup = group;
+      }
       var value = num(source[key]);
       var widthPct;
       if (value === null) {
@@ -3752,13 +4015,42 @@
         $configModels.innerHTML = '<div class="config-row"><span class="config-key">models</span>'
           + '<span class="config-val unreported">empty</span></div>';
       } else {
+        // GROUPED BY PROVIDER, WITH THE ROLES NESTED BENEATH, rather than a
+        // provider column on every row.
+        //
+        // The tension is real: the leading column is the ROLE, and this panel is
+        // read by looking for one. Reordering the rows makes the provider the
+        // scannable axis — which is what the user asked for, and what the other
+        // two surfaces already do — at the cost of roles no longer being one
+        // alphabetical run. Adding a column instead would leave the order alone
+        // but print the same provider on six of six rows, and `config-row` is a
+        // two-column `justify-content: space-between` grid whose value side is
+        // right-aligned monospace, so a third cell would not fit without
+        // restructuring the block. A header says the provider ONCE, which is
+        // also what makes the grouping visible at all.
+        //
+        // Every role is still emitted exactly once, from the map's own keys, and
+        // the row itself is unchanged: same `config-row`, same key, same full
+        // ref as the value. A role whose model is `null` — or a bare model id
+        // with no provider half — goes to the ungrouped bucket at the top with
+        // no header above it, rather than under a provider it does not have.
+        var modelRefFor = function(role) { return text(models[role]); };
+        var modelGroups = groupByProvider(roleKeys, modelRefFor);
         var mhtml = '';
-        for (var r = 0; r < roleKeys.length; r++) {
-          var model = text(models[roleKeys[r]]);
-          var emoji = ROLE_EMOJI[roleKeys[r]] || '🤖';
-          mhtml += configRow(emoji + ' ' + roleKeys[r],
-            model === null ? 'not reported' : model,
-            model === null ? 'unreported' : 'model');
+        for (var g = 0; g < modelGroups.length; g++) {
+          var run = modelGroups[g];
+          if (run.provider !== null) {
+            mhtml += '<div class="config-group-head provider-group-title">'
+              + escHtml(providerLabelFor(run.provider)) + '</div>';
+          }
+          for (var r = 0; r < run.items.length; r++) {
+            var role = run.items[r];
+            var model = text(models[role]);
+            var emoji = ROLE_EMOJI[role] || '🤖';
+            mhtml += configRow(emoji + ' ' + role,
+              model === null ? 'not reported' : model,
+              model === null ? 'unreported' : 'model');
+          }
         }
         $configModels.innerHTML = mhtml;
       }
