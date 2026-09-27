@@ -131,8 +131,8 @@ type Ctx = ReturnType<typeof createCtx>
 function newOrchestrator() {
   return new NexusOrchestrator({
     schedulerInterval: 1,
-    selfHealing: { enabled: true, maxRetries: 0, retryDelay: 0, backoffMultiplier: 2, contextTransfer: false },
-    budget: { maxTotalCost: 10.00, maxCostPerTask: 1.00, maxCostPerAgent: 2.00, alertThreshold: 0.2, hardLimit: false }
+    selfHealing: { enabled: true, maxRetries: 0, retryDelay: 0, contextTransfer: false },
+    budget: { maxTotalCost: 10.00, maxCostPerTask: 1.00, alertThreshold: 0.2, hardLimit: false }
   })
 }
 

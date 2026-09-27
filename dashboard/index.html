@@ -3275,10 +3275,18 @@
       return;
     }
 
-    // Normalised against the per-agent ceiling, not against the most expensive
+    // Normalised against the run's TOTAL cap, not against the most expensive
     // agent: normalising to the max makes the top bar 100% by construction, so
-    // the bars encode rank rather than budget consumption.
-    var perAgentCap = configBudget === null ? null : num(configBudget.maxCostPerAgent);
+    // the bars would encode rank rather than budget consumption.
+    //
+    // This used to normalise against `budget.maxCostPerAgent` and caption itself
+    // "of $N per-agent ceiling · OVER CEILING". There is no such ceiling — the
+    // key was on `BudgetConstraint`, on the config panel and in every preset,
+    // and read by nothing that spent money. The page was the only reader, and it
+    // was telling a user an agent had breached a limit that was never enforced.
+    // So the key is gone and the bar is scaled by the one cap that IS enforced
+    // (`hardLimit`, when set): this agent's share of the run's whole budget.
+    var budgetCap = configBudget === null ? null : num(configBudget.maxTotalCost);
 
     var html = '<div class="agents-grid">';
     for (var i = 0; i < agents.length; i++) {
@@ -3289,11 +3297,14 @@
       var status = text(a.status) || 'unknown';
       var cost = num(a.totalCost);
       var barPct = null;
-      if (cost !== null && perAgentCap !== null && perAgentCap > 0) {
-        barPct = Math.min(100, (cost / perAgentCap) * 100);
+      if (cost !== null && budgetCap !== null && budgetCap > 0) {
+        barPct = Math.min(100, (cost / budgetCap) * 100);
       }
-      var overCap = cost !== null && perAgentCap !== null && cost > perAgentCap;
-      var barColor = overCap ? '#f85149' : (role === null ? '#58a6ff' : (ROLE_COLORS[role] || '#58a6ff'));
+      // True only when this agent ALONE exceeded the whole run's budget. The
+      // caption below says exactly that, so the red bar and the words cannot
+      // drift apart.
+      var overBudget = cost !== null && budgetCap !== null && cost > budgetCap;
+      var barColor = overBudget ? '#f85149' : (role === null ? '#58a6ff' : (ROLE_COLORS[role] || '#58a6ff'));
 
       html += '<div class="agent-card fade-in">';
       html += '<div class="agent-header">';
@@ -3325,10 +3336,10 @@
       html += '<div class="agent-cost-bar"><div class="agent-cost-fill" style="width:'
         + (barPct === null ? 0 : barPct.toFixed(1)) + '%;background:' + barColor + '"></div></div>';
       html += '<div class="bar-caption">'
-        + (perAgentCap === null || perAgentCap <= 0
-            ? 'Per-agent ceiling not reported — no bar scale'
-            : fmt$(a.totalCost) + ' of ' + fmt$(perAgentCap) + ' per-agent ceiling'
-              + (overCap ? ' · OVER CEILING' : ''))
+        + (budgetCap === null || budgetCap <= 0
+            ? 'Total budget not reported — no bar scale'
+            : fmt$(a.totalCost) + ' of ' + fmt$(budgetCap) + ' total budget'
+              + (overBudget ? ' · this agent alone exceeded the whole run budget' : ''))
         + '</div>';
       html += '</div>';
     }
@@ -4064,8 +4075,13 @@
     } else {
       var bhtml = '';
       bhtml += configRow('maxTotalCost', fmt$(num(budget.maxTotalCost)));
-      bhtml += configRow('maxCostPerTask', fmt$(num(budget.maxCostPerTask)));
-      bhtml += configRow('maxCostPerAgent', fmt$(num(budget.maxCostPerAgent)));
+      // `maxCostPerAgent` is GONE from this row and from `BudgetConstraint`, and
+      // its removal is deliberate rather than cosmetic: the page used to scale
+      // the agent cost bars by it and caption them "of $N per-agent ceiling", so
+      // the page asserted a ceiling that did not exist. `maxCostPerTask` stays,
+      // and is labelled for what it now is — see the `checkTaskBudget` note in
+      // `src/orchestrator.ts`. Nothing is scaled by it here, exactly as before.
+      bhtml += configRow('maxCostPerTask (advisory)', fmt$(num(budget.maxCostPerTask)));
       // Stated as the remaining fraction it is, not as "critical at X% spent".
       var alert = fmtPct(num(budget.alertThreshold));
       bhtml += configRow('alertThreshold', alert === '—' ? 'not reported' : alert + ' remaining', 'warning');
@@ -4087,9 +4103,15 @@
       hhtml += configRow('enabled', enabled.text, enabled.cls);
       hhtml += configRow('maxRetries', fmtInt(num(healing.maxRetries)));
       hhtml += configRow('retryDelay', fmtMs(num(healing.retryDelay)));
-      hhtml += configRow('backoffMultiplier', num(healing.backoffMultiplier) === null
-        ? 'not reported'
-        : '× ' + num(healing.backoffMultiplier).toFixed(2));
+      // `backoffMultiplier` is GONE from this row, and it is not merely a
+      // server field that stopped arriving. It was the page's most convincing
+      // lie: rendered as "× 3.50", formatted as a multiplier, sitting next to
+      // `retryDelay` in the same block — while the retry backoff in
+      // `handleFailure` is `retryDelay * Math.pow(2, retryCount)` with the 2
+      // written into the expression. A user who read ×3.50 and set
+      // `retryDelay: 1000` had every reason to expect 1s/3s/9s and got 1s/2s/4s.
+      // The key is deleted from `NexusConfig.selfHealing`; `retryDelay` below is
+      // the whole of the backoff a user can now configure.
       var transfer = boolText(healing.contextTransfer);
       hhtml += configRow('contextTransfer', transfer.text, transfer.cls);
       $configHealing.innerHTML = hhtml;

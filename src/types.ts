@@ -2,6 +2,7 @@
 
 import type { PricingSource, UsageSource } from "./forecast"
 import type { NexusCustomRoleConfig } from "./config"
+import type { ModelEffort } from "./model-ref"
 
 /**
  * How a task's cost and token count were arrived at. `usage` says whether the
@@ -138,6 +139,23 @@ export interface DAG {
 export interface ModelSelection {
   provider: string
   model: string
+  /**
+   * The `#variant` half of the reference, WITHOUT the `#` — the effort level
+   * the model was asked to run at, or `undefined` when the reference carried
+   * none.
+   *
+   * It has to be a field of its own rather than being folded into `model`,
+   * because `model` is the bare id and every consumer that rebuilds a key does
+   * so from `provider` + `model`. A variant carried in the string alone is
+   * dropped the moment anyone slices the id off, and the failure is silent:
+   * the spawn falls back to the default model while the record still claims
+   * `m#high`. See `src/model-ref.ts` and `ModelScore.variant`.
+   *
+   * A variant changes the REQUEST, not the price — `ModelVariant` carries no
+   * `cost`. Effort moves token volume, which the measured path already prices
+   * correctly, because reasoning tokens are billed separately from output.
+   */
+  variant?: string
   estimatedCost: number
   estimatedQuality: number
   reasoning: string
@@ -145,8 +163,23 @@ export interface ModelSelection {
 
 export interface BudgetConstraint {
   maxTotalCost: number
+  /**
+   * The per-TASK advisory ceiling, in USD. Reaches `checkTaskBudget`, which
+   * attributes every charge to a task and notifies the first time one task's
+   * running total crosses this.
+   *
+   * ADVISORY, and the word matters: nothing here can interrupt a turn that is
+   * already running, because the cost of a turn is only known once it returns
+   * or times out. So this reports an overspend after the fact and refuses
+   * nothing — the same relationship `maxTotalCost` has to `hardLimit`, which is
+   * also advisory unless a user opts into the terminal behaviour. What it buys
+   * is the one thing the total cap cannot give: WHICH task ran the bill up.
+   *
+   * It reaches the user as an OS notification, not as an emitted event. See
+   * `checkTaskBudget` for why there is deliberately no `budget:task-exceeded`
+   * on the event bus.
+   */
   maxCostPerTask: number
-  maxCostPerAgent: number
   alertThreshold: number
   hardLimit: boolean
 }
@@ -465,24 +498,108 @@ export interface NexusConfig {
   schedulerInterval: number
   defaultTimeout: number
   budget: BudgetConstraint
+  /**
+   * There is deliberately NO `defaultRole` and NO `spawnDelay` here.
+   *
+   * Both lived in this block and were read by nothing: every spawn takes its
+   * role from `DAGNode.task.requiredRole` (see `spawnAndExecute`), and
+   * `spawnAgent` has no delay of its own — agents are dispatched by
+   * `maxConcurrency` and the scheduler interval, and the throttle that exists
+   * is the concurrency limit itself. A `defaultRole` a user set would be
+   * silently ignored by every task that names its own role, which is all of
+   * them.
+   *
+   * `healthCheckInterval` — the third field, in the same literal — IS read, at
+   * the `HealthMonitor` construction in `initialize()` and in
+   * `cleanupStaleData`, and stays.
+   *
+   * This is a BREAKING type change for any external caller passing either field
+   * in a `NexusConfig` literal. Neither ever had an effect to lose.
+   */
   agents: {
-    defaultRole: AgentRole
-    spawnDelay: number
     healthCheckInterval: number
   }
+  /**
+   * There is deliberately NO `backoffMultiplier` in this block.
+   *
+   * It was here, defaulted to 2, and read by nothing. The retry backoff in
+   * `handleFailure` is `policy.retryDelay * Math.pow(2, retryCount)` with the
+   * base 2 written into the expression — so the field could only ever have
+   * restated a constant that was already there, and a user who set it to 3
+   * would have watched 1s/2s/4s continue regardless.
+   *
+   * DELETED, not wired: unlike `retryDelay` there is no reading of this that
+   * adds capability. A multiplier of 1 would turn the backoff off, which is
+   * what a user wanting fast retries should do by setting `retryDelay` to
+   * something small — and a multiplier that can be set to 0 would make the
+   * wait `NaN`. `retryDelay` and `maxRetries` are the two knobs that carry
+   * meaning here, and both are read.
+   *
+   * `selfHealing` consequently has FOUR fields, and `NexusFullConfig` now has
+   * all four too — `retryDelay` was the one that was reachable only through the
+   * constructor and invisible to `nexus.jsonc`, which is what made the two
+   * shapes disagree in the first place.
+   *
+   * This is a BREAKING type change for any external caller passing
+   * `backoffMultiplier` in a `NexusConfig` literal. It never had an effect to
+   * lose.
+   */
   selfHealing: {
     enabled: boolean
     maxRetries: number
+    /**
+     * The BASE of the retry backoff, in ms; attempt `n` waits
+     * `retryDelay * 2 ** n`. Reaches `DEFAULT_ESCALATION` via the
+     * `escalationPolicy` construction in the orchestrator's constructor, and is
+     * FILE-SETTABLE under the same key — see `NexusFullConfig.selfHealing`.
+     */
     retryDelay: number
-    backoffMultiplier: number
     contextTransfer: boolean
   }
-  communication: {
-    mode: 'pubsub' | 'direct' | 'hybrid'
-    maxQueueSize: number
-    messageTTL: number
-    persistence: boolean
-  }
+  /**
+   * There is deliberately NO `security` block here, and `src/security.ts` is
+   * worth reading to see what that is not.
+   *
+   * This block used to carry `{ sastEnabled, secretsScanning,
+   * scopeEnforcement }`. Nothing read any of it. `SecurityScanner` — the real
+   * module, and a live one: constructed at `orchestrator.ts`, run over every
+   * task's output there, exposed through the `nexus.security.scan` tool, and
+   * covered by `test/security.test.ts` — takes its settings from its OWN
+   * `SecurityConfig` (`enabled`, `scanSecrets`, `scanPatterns`,
+   * `customPatterns`, `excludeFiles`) and has since before this block was ever
+   * written. The two never met: not one field name is shared, and
+   * `scopeEnforcement` describes a capability `SecurityScanner` does not have
+   * in any form. This was scaffolding written in a vocabulary the module
+   * adopted differently, not a connection that was made and then lost.
+   *
+   * DELETED rather than wired. Making the scanner configurable from
+   * `nexus.jsonc` is a real gap worth closing, but it is a NEW file-settable
+   * block built on the module's own field names — an additive product
+   * decision, not a repair, and doing it here would have meant inventing the
+   * wiring rather than restoring one.
+   *
+   * This is a BREAKING type change for any external caller passing a `security`
+   * block in a `NexusConfig` literal. It never had an effect to lose.
+   */
+  /**
+   * There is deliberately NO `communication` block here.
+   *
+   * It used to carry `{ mode, maxQueueSize, messageTTL, persistence }`. No
+   * reader anywhere, and nothing in `src/` answers to any of the four:
+   * `MessageStore` is configured through its own constructor parameter
+   * (`MessageStoreConfig.maxMessages` / `.rotationSize` — different names, and
+   * not reachable from a `NexusConfig` literal at all), and `MessageRouter`
+   * takes no settings. `mode: 'pubsub'` described a dispatch policy nothing
+   * dispatches on, and `maxQueueSize: 100` bounded no queue — the message
+   * store's own bound is 10,000.
+   *
+   * REMOVED for the same reason the `memory` block above was: a block whose
+   * fields are inert is worse than no block, because a user who sets
+   * `communication.messageTTL` has no evidence but the silence.
+   *
+   * This is a BREAKING type change for any external caller passing a
+   * `communication` block in a `NexusConfig` literal.
+   */
   dashboard: {
     enabled: boolean
     port: number
@@ -525,6 +642,32 @@ export interface NexusConfig {
     prBeforeMerge: boolean
   }
   /**
+   * Effort selection: whether the orchestrator asks a model for a reasoning
+   * effort matched to the task's difficulty.
+   *
+   * OPTIONAL, for the same reason `gitFlow` is: `NexusConfig` is an exported
+   * type, and a new REQUIRED block would stop every external literal from
+   * compiling for a field those callers never set.
+   *
+   * FILE-SETTABLE under the same key in `nexus.jsonc` — this block is the
+   * constructor seed of the ONE `effort` block, beneath the project and global
+   * files. Every consumer resolves through the single gate in
+   * `selectBestModel`, and no other file in `src/` reads it.
+   *
+   * It changes the REQUEST, never the price: `ModelVariant` carries no `cost`,
+   * so `ModelPricingTiers` has no variant axis and none was added. A variant
+   * moves token volume, which the measured path already bills as reasoning
+   * tokens. See `NexusEffortConfig` in `src/config.ts` for each key.
+   */
+  effort?: {
+    /** Whether an effort is chosen automatically. */
+    enabled: boolean
+    /** The highest effort any task may be asked for. */
+    maxEffort: ModelEffort
+    /** The `0-100` difficulty below which no effort is chosen. */
+    minDifficulty: number
+  }
+  /**
    * Custom agent roles, as a programmatic starting point.
    *
    * OPTIONAL, for the same reason `cost` is: `NexusConfig` is an exported type
@@ -538,11 +681,6 @@ export interface NexusConfig {
    * defined here survives a file that says nothing about it.
    */
   customRoles?: NexusCustomRoleConfig[]
-  security: {
-    sastEnabled: boolean
-    secretsScanning: boolean
-    scopeEnforcement: boolean
-  }
   learning: {
     enabled: boolean
     patternStorage: 'sqlite' | 'memory'
@@ -558,7 +696,9 @@ export interface NexusConfig {
    *
    * NOT REACHABLE FROM A CONFIG FILE. `NexusConfigManager` models only
    * `models`, `budget` and `selfHealing` — the same short list that excludes
-   * `memory`, `security` and `learning`. This block is settable through the
+   * `memory` and `learning`, and that now also excludes `security` and
+   * `communication`, both of which have been deleted outright rather than left
+   * unread (see the notes on those two). This block is settable through the
    * `NexusOrchestrator` constructor only, and it is documented that way rather
    * than as user-configurable, because it is not.
    */

@@ -55,7 +55,6 @@ describe('dashboard server/client contract', () => {
       budget: {
         maxTotalCost: 10.0,
         maxCostPerTask: 1.0,
-        maxCostPerAgent: 2.0,
         alertThreshold: 0.2,
         hardLimit: false,
       },

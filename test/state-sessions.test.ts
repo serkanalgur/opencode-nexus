@@ -149,7 +149,7 @@ async function runTask(
   } = {}
 ) {
   const orchestrator = new NexusOrchestrator({
-    selfHealing: { enabled: false, maxRetries: 3, retryDelay: 0, backoffMultiplier: 2, contextTransfer: false },
+    selfHealing: { enabled: false, maxRetries: 3, retryDelay: 0, contextTransfer: false },
     ...(graceMs === undefined ? {} : { cost: { timeoutDeltaGraceMs: graceMs } }),
   })
   await orchestrator.initialize(ctx as never)
@@ -633,7 +633,7 @@ describe('getState().agents', () => {
 describe('getState().config', () => {
   it('carries the resolved config under its real key names', async () => {
     const orchestrator = new NexusOrchestrator({
-      budget: { maxTotalCost: 12.5, maxCostPerTask: 1, maxCostPerAgent: 2, alertThreshold: 0.25, hardLimit: true },
+      budget: { maxTotalCost: 12.5, maxCostPerTask: 1, alertThreshold: 0.25, hardLimit: true },
     })
     await orchestrator.initialize(makeCtx() as never)
 
@@ -664,7 +664,7 @@ describe('getState().config', () => {
 
   it('reports the budget in force, which `execute()` can replace', async () => {
     const orchestrator = new NexusOrchestrator({
-      budget: { maxTotalCost: 10, maxCostPerTask: 1, maxCostPerAgent: 2, alertThreshold: 0.2, hardLimit: false },
+      budget: { maxTotalCost: 10, maxCostPerTask: 1, alertThreshold: 0.2, hardLimit: false },
     })
     await orchestrator.initialize(makeCtx() as never)
 

@@ -184,7 +184,7 @@ async function runTask(
   // Self-healing off: a retry would spawn a second session and re-enter
   // executeTask, which is a different test.
   const orchestrator = new NexusOrchestrator({
-    selfHealing: { enabled: selfHealing ?? false, maxRetries: 3, retryDelay: 0, backoffMultiplier: 2, contextTransfer: false },
+    selfHealing: { enabled: selfHealing ?? false, maxRetries: 3, retryDelay: 0, contextTransfer: false },
     ...(graceMs === undefined ? {} : { cost: { timeoutDeltaGraceMs: graceMs } }),
   })
   await orchestrator.initialize(ctx as never)

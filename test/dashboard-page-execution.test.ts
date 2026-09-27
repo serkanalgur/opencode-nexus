@@ -183,14 +183,13 @@ const HOSTILE_STATE = {
       coder: 'anthropic/claude-sonnet-4-6',
       reviewer: 'openai/gpt-5-mini',
     },
-    // The two per-task/per-agent ceilings are awkward values rather than tidy
-    // ones for the same reason as `tasksFailed: 7` — the per-field probes need
-    // each one to be a string no other field in this fixture renders. `$1.00`
-    // would have been a substring of `maxTotalCost`'s `$10.00`.
+    // The per-task ceiling is an awkward value rather than a tidy one for the
+    // same reason as `tasksFailed: 7` — the per-field probes need it to be a
+    // string no other field in this fixture renders. `$1.00` would have been a
+    // substring of `maxTotalCost`'s `$10.00`.
     budget: {
       maxTotalCost: 10,
       maxCostPerTask: 3.25,
-      maxCostPerAgent: 4.75,
       alertThreshold: 0.2,
       hardLimit: false,
     },
@@ -198,7 +197,6 @@ const HOSTILE_STATE = {
       enabled: true,
       maxRetries: 4,
       retryDelay: 1234,
-      backoffMultiplier: 3.5,
       contextTransfer: false,
     },
   },
@@ -661,7 +659,15 @@ describe('the renderers actually produced content', () => {
     expect(page.html('config-models')).toContain('anthropic/claude-sonnet-4-6')
     expect(page.html('config-budget')).toContain('maxTotalCost')
     expect(page.html('config-budget')).toContain('hardLimit (stop at ceiling)')
-    expect(page.html('config-healing')).toContain('backoffMultiplier')
+    expect(page.html('config-healing')).toContain('retryDelay')
+    // The two rows this change DELETED, asserted as absent rather than dropped.
+    // An assertion that vanishes with the row it guarded is how "the per-agent
+    // ceiling" and the "× 3.50" backoff multiplier survived for this long while
+    // doing nothing, so both absences are pinned from here. `retryDelay` above
+    // is the positive half: it is the backoff base that IS read, and it is
+    // asserted in the same breath so the block cannot be emptied wholesale.
+    expect(page.html('config-budget')).not.toContain('maxCostPerAgent')
+    expect(page.html('config-healing')).not.toContain('backoffMultiplier')
     // The resolved config, serialised into the readonly field.
     expect(page.element('config-editor').value).toContain('"maxTotalCost": 10')
   })
@@ -1001,7 +1007,7 @@ const FIELD_DECISIONS: Record<string, Decision> = {
   },
   'state.agents[].totalCost': {
     consumed: true,
-    why: 'The "Cost" metric and the per-agent budget bar.',
+    why: 'The "Cost" metric and the agent budget bar, which is scaled against the run\'s TOTAL cap now that the never-enforced per-agent ceiling is gone.',
     probe: { kind: 'element', id: 'agents-container', contains: '$1.25' },
   },
 
@@ -1085,13 +1091,13 @@ const FIELD_DECISIONS: Record<string, Decision> = {
   },
   'state.config.budget.maxCostPerTask': {
     consumed: true,
-    why: 'Shown in the panel. The page does not scale anything by it: no surface reports a per-TASK cost bar.',
-    probe: { kind: 'row', id: 'config-budget', key: 'maxCostPerTask', equals: '$3.25' },
-  },
-  'state.config.budget.maxCostPerAgent': {
-    consumed: true,
-    why: 'The per-agent bar scale, normalised against the per-AGENT ceiling rather than the most expensive agent.',
-    probe: { kind: 'row', id: 'config-budget', key: 'maxCostPerAgent', equals: '$4.75' },
+    // The key is suffixed `(advisory)` because that is what the field now IS:
+    // `checkTaskBudget` in `src/orchestrator.ts` notifies on a per-task
+    // overspend and stops nothing, since a turn already in flight cannot be
+    // interrupted. The page does not scale anything by it — no surface reports
+    // a per-TASK cost bar — so the label is the only place the claim is made.
+    why: 'Shown in the panel, labelled for what it is. The page does not scale anything by it: no surface reports a per-TASK cost bar.',
+    probe: { kind: 'row', id: 'config-budget', key: 'maxCostPerTask (advisory)', equals: '$3.25' },
   },
   'state.config.budget.alertThreshold': {
     consumed: true,
@@ -1118,11 +1124,16 @@ const FIELD_DECISIONS: Record<string, Decision> = {
     why: 'Shown in the unit it is denominated in, so a 1234ms delay and a 1234-second one cannot be confused, and a missing value is a dash rather than a 0ms delay.',
     probe: { kind: 'row', id: 'config-healing', key: 'retryDelay', equals: '1.23s' },
   },
-  'state.config.selfHealing.backoffMultiplier': {
-    consumed: true,
-    why: 'Shown as a multiple of the base delay, which is the only form in which a backoff factor is comparable across configs — a raw multiplier means little without the delay it multiplies.',
-    probe: { kind: 'row', id: 'config-healing', key: 'backoffMultiplier', equals: '× 3.50' },
-  },
+  // `state.config.selfHealing.backoffMultiplier` is DELETED from this table,
+  // and its absence is the assertion. It was the sharpest of the dead knobs: the
+  // page rendered it as "× 3.50" beside `retryDelay`, so the dashboard and the
+  // `NexusFullConfig` file shape both told a user the backoff factor was
+  // configurable — while `handleFailure` computes
+  // `retryDelay * Math.pow(2, retryCount)` with the 2 inline. A fixture that
+  // still sent `backoffMultiplier: 3.5` would keep the row rendering and the
+  // probe passing against a key the server can no longer send, which is exactly
+  // the drift the "no decision for a field the server no longer sends" check
+  // above exists to catch. `retryDelay` is the whole configurable backoff now.
   'state.config.selfHealing.contextTransfer': {
     consumed: true,
     why: 'Shown — and it is the one self-healing key that changes what the page SHOWS rather than only what it prints.',
@@ -1638,8 +1649,14 @@ describe('the enumeration of unread fields is itself checked', () => {
     ])
     // And that an interface the page reads nothing from is still walked, so a
     // flat interface cannot come back empty and pass as "no fields".
+    //
+    // `maxCostPerAgent` is gone from this list, and its absence is the point:
+    // it was the page's only reader, the page used it to caption every agent
+    // card "of $N per-agent ceiling · OVER CEILING", and there was no such
+    // ceiling. Deleting the row and this field together is the whole change —
+    // see the deliberate absence pin in `test/config-knobs.test.ts`.
     expect(interfaceFieldNames(types, 'BudgetConstraint')).toEqual([
-      'maxTotalCost', 'maxCostPerTask', 'maxCostPerAgent', 'alertThreshold', 'hardLimit',
+      'maxTotalCost', 'maxCostPerTask', 'alertThreshold', 'hardLimit',
     ])
   })
 

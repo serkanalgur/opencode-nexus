@@ -18,13 +18,17 @@ describe('TeamManager', () => {
     const manager = new TeamManager()
     const team = manager.create('Test Team', 'architect')
     
-    const member = manager.addMember(team.id, 'coder', 'anthropic/claude-sonnet-4-6')
+    const member = manager.addMember(team.id, 'coder')
     
     expect(member).not.toBeNull()
     expect(member!.id).toMatch(/^member-\d+-\d+$/)
     expect(member!.role).toBe('coder')
-    expect(member!.model).toBe('anthropic/claude-sonnet-4-6')
     expect(member!.status).toBe('idle')
+    // `model` is GONE from `TeamMember`, and this is the pin for its absence:
+    // it was stored, required from the caller, and read by nothing. Asserted
+    // on the runtime object rather than only on the type, so a `model` that
+    // came back through some other path would still fail here.
+    expect(Object.keys(member as object).sort()).toEqual(['id', 'role', 'status'])
     
     const updatedTeam = manager.get(team.id)
     expect(updatedTeam!.members.length).toBe(1)
@@ -32,7 +36,7 @@ describe('TeamManager', () => {
 
   it('should return null when adding member to non-existent team', () => {
     const manager = new TeamManager()
-    const member = manager.addMember('non-existent', 'coder', 'model')
+    const member = manager.addMember('non-existent', 'coder')
     expect(member).toBeNull()
   })
 
@@ -90,9 +94,9 @@ describe('TeamManager', () => {
     const manager = new TeamManager()
     const team = manager.create('Full Team', 'architect')
     
-    manager.addMember(team.id, 'coder', 'model-a')
-    manager.addMember(team.id, 'reviewer', 'model-b')
-    manager.addMember(team.id, 'tester', 'model-c')
+    manager.addMember(team.id, 'coder')
+    manager.addMember(team.id, 'reviewer')
+    manager.addMember(team.id, 'tester')
     
     const updatedTeam = manager.get(team.id)
     expect(updatedTeam!.members.length).toBe(3)

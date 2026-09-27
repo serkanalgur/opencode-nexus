@@ -26,7 +26,7 @@ describe('DashboardModule', () => {
 
   beforeEach(() => {
     orchestrator = new NexusOrchestrator({
-      budget: { maxTotalCost: 10.00, maxCostPerTask: 1.00, maxCostPerAgent: 2.00, alertThreshold: 0.2, hardLimit: false }
+      budget: { maxTotalCost: 10.00, maxCostPerTask: 1.00, alertThreshold: 0.2, hardLimit: false }
     })
     orchestrator.initialize(mockCtx as any)
     dashboard = new DashboardModule(orchestrator)
@@ -169,7 +169,7 @@ describe('Dashboard integration with Orchestrator', () => {
 
   beforeEach(() => {
     orchestrator = new NexusOrchestrator({
-      budget: { maxTotalCost: 10.00, maxCostPerTask: 1.00, maxCostPerAgent: 2.00, alertThreshold: 0.2, hardLimit: false }
+      budget: { maxTotalCost: 10.00, maxCostPerTask: 1.00, alertThreshold: 0.2, hardLimit: false }
     })
     orchestrator.initialize(mockCtx as any)
   })

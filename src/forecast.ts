@@ -1,4 +1,5 @@
 import type { Task, ComplexityScore } from "./types"
+import { bareModelId } from "./model-ref"
 
 /**
  * Token usage for a finished session, in exactly the shape OpenCode projects
@@ -154,13 +155,15 @@ const UNKNOWN_PRICING_PER_1K: ModelPricingTiers = untiered(per1kPricing(0.01, 0.
 const per1k = (rate: number, tokens: number): number => (rate * tokens) / 1000
 
 /**
- * "provider/id" → "id"; a bare id is returned unchanged (indexOf is -1 when
- * there is no "/", and slice(0) is the whole string). The single copy of this
- * key-normalisation rule in the plugin.
+ * "provider/id" → "id"; a bare id is returned unchanged; a `#variant` suffix is
+ * removed.
+ *
+ * RE-EXPORTED from `src/model-ref.ts`, which holds the single copy of this
+ * key-normalisation rule. This comment used to claim the single copy was HERE,
+ * and it stopped being true the moment a second parser appeared; the parser
+ * itself moved because five sites disagreed about the tail of a ref.
  */
-export function bareModelId(ref: string): string {
-  return ref.slice(ref.indexOf('/') + 1)
-}
+export { bareModelId } from './model-ref'
 
 export interface CostBreakdown {
   inputCost: number

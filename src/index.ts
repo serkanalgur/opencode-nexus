@@ -1688,7 +1688,7 @@ You are a technical writer who creates documentation that developers actually wa
         input: {
           type: "object",
           properties: {
-            model: { type: "string", description: "Model to show cost for, as 'provider/id' or a bare 'id' (optional, shows all if omitted)" },
+            model: { type: "string", description: "Model to show cost for, as 'provider/id', 'provider/id#variant', or a bare 'id' (optional, shows all if omitted). A '#variant' is priced as the underlying model: variants carry no price of their own, so effort changes token volume, not rate." },
             setInput: { type: "number", description: "Set input cost in USD per 1K tokens for a model (e.g. 0.003 for $3 per million tokens)" },
             setOutput: { type: "number", description: "Set output cost in USD per 1K tokens for a model (e.g. 0.015 for $15 per million tokens)" }
           },
@@ -1775,7 +1775,7 @@ You are a technical writer who creates documentation that developers actually wa
           properties: {
             role: { type: "string", description: "Agent role (architect, coder, reviewer, tester, explorer, documenter)" },
             task: { type: "string", description: "Task description" },
-            model: { type: "string", description: "Model override (optional, e.g. 'anthropic/claude-sonnet-4-6')" },
+            model: { type: "string", description: "Model override (optional), as 'providerID/modelID' or 'providerID/modelID#variant' (e.g. 'anthropic/claude-sonnet-4-6#high'). The delimiter is a hash, not an at-sign. A bare model id is auto-completed against the configured models and throws if none matches." },
             wait: { type: "boolean", description: "Wait for completion (default: false)" },
             timeout: { type: "number", description: "Timeout in ms when waiting (default: 120000)" }
           },
@@ -1915,7 +1915,7 @@ You are a technical writer who creates documentation that developers actually wa
           properties: {
             role: { type: "string", description: "Agent role (architect, coder, reviewer, tester, explorer, documenter)" },
             task: { type: "string", description: "Task description" },
-            model: { type: "string", description: "Model override (optional)" },
+            model: { type: "string", description: "Model override (optional), as 'providerID/modelID' or 'providerID/modelID#variant'. The delimiter is a hash, not an at-sign." },
             timeout: { type: "number", description: "Timeout in ms (default: 120000)" }
           },
           required: ["role", "task"],
@@ -2790,32 +2790,37 @@ You are a technical writer who creates documentation that developers actually wa
       execute: async (input: unknown) => {
         const { name, leadRole } = input as { name: string; leadRole: string }
         const team = teamManager.create(name, leadRole)
-        return { content: `Team '${team.name}' created with ID: ${team.id}\nLead: ${leadRole}\nStatus: ${team.status}\n\nAdd members with nexus.team.addMember(teamId="${team.id}", role="...", model="...")` }
+        return { content: `Team '${team.name}' created with ID: ${team.id}\nLead: ${leadRole}\nStatus: ${team.status}\n\nAdd members with nexus.team.addMember(teamId="${team.id}", role="...")` }
       }
     })
 
     editor.add({
       name: "team.addMember",
       description: "Add a member to a team",
+      // `model` is GONE, and it is a BREAKING schema change: it was `required`
+      // and no longer exists. It was stored on the member and read by nothing
+      // — `member.model` appeared in exactly one place in the repository, the
+      // success echo below, which reported back the string the caller had just
+      // supplied. See `TeamMember` in `src/team.ts` for why wiring it was not
+      // the alternative.
       input: {
         type: "object",
         properties: {
           teamId: { type: "string", description: "Team ID" },
-          role: { type: "string", description: "Role for this member" },
-          model: { type: "string", description: "Model for this member" }
+          role: { type: "string", description: "Role for this member" }
         },
-        required: ["teamId", "role", "model"],
+        required: ["teamId", "role"],
         additionalProperties: false
       },
       options: { codemode: true },
       execute: async (input: unknown) => {
-        const { teamId, role, model } = input as { teamId: string; role: string; model: string }
-        const member = teamManager.addMember(teamId, role, model)
+        const { teamId, role } = input as { teamId: string; role: string }
+        const member = teamManager.addMember(teamId, role)
         if (!member) {
           return { content: `Team ${teamId} not found.` }
         }
         const team = teamManager.get(teamId)
-        return { content: `Member added to team '${team?.name}':\nID: ${member.id}\nRole: ${member.role}\nModel: ${member.model}\nStatus: ${member.status}\n\nTotal members: ${team?.members.length || 0}` }
+        return { content: `Member added to team '${team?.name}':\nID: ${member.id}\nRole: ${member.role}\nStatus: ${member.status}\n\nTotal members: ${team?.members.length || 0}` }
       }
     })
 
@@ -2838,7 +2843,9 @@ You are a technical writer who creates documentation that developers actually wa
           if (!team) {
             return { content: `Team ${teamId} not found.` }
           }
-          const memberLines = team.members.map(m => `  - ${m.role} (${m.model}): ${m.status}`).join('\n')
+          // No `m.model`: the field is gone from `TeamMember` because nothing
+          // ever read it. See the note on the interface in `src/team.ts`.
+          const memberLines = team.members.map(m => `  - ${m.role}: ${m.status}`).join('\n')
           return { content: `Team: ${team.name} (${team.id})\nLead: ${team.lead}\nStatus: ${team.status}\nCreated: ${team.createdAt.toISOString()}\nMembers (${team.members.length}):\n${memberLines || '  No members yet'}` }
         }
 
@@ -2873,7 +2880,7 @@ You are a technical writer who creates documentation that developers actually wa
           return { content: `Team '${team.name}' has no members. Add members before activating.` }
         }
         teamManager.activate(teamId)
-        return { content: `Team '${team.name}' activated!\n\nTeam is now ready for parallel execution with ${team.members.length} members:\n${team.members.map(m => `  - ${m.role}: ${m.model}`).join('\n')}` }
+        return { content: `Team '${team.name}' activated!\n\nTeam is now ready for parallel execution with ${team.members.length} members:\n${team.members.map(m => `  - ${m.role}: ${m.status}`).join('\n')}` }
       }
     })
 

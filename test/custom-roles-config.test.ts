@@ -101,8 +101,8 @@ function asPluginContext(ctx: Ctx): never {
 function newOrchestrator(overrides?: Record<string, unknown>) {
   return new NexusOrchestrator({
     schedulerInterval: 1,
-    selfHealing: { enabled: false, maxRetries: 0, retryDelay: 0, backoffMultiplier: 2, contextTransfer: false },
-    budget: { maxTotalCost: 10.0, maxCostPerTask: 1.0, maxCostPerAgent: 2.0, alertThreshold: 0.2, hardLimit: false },
+    selfHealing: { enabled: false, maxRetries: 0, retryDelay: 0, contextTransfer: false },
+    budget: { maxTotalCost: 10.0, maxCostPerTask: 1.0, alertThreshold: 0.2, hardLimit: false },
     ...overrides
   } as never)
 }
