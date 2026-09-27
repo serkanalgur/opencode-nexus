@@ -1,6 +1,13 @@
 /** @jsxImportSource @opentui/solid */
 import { Plugin } from "@opencode/plugin/tui"
 import { NexusConfigManager } from "./config"
+import {
+  formatModelPrice,
+  modelRef,
+  providerLabels,
+  type GroupedModel,
+  type ProviderLabelSource
+} from "./model-groups"
 
 // Types for agent status in the sidebar
 interface AgentStatus {
@@ -586,6 +593,203 @@ export async function openInBrowser(url: string): Promise<void> {
   }
 }
 
+// ── Model picker options ────────────────────────────────────────────
+// Free functions for the same reason as the sidebar section above: the TUI
+// entrypoint stays a thin adapter over the live context, and the option
+// building is driven directly in tests instead of through a renderer.
+
+// Category for the "Use default" row, which belongs to no provider.
+//
+// It is given a LABEL rather than left uncategorised because the host groups on
+// `category ?? ""` and renders a header only for a non-empty key: an
+// uncategorised row lands in its own visually-separate block with a blank gap
+// where a header would be. A category is a label on a group, not a row, so
+// unlike a header pseudo-row it cannot be selected and submitted as a model —
+// which matters, because a bare provider id would pass the dialog and then
+// fail `getModelForRole`'s prefix check and throw at spawn time.
+const DEFAULT_MODEL_CATEGORY = "Defaults"
+
+/** The `value` `setModel` reads back; falsy so a role can be reset to its default. */
+const USE_DEFAULT_VALUE = ""
+
+/**
+ * One row of the model picker.
+ *
+ * Structurally the host's `DialogSelectOption<string>`, declared locally for
+ * the same reason as `SidebarSession` above: `@opencode/client` is not a
+ * dependency of this package, and the two are assignable with no conversion.
+ */
+export interface ModelSelectOption {
+  readonly title: string
+  readonly value: string
+  readonly description?: string
+  readonly category?: string
+}
+
+/**
+ * The picker's options: one per model, grouped by provider, plus the reset row.
+ *
+ * GROUPING IS DONE BY `category`, NEVER BY A HEADER ROW. The host computes
+ * `groupBy(x => x.category ?? "")` over the FILTERED option list, so a category
+ * tracks whatever survives the user's search and can never leave an orphaned
+ * header; and because `category` is one of the fuzzy-finder's search keys
+ * (`["title", "category", "searchText"]`, with only the title weighted double),
+ * grouping makes the picker MORE searchable — typing "OpenCode Go" now matches
+ * every model under it. This is the same pattern OpenCode's own model picker
+ * uses, which sets `category: provider.name` on every row.
+ *
+ * ── WHERE THAT SEARCH-KEY CLAIM COMES FROM ──
+ *
+ * Not from the host's types: `@opencode/plugin` publishes nothing about search
+ * keys, scoring or grouping, and its `context.js` is a 0-byte type shim, so there
+ * is no declaration to read and the claim would otherwise be a comment asserting
+ * a behavioural promise. It was verified against the INSTALLED CLI's own code —
+ * the minified `dialog-select` implementation extracted from the bundle at
+ * `~/.opencode/bin/opencode`, whose option build reads verbatim:
+ *
+ *   SA.go(G, j, {keys:["title","category","searchText"],
+ *                scoreFn: r => r[0].score*2 + r[1].score + r[2].score})
+ *
+ * Three keys, three terms, title at weight 2 — which is the correction: an
+ * earlier draft of this comment said two keys and two terms and was wrong, and a
+ * comment that is wrong about a host internal is worse than no comment. That
+ * bundle is a local build artifact and is NOT guaranteed to exist on CI or on
+ * another machine, which is why the snippet is quoted here rather than merely
+ * referenced: a reader who has the bundle can grep `SA.go` and check it, and a
+ * reader who does not can at least see exactly what was claimed and against what.
+ * Treat it as a snapshot of one installed version, not a stable contract — if
+ * `category` ever stops being a key, the README's "searching matches the
+ * heading" sentence becomes false and this is where to look first.
+ *
+ * ORDERING. Providers sort by display name, then models by title within their
+ * provider. The contiguity is not cosmetic: the host groups by FIRST
+ * APPEARANCE, so two providers' models interleaved in the array would render as
+ * two separate "OpenCode" headers rather than one group. Sorting the provider
+ * first is what makes one provider one block. `model.list()` order is
+ * otherwise not meaningful to a user — it is the host's catalogue order — so
+ * without this the grouped list would be grouped arbitrarily.
+ *
+ * `Use default` is appended last, in its own category: it is a real selectable
+ * row whose value stays `""` because `setModel` relies on that empty string to
+ * reset a role, and a trailing row is where a user looks for "reset".
+ */
+export function buildModelOptions(
+  models: readonly GroupedModel[] | undefined,
+  providers: readonly ProviderLabelSource[] | undefined
+): readonly ModelSelectOption[] {
+  const label = providerLabels(providers)
+
+  const options = (models ?? []).map(model => {
+    const category = label(model.providerID)
+    return {
+      title: model.name || model.id,
+      // The submitted value. Unchanged by grouping, and the one string in this
+      // function that must never drift: it is what `getModelForRole` and
+      // `spawnAgent` prefix-check, and a regression here is invisible until a
+      // spawn throws.
+      value: modelRef(model.providerID, model.id),
+      description: formatModelPrice(model.cost),
+      // No provider to name leaves the row uncategorised rather than inventing
+      // a group for it.
+      ...(category === undefined ? {} : { category })
+    }
+  })
+
+  // Provider first, then title. Sorting a COPY, so the caller's array is not
+  // reordered in place.
+  const grouped = [...options].sort((a, b) =>
+    (a.category ?? "").localeCompare(b.category ?? "") || a.title.localeCompare(b.title)
+  )
+
+  return [
+    ...grouped,
+    {
+      title: "Use default",
+      value: USE_DEFAULT_VALUE,
+      description: "Reset to default model",
+      category: DEFAULT_MODEL_CATEGORY
+    }
+  ]
+}
+
+/**
+ * Provider display names, memoised per project directory for the life of the
+ * process.
+ *
+ * `context.data.location.provider` is a `LocationCollection<ProviderInfo>`, the
+ * same shape as `model`: `list()` is `undefined` until something syncs it, and
+ * `sync()` is a round trip. So the picker has to sync providers too — but
+ * `handleFullConfig` opens it once per role, and that is six syncs in a row for
+ * a set of names that cannot have changed between them.
+ *
+ * WHAT STALENESS THIS SERVES, precisely: a provider added, removed or RENAMED
+ * while the TUI is running keeps its old header until the process restarts. That
+ * needs a config edit or an `auth login` in the same live session. The
+ * consequence is a header reading `opencode-go` instead of `OpenCode Go`, or a
+ * group of models under a raw id — a degraded LABEL on rows that are otherwise
+ * correct, because a model the memo has never heard of still resolves through
+ * `providerLabels`' raw-id fallback. No model is ever missing and no value is
+ * ever wrong, which is why this is worth a memo and a stale label is not worth
+ * a round trip per role.
+ *
+ * Keyed by directory because the provider set is per-project: a TUI that moves
+ * between worktrees must not reuse another directory's names.
+ */
+let providerNames: { readonly directory: string; readonly names: readonly ProviderLabelSource[] } | undefined
+
+/**
+ * Providers for `location`, synced at most once per directory.
+ *
+ * EXPORTED so the wiring feeding `buildModelOptions` is testable, not just the
+ * pure function it feeds. `buildModelOptions` had thorough coverage while the
+ * memo, the `sync` round trip and the per-directory key underneath it had none,
+ * which meant the whole picker-opening path was unverified: a regression here
+ * would have shown up as a picker that opens with raw-id headings and no failing
+ * test. Tests get isolation by passing a distinct directory per case, which is
+ * the memo's own key — no reset hook, and therefore no export that exists only
+ * for a test to reach.
+ *
+ * FAILURE COSTS A HEADING, NOT THE DIALOG. This is the second reason it is
+ * guarded: `handleModelSelect` awaits this before building a single option, and
+ * an older host with no `data.location.provider`, or a `sync` that rejects, used
+ * to throw straight out of `handleModelSelect` and the picker would not open at
+ * all. Before provider grouping existed, that function touched only
+ * `data.location.model`, so this is a new failure mode bolted onto a path that
+ * previously worked — and provider NAMES are a nicety. Every failure returns
+ * `undefined`, which `providerLabels` turns into raw-id headings: a cosmetically
+ * worse picker about the same models, never a missing one. Same pattern the
+ * server path uses (`getCostReport` degrades, it does not throw).
+ *
+ * A failure is NOT memoised. The cache is only written on a successful sync, so
+ * a transient rejection costs one extra round trip on the next open rather than
+ * pinning the picker to raw ids for the life of the process.
+ *
+ * `providers` is the host's `LocationCollection<ProviderInfo>`, narrowed
+ * structurally: `@opencode/client` is not a dependency of this package.
+ */
+export async function providerNamesFor(
+  location: { readonly directory?: string } | undefined,
+  providers:
+    | {
+        list(location?: unknown): readonly ProviderLabelSource[] | undefined
+        sync(location?: unknown): Promise<void>
+      }
+    | undefined,
+): Promise<readonly ProviderLabelSource[] | undefined> {
+  const directory = location?.directory ?? ""
+  if (providerNames?.directory === directory) return providerNames.names
+  if (!providers) return undefined
+  try {
+    await providers.sync(location)
+    const names = providers.list(location) ?? []
+    providerNames = { directory, names }
+    return names
+  } catch {
+    // Names are a nicety; the models are the picker.
+    return undefined
+  }
+}
+
 export default Plugin.define({
   id: "nexus.cli",
   setup(context) {
@@ -618,17 +822,10 @@ export default Plugin.define({
       await context.data.location.model.sync(location)
       const availableModels = context.data.location.model.list(location) ?? []
 
-      const options = availableModels.map((m: any) => ({
-        title: m.name || m.id,
-        value: `${m.providerID}/${m.id}`,
-        description: m.providerID
-      }))
-
-      options.push({
-        title: "Use default",
-        value: "",
-        description: "Reset to default model"
-      })
+      const options = buildModelOptions(
+        availableModels,
+        await providerNamesFor(location, context.data.location?.provider)
+      )
 
       const current = configManager.getModelForRole(role)
       const selected = await context.ui.dialog.select({
