@@ -3,6 +3,7 @@ import { BROADCAST_EVENTS } from '../src/broadcast'
 import {
   blankNonCode,
   emitPayloads,
+  executableSource,
   extractInlineScript,
   interfaceFieldNames,
   inlineFieldNames,
@@ -754,6 +755,208 @@ describe('a partial or hostile config is described, not invented', () => {
     // used to be the one place a populated `state.sessions` never reached.
     expect(empty.text('stat-sessions')).toBe('0')
     expect(empty.text('stat-sessions-sub')).toBe('No sessions reported')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE GAUGE IS AN SVG ELEMENT, AND ITS `className` IS NOT WRITABLE
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The bug that killed the page, and the harness gap that let it ship.
+ *
+ * `renderBudget` assigned `$gaugeFill.className`. `#gauge-fill` is a `<circle>`,
+ * and an SVG element's `className` is a read-only `SVGAnimatedString`, so every
+ * assignment raised
+ *
+ *     TypeError: Cannot set property className of #<SVGElement> which has only a getter
+ *
+ * The budget gauge is drawn on EVERY state frame, so the page threw before it
+ * finished rendering every frame and nothing below the overview card ever
+ * appeared. Twenty-nine tests in this file were green while it did.
+ *
+ * They were green because the shim could not represent the failure. It modelled
+ * `className` as a writable field on every element and minted every id-bearing
+ * element as a `<div>`, so `#gauge-fill` was a div in the test and a circle in
+ * the browser. That is the lesson worth keeping: which sites of a pattern are
+ * broken is a property of an element's NAMESPACE, and no amount of reading the
+ * page's JavaScript — and no amount of grepping it — can tell you. Only
+ * executing the page against a DOM that knows the difference can.
+ *
+ * So this block asserts two separate things, and they are load-bearing for
+ * DIFFERENT reasons — which was measured, not assumed. Reintroducing the
+ * original `className =` at each of the 24 swept sites in turn, one at a time:
+ *
+ *   - at the two SVG sites (the gauge fill), the executed assertions below fail,
+ *     loudly and with the page's own error text, because the strict shim turns
+ *     the write into the `TypeError` a browser raises;
+ *   - at the other 22 sites, which are all HTML elements and therefore never
+ *     crashed, the executed assertions do NOT fail — those render paths are not
+ *     driven by a test that reads their classes back. The source lint below is
+ *     the only thing in the suite that catches a `className` write at any of
+ *     them.
+ *
+ * That asymmetry is the reason both halves are here. The lint cannot see a
+ * namespace, so on its own it would have passed the original bug untouched: it
+ * is a pattern check, and the bug was in the pattern. The executed tests cannot
+ * see the 22 undriven sites, so on their own they would let the pattern back in
+ * at any of them. Neither is sufficient. Note also what the 22 do NOT need: they
+ * never crashed and still do not, so their `className` write is a latent trap
+ * rather than a live bug — which is exactly why it has to be caught by
+ * something other than "does the page still work".
+ */
+
+/** A state frame whose gauge takes the measurable branch, at a chosen fraction. */
+function stateWithBudget(remaining: number, ceiling = 10, alertThreshold: number | null = 0.2) {
+  return {
+    ...HOSTILE_STATE,
+    config: {
+      ...HOSTILE_STATE.config,
+      budget: { maxTotalCost: ceiling, alertThreshold, hardLimit: false },
+    },
+    budgetRemaining: remaining,
+  }
+}
+
+describe('the budget gauge is SVG, so its classes cannot be written via className', () => {
+  it('renders the measured branch without reporting a failure', async () => {
+    const gauged = await loadDashboardPage({ routes: COST_ROUTES })
+    gauged.open()
+    await gauged.settle()
+    const mark = logMark(gauged)
+
+    // 55% of a $10 ceiling remaining: above the 20% alert threshold, so the
+    // `fill` branch with no severity class. This is the frame the page could
+    // not draw at all before the fix.
+    gauged.deliver({
+      type: 'orchestrator:state',
+      data: stateWithBudget(5.5),
+      timestamp: 'now',
+    })
+    expect(failuresSince(gauged, mark)).toEqual([])
+
+    // The gauge is not merely non-crashing, it is drawn: the circle carries
+    // `fill`, the ring is not dimmed, and the percentage is on screen. Without
+    // these a page that deleted `renderBudget` outright would pass the
+    // no-failure assertion above, which is the whole reason this test could
+    // not be "did not throw" alone.
+    expect(gauged.element('gauge-fill').className).toBe('fill')
+    expect(gauged.element('gauge-ring').className).toBe('gauge-ring')
+    expect(gauged.text('gauge-pct')).toBe('55%')
+  })
+
+  it('renders the unmeasurable branch, where the same write happened a second time', async () => {
+    // The other `$gaugeFill.className` site, in the `remainingFraction === null`
+    // branch. A one-site fix would leave this one throwing, so it is driven and
+    // asserted separately rather than assumed to follow.
+    const gauged = await loadDashboardPage({ routes: COST_ROUTES })
+    gauged.open()
+    await gauged.settle()
+    const mark = logMark(gauged)
+
+    gauged.deliver({ type: 'orchestrator:state', data: EMPTY_STATE, timestamp: 'now' })
+    expect(failuresSince(gauged, mark)).toEqual([])
+
+    expect(gauged.element('gauge-fill').className).toBe('fill')
+    // The ring is dimmed in this branch, which is the one class change that is
+    // observable from the outside and therefore the one worth pinning.
+    expect(gauged.element('gauge-ring').className).toBe('gauge-ring unmeasurable')
+    expect(gauged.text('gauge-pct')).toBe('—')
+  })
+
+  it('applies the danger class on the SVG circle when the frame is at the alert threshold', async () => {
+    // The branch whose class is a computed concatenation, and the only site
+    // whose class value is not a literal. A sweep that mangled the expression
+    // would still leave `fill` correct on the other two branches.
+    const gauged = await loadDashboardPage({ routes: COST_ROUTES })
+    gauged.open()
+    await gauged.settle()
+
+    gauged.deliver({
+      type: 'orchestrator:state',
+      data: stateWithBudget(1, 10, 0.2),
+      timestamp: 'now',
+    })
+    expect(gauged.element('gauge-fill').className).toBe('fill danger')
+
+    // And the same frame one notch above the threshold drops it again, so the
+    // assertion above is about the comparison and not about a sticky class.
+    gauged.deliver({
+      type: 'orchestrator:state',
+      data: stateWithBudget(5, 10, 0.2),
+      timestamp: 'now',
+    })
+    expect(gauged.element('gauge-fill').className).toBe('fill')
+  })
+
+  it('writes no class through className anywhere in the page', async () => {
+    // The half that catches the 22 HTML sites. Measured: reintroducing
+    // `className =` at any one of them fails THIS test and nothing else in the
+    // suite, because no test drives those render paths and reads their classes
+    // back. So despite being a source grep, this is not redundant with the
+    // executed tests above — it is the sole coverage for 22 of the 24 sites.
+    //
+    // What it is blind to is namespaces, and that is not a small gap: it is the
+    // entire content of the shipped bug, which is why it is stated here as one
+    // half of a pair rather than as a proof. On its own it would have passed
+    // `el.className = 'fill'` on a `<circle>` without complaint.
+    //
+    // Deliberately scoped to WRITES. A read of `className` is a different
+    // operation, is legal in both namespaces, and is excluded so this stays a
+    // statement about the pattern that crashes rather than about a substring.
+    //
+    // Comments are stripped first, and that is not a detail: the page now
+    // documents at `$gaugeFill` WHY `className` is unsafe, in prose containing
+    // the very text `el.className = 'fill'`. Checked against the raw source
+    // this assertion fails on the explanation of the fix rather than on a
+    // regression, which is the fastest way to get a lint deleted.
+    const script = executableSource(extractInlineScript(await readDashboardHtml()))
+    const writes = script.match(/\.className\s*(=[^=]|\?\?=)/g) ?? []
+    expect(writes).toEqual([])
+  })
+
+  it('delivers the classes the page writes to the elements it wrote them for', async () => {
+    // A sweep from `className =` to `setAttribute('class', …)` has to be a
+    // behaviour-preserving rename, and the only way to know that is to read the
+    // values back off the elements after a real render. This covers SIX of the
+    // 22 HTML sites — the four orchestrator-pill branches, the connection badge
+    // and the cost banner — and it is worth being precise that it does not
+    // cover all 22: the other sixteen are not driven by any test that reads
+    // their classes back, which is the gap the lint above exists to close. The
+    // gauge sites are covered by the three tests before this one.
+    const swept = await loadDashboardPage({ routes: COST_ROUTES })
+    swept.open()
+    await swept.settle()
+    swept.deliver({ type: 'orchestrator:state', data: HOSTILE_STATE, timestamp: 'now' })
+
+    // Sites 1-4 of the sweep: the orchestrator pill, across all four branches.
+    for (const [data, expected] of [
+      [{ running: false, paused: false }, 'orch-pill idle'],
+      [{ running: true, paused: false }, 'orch-pill running'],
+      [{ running: false, paused: true }, 'orch-pill paused'],
+      [{ lastUpdated: 'nonsense', running: 'yes', paused: 'no' }, 'orch-pill unknown'],
+    ] as const) {
+      swept.deliver({
+        type: 'orchestrator:state',
+        data: { ...HOSTILE_STATE, ...data },
+        timestamp: 'now',
+      })
+      expect(swept.element('orch-status').className).toBe(expected)
+    }
+
+    // Site 9 of the sweep: the connection badge, from the socket's lifecycle. A
+    // dropped socket puts the page into `reconnecting` — `disconnected` is
+    // only reached once the retry budget is spent, which with inert timers never
+    // happens here, so `reconnecting` is the honest assertion and `connected`
+    // below is the one that would catch a badge frozen by a failed write.
+    expect(swept.element('conn-badge').className).toBe('connection-badge connected')
+    swept.socket.close()
+    await swept.settle()
+    expect(swept.element('conn-badge').className).toBe('connection-badge reconnecting')
+
+    // Sites 14-16 of the sweep: the cost-status banner. The hostile state's
+    // /api/costs route succeeds, so the banner is cleared to its hidden form.
+    expect(swept.element('cost-status').className).toBe('cost-status hidden')
   })
 })
 

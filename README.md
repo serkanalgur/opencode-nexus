@@ -504,6 +504,28 @@ shows how old the last snapshot is, and labels it stale past 15 seconds.
     the raw ISO load time, and both config files' state, so a reload that
     happened for a reason you did not ask for is visible as one.
 
+**What the tests do and do not prove about the page.** The page is executed in
+CI against a hand-built DOM (`test/helpers/dashboard-dom.ts`) that reads the real
+`dashboard/index.html`, so the code paths a test drives are the page's own code
+and not a transcription of it — that is how a variable read one line before its
+declaration, and a `TypeError` on every state frame, were both caught after
+shipping. What that harness models is finite, and the honest summary is: it
+proves the page *runs* those paths, against element types and namespaces taken
+from the actual markup. It does not prove the page *looks* right — there is no
+rendering, no layout, no CSS, and no real font or box measurement. A class of
+bug that needs a real SVG or CSS engine to appear is outside it by
+construction. The gauge is the clearest example of why the distinction matters
+rather than of what it covers: the budget ring is an SVG `<circle>`, and an SVG
+element's `className` is a read-only `SVGAnimatedString`, so the page used to
+raise `TypeError: Cannot set property className of #<SVGElement> which has only
+a getter` on every state frame and render nothing below the overview card.
+Twenty-nine tests were green throughout, because the harness modelled every
+element as a `<div>` with a writable `className` and so could not express the
+failure. The harness now takes each element's namespace from the markup and
+throws on an SVG `className` write, which is why those twenty-nine tests are
+meaningful — but the general point stands: "the suite is green" means "the paths
+a test drives do not throw", not "the page renders correctly in a browser".
+
 **Stop the dashboard:**
 ```
 /nexus dashboard stop
