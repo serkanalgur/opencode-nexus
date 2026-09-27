@@ -412,6 +412,117 @@ export function parseWebDashboardTarget(
 }
 
 /**
+ * The `dashboard` subcommands, and the TUI's only job is to get them to the
+ * server that already implements them.
+ *
+ * `handleDashboardCommand` in `src/orchestrator.ts` reads the first token of
+ * its argument, lowercases it, and answers `state` and `stop` itself before it
+ * ever reaches `parseDashboardTarget`. The TUI used to run its own port parser
+ * FIRST, so `/nexus dashboard stop` came back as `"stop" is not a port number`
+ * and the server that does implement the subcommand was never asked. That is
+ * why the check is in the CALLER here, for the same reason it is in the
+ * caller's caller on the server: exactly one place decides what a subcommand
+ * is, and the two port parsers stay parsers — which is also what keeps the
+ * parity test between them meaningful.
+ *
+ * Mirrored rather than reimplemented, and the mirroring is exact in the two
+ * places it could drift:
+ *
+ * - CASE. The server lowercases before comparing, so `Stop` and `STOP` are the
+ *   same command there. A TUI that compared case-sensitively would reject what
+ *   the server accepts, and "two places that disagree about what a subcommand
+ *   is" is the bug class this whole function exists to remove.
+ * - TAIL. The server takes `[0]` and ignores everything after it, so
+ *   `stop 4747` stops the dashboard and starts nothing on 4747. Nothing here
+ *   inspects the tail either, and the dispatcher forwards the user's argument
+ *   unmodified instead of rebuilding it, so the server's tokeniser — not a
+ *   second copy of it — decides what `stop 4747` means.
+ */
+const DASHBOARD_SUBCOMMANDS = ['stop', 'state'] as const
+
+type DashboardSubcommand = (typeof DASHBOARD_SUBCOMMANDS)[number]
+
+/** The first whitespace-separated token, lowercased — as the server reads it. */
+function firstToken(input: string | undefined): string | undefined {
+  return (input ?? '').trim().split(/\s+/).filter(Boolean)[0]?.toLowerCase()
+}
+
+/** Which `dashboard` subcommand this argument names, if it names one. */
+export function parseDashboardSubcommand(
+  input: string | undefined
+): DashboardSubcommand | undefined {
+  const first = firstToken(input)
+  return DASHBOARD_SUBCOMMANDS.find(sub => sub === first)
+}
+
+/**
+ * One keystroke away from `candidate`, for the misspelling hint and nothing
+ * else.
+ *
+ * Bounded at one edit because that is what makes it safe to run over a bad
+ * port: a threshold loose enough to catch "sto" also catches real input, and a
+ * user who typed a hostname would be told they misspelled a subcommand. At
+ * one edit the two sets cannot meet — `abc`, `0`, `70000` and `4747abc` are
+ * all three or more edits from both subcommands — so a genuinely bad port
+ * still gets the port message, and the two cannot be confused.
+ */
+function isOneTypoAway(candidate: string, word: string): boolean {
+  if (candidate === word) return false
+  if (Math.abs(candidate.length - word.length) > 1) return false
+
+  if (candidate.length === word.length) {
+    let edits = 0
+    for (let i = 0; i < candidate.length; i += 1) {
+      if (candidate[i] !== word[i]) {
+        edits += 1
+        if (edits > 1) return false
+      }
+    }
+    return edits === 1
+  }
+
+  const [shorter, longer] = candidate.length < word.length
+    ? [candidate, word]
+    : [word, candidate]
+  let i = 0
+  let j = 0
+  let skipped = false
+  while (i < shorter.length && j < longer.length) {
+    if (shorter[i] === longer[j]) {
+      i += 1
+      j += 1
+      continue
+    }
+    if (skipped) return false
+    skipped = true
+    j += 1
+  }
+  return true
+}
+
+/**
+ * The message for an argument that is neither a port nor a subcommand.
+ *
+ * A misspelled subcommand used to be reported as a bad port, which is honest —
+ * it really is not a port — and useless, because the thing the user was trying
+ * to type is never named. When the first token is one keystroke from a real
+ * subcommand, this names both subcommands and says what a port is instead; when
+ * it is not, the port parser's own message is returned UNCHANGED, so
+ * `0`, `70000` and a host name still read as what they are.
+ */
+function webDashboardInputError(input: string | undefined, portError: string): string {
+  const first = firstToken(input)
+  if (first === undefined) return portError
+  if (!DASHBOARD_SUBCOMMANDS.some(sub => isOneTypoAway(sub, first))) return portError
+
+  return [
+    `"${first}" is neither a port number nor a dashboard subcommand.`,
+    "The dashboard subcommands are `stop` and `state` — did you mean one of those?",
+    "A port is a number between 1 and 65535, optionally followed by a host.",
+  ].join('\n')
+}
+
+/**
  * How long to wait for the server to confirm a listen before telling the user
  * it did not, and how often to ask.
  *
@@ -463,12 +574,83 @@ function defaultWait(ms: number): Promise<void> {
 }
 
 /**
+ * Hand a `dashboard` subcommand to the server, which is the only thing that can
+ * carry it out, and say so without claiming an outcome the TUI cannot see.
+ *
+ * WHAT THE USER SEES, and why it is not the server's answer: `submitCommand`
+ * resolves when the OpenCode server has ACCEPTED the prompt, and returns
+ * `void` — the TUI has no channel for what the command came back with. The
+ * server's one-line result (whether a stop stopped anything, the whole state
+ * document for `state`) arrives as this session's reply to the command, and
+ * quoting a string that has not arrived would be the same class of lie as the
+ * confirm loop's: reporting something the TUI does not know.
+ *
+ * The invariant this function exists to protect is that a STOP never reaches
+ * the start path. It returns before the config gate, before the probe, before
+ * `openBrowser`, and before the "Started and opened" toast, and it opens
+ * nothing itself: there is no `openBrowser` call in the body, so no edit that
+ * reorders or extends it can turn a stop into a start. `state` takes the same
+ * path for the same reason — it is a read, and a read must not start anything.
+ */
+async function runDashboardSubcommand(
+  input: string | undefined,
+  subcommand: DashboardSubcommand,
+  deps: WebDashboardDeps
+): Promise<void> {
+  // Forwarded verbatim rather than rebuilt from the normalised token, so the
+  // server sees what the user typed and remains the only thing that decides
+  // what the argument means.
+  const command = `/nexus dashboard ${(input ?? '').trim()}`
+
+  try {
+    await deps.submitCommand(command)
+  } catch (error: unknown) {
+    const detail = error instanceof Error ? error.message : String(error)
+    deps.showToast({
+      title: `Nexus Web Dashboard — ${subcommand} not sent`,
+      message: [
+        `The \`${command}\` command never reached the OpenCode server: ${detail}`,
+        "",
+        "Nothing was started, stopped or opened.",
+      ].join('\n'),
+      variant: 'error',
+      duration: 15000,
+    })
+    return
+  }
+
+  const consequence = subcommand === 'stop'
+    ? 'which does the stopping'
+    : 'which answers with the orchestrator state as JSON'
+  const followUp = subcommand === 'stop'
+    ? 'The server says plainly when there was no dashboard running, rather than reporting a stop that did not happen.'
+    : 'The state document is large, which is why it is a reply and not a toast.'
+
+  deps.showToast({
+    title: `Nexus Web Dashboard — ${subcommand} sent`,
+    message: [
+      `Sent \`${command}\` to the server, ${consequence}.`,
+      'Nothing was started and no browser was opened.',
+      '',
+      'The dashboard is started and stopped in the server process, and the TUI',
+      'submits a command without getting its result back, so the answer to this',
+      `one is this session's reply to \`${command}\`. ${followUp}`,
+    ].join('\n'),
+    variant: 'info',
+    duration: 10000,
+  })
+}
+
+/**
  * The one implementation behind `/nexus dashboard` and `/nexus web`.
  *
  * Never opens a browser at an address it has not confirmed is serving a nexus
- * dashboard. The four outcomes are all deliberate, and each says which of them
+ * dashboard. The five outcomes are all deliberate, and each says which of them
  * happened:
  *
+ * 0. a subcommand — `stop` or `state` — which is not a request for an address
+ *    at all, so it goes to the server that implements it and comes back with no
+ *    probe, no browser and no start.
  * 1. disabled by config — nothing will ever listen, so say which key says so
  *    and stop, rather than probing a port the user has switched off.
  * 2. already serving a dashboard — the address is live, so open it, and say
@@ -484,12 +666,25 @@ export async function handleWebDashboard(
   input: string | undefined,
   deps: WebDashboardDeps
 ): Promise<void> {
+  // Ahead of everything, and ahead of the port parser in particular: this is
+  // the check whose absence made `stop` a port error. A subcommand is not an
+  // address, so it must be answered before anything that needs one.
+  const subcommand = parseDashboardSubcommand(input)
+  if (subcommand) {
+    await runDashboardSubcommand(input, subcommand, deps)
+    return
+  }
+
   const parsed = parseWebDashboardTarget(input, {
     port: deps.dashboard.port,
     host: deps.dashboard.host,
   })
-  if ("error" in parsed) {
-    deps.showToast({ title: "Nexus Web Dashboard", message: parsed.error, variant: "error" })
+  if ('error' in parsed) {
+    deps.showToast({
+      title: 'Nexus Web Dashboard',
+      message: webDashboardInputError(input, parsed.error),
+      variant: 'error',
+    })
     return
   }
 

@@ -391,6 +391,8 @@ two ways to reach it:
 
 ```
 /nexus dashboard [port] [host]      # from the TUI — starts it and opens it
+/nexus dashboard stop               # from the TUI — forwarded to the server
+/nexus dashboard state              # from the TUI — forwarded to the server
 Ask the agent: "start the nexus dashboard"
 ```
 
@@ -534,6 +536,21 @@ Ask the agent to call nexus.dashboard.stop
 This stops the HTTP/WebSocket server only. The orchestrator, its agents and its
 sessions keep running. Both routes say so plainly when there was nothing
 running, rather than reporting a stop that did not happen.
+
+Both of these are handled by the server, and the TUI does not reimplement
+either: it recognises the subcommand and submits the command, which reaches
+`handleDashboardCommand` and is answered there. The TUI cannot read the answer
+back — it submits a command and gets no result — so what it shows you is that
+the command was sent, and the server's own reply is the next message in the
+session. A `stop` typed in the TUI opens no browser and starts nothing; `state`
+is the same read, and the full state document arrives as that reply rather than
+as a toast. `stop` and `state` are matched case-insensitively, and anything
+after the word is ignored — exactly as the server ignores it.
+
+Until this fix the TUI's `/nexus dashboard` parsed its own argument as a port
+before submitting anything, so `/nexus dashboard stop` failed there with
+`"stop" is not a port number` and never reached the server that already
+implemented it. The first route above is new with it; the second always worked.
 
 ### Team Mode
 
@@ -854,7 +871,7 @@ one, it dispatches to a subcommand (`config`/`c`, `status`/`s`, `dashboard`/`d`,
 | Command | Alias | Description |
 |---------|-------|-------------|
 | `/nexus` | `Ctrl+N` | The configuration dialogs, or a subcommand |
-| `/nexus-dashboard` | `/nd` | Start the web dashboard and open it. If one is already serving, opens that and starts nothing — see [Web Dashboard](#web-dashboard) |
+| `/nexus-dashboard` | `/nd` | Start the web dashboard and open it. If one is already serving, opens that and starts nothing. Takes `stop` or `state` instead of a port to forward that to the server, which answers it and starts nothing — see [Web Dashboard](#web-dashboard) |
 | `/nexus-web` | `/nw` | Alias of `/nexus-dashboard` |
 | `/nexus-overview` | `/no` | Config, budget and dashboard-status overview. Prints text; starts nothing |
 | `/nexus-config` | `/nc` | The configuration dialogs — every config block, not just models and budget |
@@ -871,6 +888,12 @@ answers `Unknown command`. This hook cannot cancel the prompt — the plugin API
 gives it no way to — so it replaces the command text with the command's result
 rather than leaving the model holding a bare `/nexus dashboard` next to an
 answer it has no reason to read. The table above is the TUI palette.
+
+`dashboard` and `web` are intercepted one step earlier, by the TUI, which uses
+that hook to start a server and open a browser only against a confirmed listen.
+The two subcommands are passed straight through to the same hook rather than
+being interpreted in the TUI, so `/nexus dashboard stop` behaves identically
+however it is typed.
 
 ---
 
