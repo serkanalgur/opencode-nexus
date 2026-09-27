@@ -1741,7 +1741,16 @@
   var $agentsContainer = document.getElementById('agents-container');
   var $agentCount = document.getElementById('agent-count');
 
-  // Budget
+  // Budget. NOTE THE NAMESPACE: `#gauge-ring` is a <div> but `#gauge-fill` is a
+  // <circle>, and an SVG element's `className` is a read-only SVGAnimatedString.
+  // `el.className = 'fill'` on it throws "Cannot set property className of
+  // #<SVGElement> which has only a getter", which killed every state frame in
+  // this page — the gauge renders on every frame, so the whole dashboard died
+  // above the overview card. Classes are therefore written with
+  // setAttribute('class', …) throughout, which behaves identically on HTML and
+  // SVG and has no getter to trip over. Do not "simplify" these back to
+  // `className =`; `classList.add/remove` is fine and is a different operation
+  // (additive), but replacement has to go through setAttribute.
   var $gaugeRing = document.getElementById('gauge-ring');
   var $gaugeFill = document.getElementById('gauge-fill');
   var $gaugePct = document.getElementById('gauge-pct');
@@ -1873,19 +1882,19 @@
     var running = state.running;
     var paused = state.paused;
     if (typeof running !== 'boolean' && typeof paused !== 'boolean') {
-      $orchStatus.className = 'orch-pill unknown';
+      $orchStatus.setAttribute('class', 'orch-pill unknown');
       $orchStatus.textContent = 'No state';
       $orchStatus.title = 'The server has not reported running/paused yet.';
       return;
     }
     if (paused === true) {
-      $orchStatus.className = 'orch-pill paused';
+      $orchStatus.setAttribute('class', 'orch-pill paused');
       $orchStatus.textContent = 'Paused';
     } else if (running === true) {
-      $orchStatus.className = 'orch-pill running';
+      $orchStatus.setAttribute('class', 'orch-pill running');
       $orchStatus.textContent = 'Running';
     } else {
-      $orchStatus.className = 'orch-pill idle';
+      $orchStatus.setAttribute('class', 'orch-pill idle');
       $orchStatus.textContent = 'Idle';
     }
     $orchStatus.title = 'state.running=' + String(running) + ' · state.paused=' + String(paused);
@@ -2070,14 +2079,14 @@
   function renderSnapshotAge() {
     if (lastStateReceivedAt === null) {
       $lastRefresh.textContent = 'No state received';
-      $lastRefresh.className = 'last-refresh lost';
+      $lastRefresh.setAttribute('class', 'last-refresh lost');
       return;
     }
     var age = Date.now() - lastStateReceivedAt;
     var text = 'State ' + fmtTime(lastStateUpdated || new Date(lastStateReceivedAt).toISOString())
       + ' (' + fmtElapsed(age) + ' ago)';
     $lastRefresh.textContent = text;
-    $lastRefresh.className = 'last-refresh' + (age > STALE_AFTER_MS ? ' stale' : '');
+    $lastRefresh.setAttribute('class', 'last-refresh' + (age > STALE_AFTER_MS ? ' stale' : ''));
     // The server's own stamp, verbatim, alongside the received-at time. The two
     // are different claims — one is when the snapshot was made, the other when
     // this page heard about it — and a `title` is where a raw timestamp belongs:
@@ -2199,7 +2208,7 @@
   // ── Activity Log ──
   function addLog(type, icon, msg) {
     var entry = document.createElement('div');
-    entry.className = 'log-entry event-' + type;
+    entry.setAttribute('class', 'log-entry event-' + type);
     entry.setAttribute('data-atype', type);
     entry.innerHTML = '<span class="log-time">' + now() + '</span>'
       + '<span class="log-icon">' + icon + '</span>'
@@ -2248,7 +2257,7 @@
   // ── Log Stream ──
   function addLogStream(severity, label, msg) {
     var entry = document.createElement('div');
-    entry.className = 'log-stream-entry event-' + severity;
+    entry.setAttribute('class', 'log-stream-entry event-' + severity);
     entry.setAttribute('data-severity', severity);
     entry.innerHTML = '<span class="ls-time">' + now() + '</span>'
       + '<span class="ls-badge">' + escHtml(label) + '</span>'
@@ -2321,7 +2330,7 @@
 
   // ── Connection ──
   function setConnState(state) {
-    $connBadge.className = 'connection-badge ' + state;
+    $connBadge.setAttribute('class', 'connection-badge ' + state);
     if (state === 'connected') {
       $connText.textContent = 'Live';
     } else if (state === 'reconnecting') {
@@ -3367,18 +3376,18 @@
     }
 
     if (remainingFraction === null) {
-      $gaugeRing.className = 'gauge-ring unmeasurable';
-      $gaugeFill.className = 'fill';
+      $gaugeRing.setAttribute('class', 'gauge-ring unmeasurable');
+      $gaugeFill.setAttribute('class', 'fill');
       $gaugeFill.style.strokeDashoffset = String(CIRCUMFERENCE);
       $gaugePct.textContent = '—';
     } else {
-      $gaugeRing.className = 'gauge-ring';
+      $gaugeRing.setAttribute('class', 'gauge-ring');
       $gaugePct.textContent = (remainingFraction * 100).toFixed(0) + '%';
       $gaugeFill.style.strokeDashoffset = String(CIRCUMFERENCE * (1 - remainingFraction));
       // Thresholds come from `alertThreshold` only. The previous 20%/40% bands
       // were invented here and had nothing to do with any configuration.
-      $gaugeFill.className = 'fill'
-        + (alertThreshold !== null && remainingFraction <= alertThreshold ? ' danger' : '');
+      $gaugeFill.setAttribute('class', 'fill'
+        + (alertThreshold !== null && remainingFraction <= alertThreshold ? ' danger' : ''));
     }
 
     $budgetTotal.textContent = fmt$(ceiling);
@@ -3754,17 +3763,17 @@
       $costBasis.textContent = '';
 
       if (costReportStatus === 'failed') {
-        $costStatus.className = 'cost-status';
+        $costStatus.setAttribute('class', 'cost-status');
         $costStatus.textContent = 'Cost report unavailable: /api/costs failed (' + costReportError
           + '). These bars are not shown rather than shown as zero.';
       } else {
-        $costStatus.className = 'cost-status hidden';
+        $costStatus.setAttribute('class', 'cost-status hidden');
         $costStatus.textContent = '';
       }
       return;
     }
 
-    $costStatus.className = 'cost-status hidden';
+    $costStatus.setAttribute('class', 'cost-status hidden');
     $costStatus.textContent = '';
 
     var ceiling = null;
@@ -4136,7 +4145,7 @@
       $configEditor.value = '';
       $configEditorStatus.textContent = 'Read-only: this server accepts no configuration writes. '
         + 'No configuration has been reported yet.';
-      $configEditorStatus.className = 'config-status';
+      $configEditorStatus.setAttribute('class', 'config-status');
       return;
     }
     var serialised;
@@ -4145,14 +4154,14 @@
     } catch (e) {
       $configEditor.value = '';
       $configEditorStatus.textContent = 'Read-only: the reported config could not be serialised: ' + errorText(e);
-      $configEditorStatus.className = 'config-status error';
+      $configEditorStatus.setAttribute('class', 'config-status error');
       return;
     }
     $configEditor.value = serialised;
     $configEditorStatus.textContent = 'Read-only: this is the config the orchestrator reports as in force. '
       + 'It is the resolved config (defaults → global → project → session override), not the file on disk. '
       + 'This server accepts no configuration writes, so there is nothing to apply.';
-    $configEditorStatus.className = 'config-status';
+    $configEditorStatus.setAttribute('class', 'config-status');
   }
 
   $configFormatBtn.addEventListener('click', function() {
@@ -4160,10 +4169,10 @@
       var parsed = JSON.parse($configEditor.value);
       $configEditor.value = JSON.stringify(parsed, null, 2);
       $configEditorStatus.textContent = 'Re-indented. Still read-only — nothing was sent to the server.';
-      $configEditorStatus.className = 'config-status';
+      $configEditorStatus.setAttribute('class', 'config-status');
     } catch (e) {
       $configEditorStatus.textContent = 'Not valid JSON: ' + errorText(e);
-      $configEditorStatus.className = 'config-status error';
+      $configEditorStatus.setAttribute('class', 'config-status error');
     }
   });
 
@@ -4179,7 +4188,7 @@
       if (parsed === null) throw new Error('top level is not an object');
     } catch (e) {
       $configEditorStatus.textContent = 'Not valid JSON: ' + errorText(e);
-      $configEditorStatus.className = 'config-status error';
+      $configEditorStatus.setAttribute('class', 'config-status error');
       return;
     }
 
@@ -4214,11 +4223,11 @@
     if (notes.length === 0) {
       $configEditorStatus.textContent = 'Shape check passed: models, budget and selfHealing all carry the expected keys. '
         + 'Read-only — nothing was sent to the server.';
-      $configEditorStatus.className = 'config-status success';
+      $configEditorStatus.setAttribute('class', 'config-status success');
     } else {
       $configEditorStatus.textContent = notes.length + ' observation' + (notes.length === 1 ? '' : 's') + ': '
         + notes.join('; ') + '. Read-only — nothing was sent to the server.';
-      $configEditorStatus.className = 'config-status';
+      $configEditorStatus.setAttribute('class', 'config-status');
       $configEditorStatus.style.color = 'var(--yellow)';
     }
   });

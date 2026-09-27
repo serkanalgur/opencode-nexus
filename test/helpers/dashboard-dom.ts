@@ -24,7 +24,10 @@
  *   - `classList` and `className` are the SAME storage. The page sets
  *     `className = 'cost-status hidden'` and then calls `classList.add(...)` and
  *     `classList.remove('hidden')` on the same element; if those were two
- *     independent fields the page would pass here and fail in a browser.
+ *     independent fields the page would pass here and fail in a browser. That
+ *     shared storage is an HTML property, though, and modelling it for EVERY
+ *     element is how the second blind spot was built — see SVG `className`
+ *     below.
  *   - `textContent` and `innerHTML` are linked in the direction the page reads
  *     them. `escHtml()` sets `textContent` and reads `innerHTML` back, and
  *     `$dagNote.innerHTML += ...` reads `innerHTML` before writing it. Setting
@@ -36,6 +39,49 @@
  * looks up an element that is not in the HTML" a loud failure here instead of a
  * silent one in production — the returned null is recorded so a test can assert
  * no unknown lookup ever happened.
+ *
+ * WHAT IS MODELLED ABOUT SVG, AND WHY IT COST A DEAD PAGE
+ *
+ * A second bug shipped for the same reason as the first, and it is the reason
+ * this shim records namespaces at all.
+ *
+ * On an HTML element `className` is a plain writable string. On an SVG element
+ * it is a read-only `SVGAnimatedString` — assigning to it raises
+ *
+ *     TypeError: Cannot set property className of #<SVGElement> which has only a getter
+ *
+ * which is what a user saw on every single state frame, because the budget
+ * gauge's `renderBudget` assigns `$gaugeFill.className` and `#gauge-fill` is a
+ * `<circle>`. The dashboard died above the overview card. The page's own
+ * `className` writes were 24 sites and 22 of them were fine, so "the gauge is
+ * broken" was the wrong lesson: the pattern is unsafe, and which sites are
+ * unsafe depends on an element's NAMESPACE, which no amount of reading the
+ * JavaScript can tell you.
+ *
+ * This shim used to mint every id-bearing element as a `<div>` and give every
+ * element a writable `className`, so it modelled the page's happy path and was
+ * structurally incapable of seeing the bug. It now:
+ *
+ *   - derives each markup id's namespace from the real markup in
+ *     `dashboard/index.html` (see `svgIdsInMarkup`), so `#gauge-fill` is a
+ *     `circle` in the SVG namespace here and `#gauge-ring` is a `div`, exactly
+ *     as the browser resolves them;
+ *   - gives an element in the SVG namespace a `className` with a getter and NO
+ *     setter, so assigning to it throws the same `TypeError` a browser throws;
+ *   - supports `createElementNS`, so a page that builds SVG nodes in script is
+ *     modelled correctly rather than accidentally as HTML.
+ *
+ * `classList` and `setAttribute('class', …)` work on both namespaces and are
+ * modelled as working on both, because in a browser they do.
+ *
+ * KNOWN LIMIT, STATED RATHER THAN HIDDEN: reading `className` off an SVG
+ * element returns the joined class string here, where a browser returns an
+ * `SVGAnimatedString` object whose `baseVal` holds the string. The WRITE is the
+ * half that crashes a page, and it is modelled exactly; the read shape is not,
+ * because nothing in the page reads it. A page that started reading
+ * `className.baseVal` would get `undefined` from this shim instead of a
+ * string — a wrong answer, not a silent pass, so it would have to be written
+ * deliberately to be missed.
  */
 
 import { readDashboardHtml, extractInlineScript } from './dashboard-page'
@@ -44,10 +90,24 @@ import { readDashboardHtml, extractInlineScript } from './dashboard-page'
 export const RENDER_FAILURE = 'Page failed to render'
 export const PARSE_FAILURE = 'Non-JSON frame from server'
 
+/** Which DOM namespace an element belongs to, which is what decides `className`. */
+export type ElementNamespace = typeof HTML_NAMESPACE | typeof SVG_NAMESPACE
+
+export const HTML_NAMESPACE = 'http://www.w3.org/1999/xhtml'
+export const SVG_NAMESPACE = 'http://www.w3.org/2000/svg'
+
 /** A stand-in for one DOM node. */
 export class FakeElement {
   readonly tagName: string
   readonly id: string
+  /**
+   * Which DOM namespace this element is in, which is what decides whether
+   * `className` is a writable string or a read-only `SVGAnimatedString`.
+   *
+   * Taken from the markup (see `markupElementsIn`) or from `createElementNS`,
+   * never defaulted to HTML for an element the page might have created as SVG.
+   */
+  readonly namespaceURI: ElementNamespace
   /** Set by the harness so `querySelector` can hand back a distinct node. */
   readonly ownerDocument: FakeDocument
 
@@ -76,10 +136,16 @@ export class FakeElement {
   private html = ''
   private readonly listeners = new Map<string, Array<(evt: unknown) => void>>()
 
-  constructor(tagName: string, ownerDocument: FakeDocument, id = '') {
+  constructor(
+    tagName: string,
+    ownerDocument: FakeDocument,
+    id = '',
+    namespace: ElementNamespace = HTML_NAMESPACE,
+  ) {
     this.tagName = tagName.toUpperCase()
     this.id = id
     this.ownerDocument = ownerDocument
+    this.namespaceURI = namespace === SVG_NAMESPACE ? SVG_NAMESPACE : HTML_NAMESPACE
   }
 
   /**
@@ -88,12 +154,24 @@ export class FakeElement {
    * Reading `className` re-joins the set, so the order the page wrote them in
    * is not preserved — nothing in the page depends on that, and a browser's own
    * `className` ordering is not contractual either.
+   *
+   * In the SVG namespace the SETTER DOES NOT EXIST. That is not a stricter
+   * choice this shim made; it is what the platform does, and it is why a
+   * `className =` write is safe on a `<div>` and throws on a `<circle>`. The
+   * assignment below throws a real `TypeError` carrying a browser's own
+   * wording, so a page that trips it is reported the way a user would see it
+   * rather than as a bespoke harness error a test could mistake for its own.
    */
   get className(): string {
     return [...this.classes].join(' ')
   }
 
   set className(value: string) {
+    if (this.namespaceURI === SVG_NAMESPACE) {
+      throw new TypeError(
+        'Cannot set property className of #<SVGElement> which has only a getter',
+      )
+    }
     this.classes = new Set(String(value).split(/\s+/).filter(Boolean))
   }
 
@@ -182,8 +260,19 @@ export class FakeElement {
     return this.children.some((child) => child.contains(other))
   }
 
+  /**
+   * Writes an attribute, and keeps `class` on the shared class storage.
+   *
+   * In a browser `setAttribute('class', …)`, `className =` and `classList` are
+   * three faces of one value. Keeping `class` routed to the same set is what
+   * lets a page standardise on `setAttribute` — which is safe on HTML and SVG
+   * alike — without this shim reporting classes that a browser would not have.
+   */
   setAttribute(name: string, value: string): void {
     this.attributes.set(name, String(value))
+    if (name === 'class') {
+      this.classes = new Set(String(value).split(/\s+/).filter(Boolean))
+    }
   }
 
   getAttribute(name: string): string | null {
@@ -192,6 +281,7 @@ export class FakeElement {
 
   removeAttribute(name: string): void {
     this.attributes.delete(name)
+    if (name === 'class') this.classes = new Set()
   }
 
   hasAttribute(name: string): boolean {
@@ -278,6 +368,60 @@ function escapeHtml(value: string): string {
     .replace(/>/g, '&gt;')
 }
 
+/** One id-bearing element, as the real markup declares it. */
+export interface MarkupElement {
+  readonly id: string
+  /** Uppercased, as `tagName` is in a DOM. */
+  readonly tagName: string
+  readonly namespaceURI: ElementNamespace
+}
+
+/**
+ * Every id-bearing element in the real markup, with its true tag and namespace.
+ *
+ * Read out of `dashboard/index.html` rather than declared here, because a
+ * hand-kept list of which elements are SVG is a list that rots the moment the
+ * markup changes — and a list that rots in the direction of "this id is
+ * probably HTML" is a list that hides the bug this shim now catches.
+ *
+ * The scan walks tags in document order and tracks `<svg>` depth, so an id on
+ * any descendant of an `<svg>` is SVG and an id outside one is not. A
+ * self-closing tag (`<svg/>`) opens no subtree and is counted as neither, which
+ * is the only part of this with state in it and therefore the part with a bug
+ * in it — an off-by-one there silently reclassifies every id after it, so the
+ * scanner is under test in `dashboard-dom-namespace.test.ts`. It is a tag
+ * scanner, not an HTML parser: it reads attributes off a tag's raw text, which
+ * is enough for `id="…"` and is stated here rather than implied.
+ */
+export function markupElementsIn(html: string): Map<string, MarkupElement> {
+  const found = new Map<string, MarkupElement>()
+  let depth = 0
+  for (const tag of html.matchAll(/<(\/?)([a-zA-Z][\w:-]*)((?:[^>"']|"[^"]*"|'[^']*')*)>/g)) {
+    const [, closing, rawName = '', rawAttrs = ''] = tag
+    const name = rawName.toLowerCase()
+    if (closing === '/') {
+      if (name === 'svg') depth = Math.max(0, depth - 1)
+      continue
+    }
+    const selfClosing = rawAttrs.trimEnd().endsWith('/')
+    // An `<svg>` element is itself in the SVG namespace, so its own id counts
+    // as SVG whether or not it has descendants.
+    const isSvg = name === 'svg' || depth > 0
+    if (name === 'svg' && !selfClosing) depth += 1
+    const id = /\sid="([^"]+)"/.exec(rawAttrs)?.[1]
+    if (id === undefined) continue
+    // The LAST declaration wins, as it does in a browser: a duplicate id is a
+    // page bug, and resolving it the same way here keeps that bug from being
+    // masked by which one the scanner happened to see first.
+    found.set(id, {
+      id,
+      tagName: name.toUpperCase(),
+      namespaceURI: isSvg ? SVG_NAMESPACE : HTML_NAMESPACE,
+    })
+  }
+  return found
+}
+
 /** `document`, with an id table built from the served markup. */
 export class FakeDocument {
   readonly body: FakeElement
@@ -287,12 +431,29 @@ export class FakeDocument {
   readonly unknownIdLookups: string[] = []
   private readonly byId = new Map<string, FakeElement>()
 
-  constructor(markupIds: readonly string[]) {
+  constructor(markup: ReadonlyMap<string, MarkupElement>) {
     this.body = new FakeElement('body', this)
     this.documentElement = new FakeElement('html', this)
-    for (const id of markupIds) {
-      this.byId.set(id, new FakeElement('div', this, id))
+    for (const [id, described] of markup) {
+      // The tag and namespace come from the markup, not from a default.
+      // Minting every id-bearing element as a `<div>` is what let a `<circle>`
+      // be written to as if it were a `<div>` and pass: `#gauge-fill` is SVG,
+      // `#gauge-ring` is HTML, and only the markup knows which is which.
+      this.byId.set(id, new FakeElement(described.tagName, this, id, described.namespaceURI))
     }
+  }
+
+  /**
+   * How the shim resolved an id: its tag and namespace, or `null` if unknown.
+   *
+   * Present so a test can check what the shim DERIVED rather than trusting it.
+   * A shim that mis-derived "nothing here is SVG" would be exactly as blind as
+   * one that never tried, so the derivation is itself under test.
+   */
+  resolve(id: string): { tagName: string; namespaceURI: ElementNamespace } | null {
+    const found = this.byId.get(id)
+    if (found === undefined) return null
+    return { tagName: found.tagName, namespaceURI: found.namespaceURI }
   }
 
   /**
@@ -311,6 +472,23 @@ export class FakeDocument {
 
   createElement(tagName: string): FakeElement {
     return new FakeElement(tagName, this)
+  }
+
+  /**
+   * Namespace-aware creation, so SVG built in script is modelled as SVG.
+   *
+   * The page does not call this today, but a shim that only ever produced HTML
+   * elements would be one refactor away from hiding this bug class again — a
+   * `<circle>` built with `createElementNS` and written to via `className`
+   * would pass. Supported precisely so that cannot happen silently.
+   */
+  createElementNS(namespace: string, tagName: string): FakeElement {
+    return new FakeElement(
+      tagName,
+      this,
+      '',
+      namespace === SVG_NAMESPACE ? SVG_NAMESPACE : HTML_NAMESPACE,
+    )
   }
 
   createTextNode(text: string): { textContent: string } {
@@ -480,11 +658,13 @@ export async function loadDashboardPage(options: LoadOptions = {}): Promise<Load
   const html = await readDashboardHtml()
   const script = extractInlineScript(html)
 
-  // Ids come from the markup, not from the page's own `getElementById` calls:
-  // deriving the table from the page would make every lookup succeed by
-  // construction and the whole exercise vacuous.
-  const markupIds = [...html.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1] as string)
-  const document = new FakeDocument(markupIds)
+  // Elements come from the markup, not from the page's own `getElementById`
+  // calls: deriving the table from the page would make every lookup succeed by
+  // construction and the whole exercise vacuous. Their TAGS and NAMESPACES come
+  // from the markup too, which is the only thing that can tell a `<circle>` from
+  // a `<div>` — and that distinction is what decides whether a `className` write
+  // on `#gauge-fill` throws here exactly as it throws in a browser.
+  const document = new FakeDocument(markupElementsIn(html))
 
   const run = new Function(
     'document',
