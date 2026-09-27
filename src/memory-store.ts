@@ -25,6 +25,28 @@ export interface MemoryStoreConfig {
   maxEntries: number
 }
 
+/**
+ * Injection point for the store's millisecond clock. Deliberately NOT part of
+ * `MemoryStoreConfig`, which is a user-facing knob type that the orchestrator
+ * forwards and `index.ts` re-exports: a test seam has no business widening
+ * that surface, so it is a separate optional parameter instead.
+ *
+ * It exists for one reason: "the newest version of this key wins" is decided by
+ * `ORDER BY timestamp, id`, and the `id` half of that only matters when two
+ * writes share a millisecond. A test cannot make two writes share a millisecond
+ * by trying — it can only observe whether it happened, and assert on the
+ * observation. A test that observes its own preconditions is a test that fails
+ * on a slow machine and passes on a fast one, which is the same defect wearing
+ * a different hat. Pinning the clock makes the tie a fact the test builds
+ * rather than a fact it hopes for.
+ *
+ * Real production callers pass nothing and get `Date.now`.
+ */
+export interface MemoryStoreOptions {
+  /** Millisecond epoch source. Defaults to `Date.now`. */
+  now?: () => number
+}
+
 const DEFAULT_CONFIG: MemoryStoreConfig = {
   dbPath: join(process.env.HOME || '~', '.local', 'share', 'opencode-nexus', 'memory.db'),
   maxEntries: 1000,
@@ -106,8 +128,18 @@ export class PersistentMemoryStore {
    */
   private lastEviction: MemoryEviction | null = null
 
-  constructor(config?: Partial<MemoryStoreConfig>) {
+  /**
+   * The store's clock. A field rather than a bare `Date.now()` at each call site
+   * so that WRITE time and READ time come from one source: a test that pins
+   * writes without pinning reads would store entries that are already expired
+   * the moment they are written, and the resulting test would be asserting
+   * about a store nobody runs.
+   */
+  private now: () => number
+
+  constructor(config?: Partial<MemoryStoreConfig>, options?: MemoryStoreOptions) {
     this.config = { ...DEFAULT_CONFIG, ...config }
+    this.now = options?.now ?? (() => Date.now())
 
     // Ensure directory exists
     try { mkdirSync(dirname(this.config.dbPath), { recursive: true }) } catch {}
@@ -170,12 +202,24 @@ export class PersistentMemoryStore {
   set(entry: Omit<MemoryEntry, 'id' | 'timestamp'>): MemoryEntry {
     this.writeCounter = (this.writeCounter + 1) % 36 ** SEQUENCE_WIDTH
     const sequence = this.writeCounter.toString(36).padStart(SEQUENCE_WIDTH, '0')
+    // ONE clock read, used for BOTH the id's timestamp segment and the row's
+    // `timestamp`. These were two separate `Date.now()` calls, which could
+    // disagree by a millisecond: an id stamped T while the row claims T+1.
+    //
+    // That could not produce a wrong ORDER, and the reason is worth recording so
+    // nobody "discovers" it as a bug later. Ordering is by `timestamp` first, so
+    // the only case the id segment decides is two rows with EQUAL timestamps.
+    // Read a for both uses, `a1 <= a2`; read b afterwards, so `a2 <= b1`; if
+    // `a2 == b2` then `a1 <= a2 == b2 <= b1`, i.e. the id segments are correctly
+    // ordered too. The divergence was real but harmless. It is now gone anyway,
+    // because an id that embeds a time its own row does not claim is a thing a
+    // reader has to re-derive rather than check.
+    const timestamp = this.now()
     // `mem-` prefix, then the timestamp, then the monotonic sequence, then a
     // random tail. The random part keeps ids unique ACROSS processes writing in
     // the same millisecond; the sequence is what makes the ORDER WITHIN one
     // process follow insertion order. See `writeCounter`.
-    const id = `mem-${Date.now()}-${sequence}-${Math.random().toString(36).substr(2, 9)}`
-    const timestamp = Date.now()
+    const id = `mem-${timestamp}-${sequence}-${Math.random().toString(36).substr(2, 9)}`
     const expiresAt = entry.ttl ? timestamp + entry.ttl : null
 
     const stmt = this.db.prepare(`
@@ -216,11 +260,11 @@ export class PersistentMemoryStore {
     // whichever the query plan reached first.
     const expired = this.db.prepare(
       'SELECT id, timestamp FROM memory WHERE scope = ? AND expires_at IS NOT NULL AND expires_at <= ? ORDER BY timestamp ASC, id ASC'
-    ).all(scope, Date.now()) as Array<{ id: string; timestamp: number }>
+    ).all(scope, this.now()) as Array<{ id: string; timestamp: number }>
 
     const live = (this.db.prepare(
       'SELECT COUNT(*) as count FROM memory WHERE scope = ? AND (expires_at IS NULL OR expires_at > ?)'
-    ).get(scope, Date.now()) as { count: number }).count
+    ).get(scope, this.now()) as { count: number }).count
 
     let over = expired.length + (live - this.config.maxEntries)
 
@@ -241,7 +285,7 @@ export class PersistentMemoryStore {
     if (over > 0) {
       const liveRows = this.db.prepare(
         'SELECT id, timestamp FROM memory WHERE scope = ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY timestamp ASC, id ASC LIMIT ?'
-      ).all(scope, Date.now(), over) as Array<{ id: string; timestamp: number }>
+      ).all(scope, this.now(), over) as Array<{ id: string; timestamp: number }>
       for (const row of liveRows) {
         deleteStmt.run(row.id)
         count++
@@ -323,7 +367,7 @@ export class PersistentMemoryStore {
     }
 
     query += ' AND (expires_at IS NULL OR expires_at > ?)'
-    params.push(Date.now())
+    params.push(this.now())
 
     query += ' ORDER BY timestamp ASC, id ASC'
 
@@ -334,7 +378,7 @@ export class PersistentMemoryStore {
   getByScope(scope: MemoryScope): MemoryEntry[] {
     const rows = this.db.prepare(
       'SELECT * FROM memory WHERE scope = ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY timestamp DESC, id DESC'
-    ).all(scope, Date.now()) as RowData[]
+    ).all(scope, this.now()) as RowData[]
     return rows.map(row => this.rowToEntry(row))
   }
 
@@ -362,7 +406,7 @@ export class PersistentMemoryStore {
    */
   search(query: string, scope?: MemoryScope): MemoryEntry[] {
     let sql = `SELECT * FROM memory WHERE (key LIKE ? OR value LIKE ?) AND (expires_at IS NULL OR expires_at > ?)`
-    const params: SQLQueryBindings[] = [`%${query}%`, `%${query}%`, Date.now()]
+    const params: SQLQueryBindings[] = [`%${query}%`, `%${query}%`, this.now()]
     if (scope) {
       sql += ' AND scope = ?'
       params.push(scope)
@@ -389,14 +433,14 @@ export class PersistentMemoryStore {
   getRecent(count: number): MemoryEntry[] {
     const rows = this.db.prepare(
       'SELECT * FROM memory WHERE (expires_at IS NULL OR expires_at > ?) ORDER BY timestamp DESC, id DESC LIMIT ?'
-    ).all(Date.now(), count) as RowData[]
+    ).all(this.now(), count) as RowData[]
     return rows.map(row => this.rowToEntry(row))
   }
 
   getByAuthor(author: string): MemoryEntry[] {
     const rows = this.db.prepare(
       'SELECT * FROM memory WHERE author = ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY timestamp DESC, id DESC'
-    ).all(author, Date.now()) as RowData[]
+    ).all(author, this.now()) as RowData[]
     return rows.map(row => this.rowToEntry(row))
   }
 
@@ -454,7 +498,7 @@ export class PersistentMemoryStore {
     for (const { scope } of scopes) {
       byScope[scope] = (this.db.prepare('SELECT COUNT(*) as count FROM memory WHERE scope = ?').get(scope) as CountRow).count
     }
-    const expired = (this.db.prepare('SELECT COUNT(*) as count FROM memory WHERE expires_at IS NOT NULL AND expires_at <= ?').get(Date.now()) as CountRow).count
+    const expired = (this.db.prepare('SELECT COUNT(*) as count FROM memory WHERE expires_at IS NOT NULL AND expires_at <= ?').get(this.now()) as CountRow).count
     return { total, byScope, expired, evicted: this.getEvictionTotals() }
   }
 

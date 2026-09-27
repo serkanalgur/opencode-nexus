@@ -390,18 +390,109 @@ describe('PersistentMemoryStore', () => {
       store.close()
     })
 
-    it('resolves the newest version deterministically, INCLUDING on a timestamp tie', async () => {
-      // No sleeps anywhere in this test, on purpose: the hard case is two writes
-      // landing in ONE millisecond, and a sleep would remove it.
+    it('resolves the newest version deterministically, INCLUDING on a timestamp tie', () => {
+      // THE TIE IS CONSTRUCTED, NOT OBSERVED. DO NOT SIMPLIFY THIS BACK.
       //
-      // Whether any given pair actually ties depends on where the millisecond
-      // boundary falls, so the test does not assert that it does — that would be
-      // asserting something untrue. It asserts the answer is always right, and
-      // then asserts that at least one attempt really did tie, so the loop cannot
-      // quietly stop covering the case it exists for. Before the monotonic id
-      // segment, the tied attempts were decided by `Math.random()`.
-      let ties = 0
-      for (let attempt = 0; attempt < 40; attempt++) {
+      // This test used to write two versions back to back and count how many
+      // pairs happened to land in the same millisecond, then assert the count
+      // was above zero so the loop could not silently stop covering the case it
+      // exists for. That was a test failing on its own preconditions: on a warm
+      // machine the pair ties, and on a cold one — CI's Node 22 legs, where
+      // schema creation and statement preparation are slower than the
+      // millisecond the two writes are trying to share — the pair never ties, the
+      // ordering is trivially right 40 times, and the count reads zero. A test
+      // that cannot fail because the code is wrong, and CAN fail because the
+      // machine was slow, is the defect. The same shape shipped in 2.8.0 and
+      // passed on darwin while failing on both ubuntu legs.
+      //
+      // So the clock is pinned through the store's own injection point. The tie
+      // is now a fact about the data, identical on every machine and every Node
+      // version, and what follows is the real contract: a user correcting a note
+      // twice in quick succession must not have the OLD text win.
+      const PINNED = 1_700_000_000_000
+      const store = new PersistentMemoryStore(makeConfig(), { now: () => PINNED })
+
+      const first = store.set({ key: 'k', value: 'v1', scope: 'project', author: 'a', confidence: null, tags: [] })
+      const second = store.set({ key: 'k', value: 'v2', scope: 'project', author: 'a', confidence: null, tags: [] })
+
+      // The tie is asserted, so a future change that made the injection point
+      // stop applying here would be caught rather than quietly un-covering the
+      // test.
+      expect(first.timestamp.getTime()).toBe(PINNED)
+      expect(second.timestamp.getTime()).toBe(PINNED)
+
+      // ASC: oldest first, so `get` — which takes the last element — is newest.
+      expect(store.getByKey('k', 'project').map(e => e.value)).toEqual(['v1', 'v2'])
+      expect(store.get('k', 'project')?.value).toBe('v2')
+      // DESC: the same tie, the other way. A fix that only taught the ASC query
+      // to break ties would pass the three assertions above and still show a
+      // user the note they had just corrected.
+      expect(store.getRecent(2).map(e => e.value)).toEqual(['v2', 'v1'])
+      expect(store.getByScope('project').map(e => e.value)).toEqual(['v2', 'v1'])
+      expect(store.search('v', 'project').map(e => e.value)).toEqual(['v2', 'v1'])
+
+      // And the pure function agrees with the query's own ordering, both ways,
+      // with equal timestamps and no timestamp to fall back on.
+      expect(isNewerThan(second, first)).toBe(true)
+      expect(isNewerThan(first, second)).toBe(false)
+      expect(isNewerThan(first, first)).toBe(false)
+
+      store.close()
+    })
+
+    it('pads the sequence segment, so the tie-break survives the 9-to-10 edge', () => {
+      // THE ID IS COMPARED AS TEXT, so an unpadded counter would put write 10
+      // BEFORE write 9 and reverse every "newest wins" answer from the tenth
+      // write of a process onwards. Asserted as text, not as a property, so the
+      // failure names the width rather than the symptom.
+      //
+      // This is the concrete form of the doc comment on `SEQUENCE_WIDTH`:
+      // `'mem-1-9-x' > 'mem-1-10-x'` is TRUE in string comparison, which is
+      // exactly the wrong answer.
+      expect('mem-1-9-x' > 'mem-1-10-x').toBe(true)
+      expect('mem-1-000009-x' > 'mem-1-000010-x').toBe(false)
+      expect('mem-1-000009-x' < 'mem-1-000010-x').toBe(true)
+
+      // Ten writes pinned to one millisecond, so the sequence runs
+      // 000001..00000a and the pinned-clock test above is joined by a real
+      // store that crosses the base-36 9 -> 10 edge inside a single tie.
+      const PINNED = 1_700_000_000_000
+      const store = new PersistentMemoryStore(makeConfig(), { now: () => PINNED })
+      const entries = Array.from({ length: 10 }, (_, i) =>
+        store.set({ key: `k${i}`, value: `v${i}`, scope: 'project', author: 'a', confidence: null, tags: [] })
+      )
+
+      // Every id has a six-character base-36 sequence segment, zero-padded.
+      for (const entry of entries) {
+        expect(entry.id).toMatch(/^mem-\d{13}-[0-9a-z]{6}-[0-9a-z]+$/)
+      }
+      // Writes 9 and 10 are the padded forms of the two ids compared above.
+      expect(entries[8].id).toContain('-000009-')
+      expect(entries[9].id).toContain('-00000a-')
+
+      // Pairwise, every later write is newer — including across that edge, where
+      // an unpadded counter would have inverted the answer.
+      for (let i = 1; i < entries.length; i++) {
+        expect(isNewerThan(entries[i], entries[i - 1])).toBe(true)
+        expect(isNewerThan(entries[i - 1], entries[i])).toBe(false)
+      }
+      // And the query agrees, newest first, all ten sharing one timestamp.
+      expect(store.getRecent(10).map(e => e.value)).toEqual(
+        Array.from({ length: 10 }, (_, i) => `v${9 - i}`)
+      )
+      store.close()
+    })
+
+    it('orders correctly on the real clock without asserting anything about timing', () => {
+      // The pinned-clock test above is the one that covers the tie. This one
+      // covers the DEFAULT clock — real `Date.now`, no injection — and says
+      // nothing about how the two writes were spaced.
+      //
+      // Specifically NOT asserted: that any pair tied. Whether a pair of
+      // back-to-back writes shares a millisecond is a fact about this machine's
+      // speed, and a test that requires it is the bug, not the guard. Here the
+      // answer must simply always be right, tied or not.
+      for (let attempt = 0; attempt < 10; attempt++) {
         // A FRESH DATABASE PER ATTEMPT, AND REMOVED AFTERWARDS. The outer
         // `beforeEach` cleanup only deletes `TEST_DB_PATH`, so without both a
         // unique name and an unlink, attempt 0 on a SECOND run of this file
@@ -410,17 +501,13 @@ describe('PersistentMemoryStore', () => {
         const store = new PersistentMemoryStore(makeConfig({ dbPath: path }))
         const first = store.set({ key: 'k', value: 'v1', scope: 'project', author: 'a', confidence: null, tags: [] })
         const second = store.set({ key: 'k', value: 'v2', scope: 'project', author: 'a', confidence: null, tags: [] })
-        if (first.timestamp.getTime() === second.timestamp.getTime()) ties++
         expect(store.get('k', 'project')?.value).toBe('v2')
         expect(store.getByKey('k', 'project').map(e => e.value)).toEqual(['v1', 'v2'])
-        // And the id comparison agrees with the query's own ordering, on a tie
-        // and off one.
         expect(isNewerThan(second, first)).toBe(true)
         expect(isNewerThan(first, second)).toBe(false)
         store.close()
         cleanupPath(path)
       }
-      expect(ties).toBeGreaterThan(0)
     })
 
     it('orders getByScope and getRecent newest-first with no tie either', () => {
