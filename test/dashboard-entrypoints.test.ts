@@ -18,7 +18,8 @@ const { NexusConfigManager } = await import('../src/config')
 const { parseDashboardTarget } = await import('../src/dashboard')
 const { DASHBOARD_START_DESCRIPTION, DASHBOARD_STOP_DESCRIPTION, runDashboardStart, runDashboardStop } =
   await import('../src/index')
-const { handleWebDashboard, parseWebDashboardTarget, probeDashboard } = await import('../src/tui')
+const { handleWebDashboard, parseWebDashboardTarget, parseDashboardSubcommand, probeDashboard } =
+  await import('../src/tui')
 
 // Everything a plugin-hosted orchestrator needs to initialise, and nothing it
 // does not. `location.directory` is read by `initialize` to locate the config
@@ -601,6 +602,293 @@ describe('dashboard entry points', () => {
       expect(h.submitted).toEqual([])
       expect(h.opened).toEqual([])
       expect(h.toasts[0]?.variant).toBe('error')
+    })
+  })
+
+  /**
+   * `/nexus dashboard stop` from the TUI.
+   *
+   * The bug: the TUI intercepted `dashboard` and ran its OWN port parser over
+   * the argument, so `stop` came back as `"stop" is not a port number` and the
+   * server — which has implemented `stop` and `state` since the TUI was written
+   * — was never asked. The fix forwards the subcommand and returns before any
+   * start path.
+   *
+   * Every assertion below is on a RECORDED CALL, not on rendered text. A test
+   * that asserted only "a toast appeared" would pass against the broken code if
+   * the broken code's toast changed, and would pass against a fix that
+   * submitted the wrong text — which is the same bug wearing a different hat.
+   * So each case pins the exact command string, and the no-start cases pin
+   * `opened` and `submitted` together, because the start path is exactly the
+   * thing that must not happen.
+   */
+  describe('TUI /nexus dashboard stop and state', () => {
+    interface Harness {
+      toasts: Array<{ title: string; message: string; variant: string }>
+      opened: string[]
+      submitted: string[]
+      /** Probes, so a subcommand is shown not to have touched the network. */
+      probes: string[]
+    }
+
+    function harness(enabled = true, submitCommand?: (text: string) => Promise<void> | void): Harness & {
+      deps: Parameters<typeof handleWebDashboard>[1]
+    } {
+      const h: Harness = { toasts: [], opened: [], submitted: [], probes: [] }
+      return {
+        ...h,
+        get toasts() { return h.toasts },
+        get opened() { return h.opened },
+        get submitted() { return h.submitted },
+        get probes() { return h.probes },
+        deps: {
+          dashboard: { enabled, port: 14992, host: '127.0.0.1' },
+          showToast: options => { h.toasts.push(options) },
+          openBrowser: url => { h.opened.push(url) },
+          submitCommand: submitCommand ?? (text => { h.submitted.push(text) }),
+          fetchImpl: (async (url: string) => {
+            h.probes.push(url)
+            return new Response(JSON.stringify({ ok: true, uptime: 1 }), {
+              headers: { 'Content-Type': 'application/json' },
+            })
+          }) as unknown as typeof fetch,
+          waitImpl: async () => {},
+        },
+      }
+    }
+
+    for (const sub of ['stop', 'state'] as const) {
+      it(`sends \`${sub}\` to the server as \`/nexus dashboard ${sub}\`, and parses nothing`, async () => {
+        const h = harness()
+
+        await handleWebDashboard(sub, h.deps)
+
+        // The exact text, not "something was submitted": the server routes on
+        // the first token after `dashboard`, so `/nexus dashboard stops` or
+        // `/nexus dashboard dashboard stop` would be a different command.
+        expect(h.submitted).toEqual([`/nexus dashboard ${sub}`])
+        // EXACTLY ONE toast. Dropping the early return that ends the
+        // subcommand path leaves the argument to fall through to the port
+        // parser, so the user gets "stop sent" and then `"stop" is not a port
+        // number` — the original bug, arriving after a success. Counting the
+        // toasts is what catches that; asserting the first one is not enough.
+        expect(h.toasts).toHaveLength(1)
+        expect(h.toasts[0]?.variant).toBe('info')
+      })
+
+      it(`\`${sub}\` opens no browser and claims nothing was started`, async () => {
+        const h = harness()
+
+        await handleWebDashboard(sub, h.deps)
+
+        expect(h.opened).toEqual([])
+        // The start path's two tells, absent. "Started" is the word the
+        // success toast at the end of `handleWebDashboard` leads with, so a
+        // subcommand that reached it would carry it.
+        expect(h.toasts.map(t => t.message).join('\n')).not.toContain('Started and opened')
+        expect(h.toasts.map(t => t.message).join('\n')).toContain('no browser was opened')
+      })
+    }
+
+    it('a `stop` never reaches the probe, the start command, or the confirm loop', async () => {
+      // The stronger claim than "no browser": the start path's FIRST act is a
+      // probe, and its second is a `/nexus dashboard <port> <host>` submit. A
+      // stop that did either would be a stop that started something.
+      const h = harness()
+
+      await handleWebDashboard('stop', h.deps)
+
+      expect(h.probes).toEqual([])
+      // Exactly one command, and it is the subcommand: a second entry here
+      // would be a start issued on the way past.
+      expect(h.submitted).toEqual(['/nexus dashboard stop'])
+      expect(h.opened).toEqual([])
+      // And one toast, for the same reason: a fall-through adds a second.
+      expect(h.toasts).toHaveLength(1)
+    })
+
+    it('forwards a `stop` even when the dashboard is disabled by config', async () => {
+      // The server answers `stop` before its own config gate and says plainly
+      // that nothing was running. A TUI that refused here would invent a rule
+      // the server does not have, and would refuse the one command whose whole
+      // job is to clean up.
+      const h = harness(false)
+
+      await handleWebDashboard('stop', h.deps)
+
+      expect(h.submitted).toEqual(['/nexus dashboard stop'])
+      expect(h.opened).toEqual([])
+      expect(h.toasts[0]?.variant).toBe('info')
+    })
+
+    it('does not claim a result the TUI never received', async () => {
+      // `submitCommand` returns `void`: the TUI submits and does not get the
+      // answer back. A toast quoting a stop that did not happen is the same
+      // class of lie the confirm loop exists to avoid, so the toast points at
+      // the session reply instead of asserting an outcome.
+      const h = harness()
+
+      await handleWebDashboard('stop', h.deps)
+
+      const message = h.toasts[0]?.message ?? ''
+      expect(message).toContain("this session's reply")
+      expect(message).not.toContain('Dashboard stopped')
+    })
+
+    it('reports a subcommand that never reached the server, and starts nothing', async () => {
+      const h = harness(true, () => { throw new Error('server unreachable') })
+
+      await handleWebDashboard('stop', h.deps)
+
+      expect(h.opened).toEqual([])
+      expect(h.toasts[0]?.variant).toBe('error')
+      // The title, too: a failure titled "stop sent" tells the user the
+      // opposite of what happened, and a variant check alone would not see it.
+      expect(h.toasts[0]?.title).toContain('not sent')
+      expect(h.toasts[0]?.message).toContain('server unreachable')
+    })
+
+    it('matches the server on case: Stop and STOP are the same command', async () => {
+      // `handleDashboardCommand` lowercases before comparing, so these work
+      // there. Matching it is the point: a case-sensitive TUI would reject
+      // what the server accepts.
+      for (const input of ['Stop', 'STOP', 'sToP', '  stop  ']) {
+        const h = harness()
+        await handleWebDashboard(input, h.deps)
+        expect(h.submitted).toEqual([`/nexus dashboard ${input.trim()}`])
+        expect(h.opened).toEqual([])
+      }
+    })
+
+    it('forwards the whole tail, and lets the server ignore it as the server does', async () => {
+      // `handleDashboardCommand` takes token [0] and discards the rest, so
+      // `stop 4747` stops the dashboard. The TUI passes the argument through
+      // rather than rebuilding or second-guessing it.
+      const h = harness()
+
+      await handleWebDashboard('stop 4747 127.0.0.1', h.deps)
+
+      expect(h.submitted).toEqual(['/nexus dashboard stop 4747 127.0.0.1'])
+      expect(h.opened).toEqual([])
+      expect(h.probes).toEqual([])
+    })
+
+    it('a misspelled subcommand names the subcommands and does not read as a port', async () => {
+      const h = harness()
+
+      await handleWebDashboard('sto', h.deps)
+
+      expect(h.submitted).toEqual([])
+      expect(h.opened).toEqual([])
+      expect(h.toasts[0]?.variant).toBe('error')
+      const message = h.toasts[0]?.message ?? ''
+      expect(message).toContain('subcommand')
+      expect(message).toContain('stop')
+      expect(message).toContain('state')
+    })
+
+    it('a genuinely bad port still says it is a bad port', async () => {
+      // The hint is one edit wide, so it cannot reach these. If it ever did,
+      // a user who typed a host name would be told they misspelled a
+      // subcommand — the confusion the brief asks to rule out.
+      //
+      // `st` is the load-bearing one: it is exactly TWO edits from `stop`, so
+      // it is the input that pins the boundary at one rather than merely
+      // sitting far away from it. Every other entry here is three or more
+      // edits out, and a window widened to two would pass them all.
+      for (const input of ['0', '70000', 'abc', '4747abc', 'not-a-port', '-1', 'localhost', 'st']) {
+        const h = harness()
+        await handleWebDashboard(input, h.deps)
+        const message = h.toasts[0]?.message ?? ''
+        expect(message).toContain('is not a port number')
+        expect(message).not.toContain('subcommand')
+        expect(h.submitted).toEqual([])
+      }
+    })
+
+    it('still starts the dashboard for a valid port, and for a port with a host', async () => {
+      // The regression the fix must not cause: treating every argument as a
+      // subcommand. Both of these submit the START command, not themselves.
+      const h = harness()
+      const healthFromCall = (n: number) => {
+        let calls = 0
+        return (async () => {
+          calls += 1
+          if (calls < n) throw new Error('fetch failed')
+          return new Response(JSON.stringify({ ok: true, uptime: 1 }), {
+            headers: { 'Content-Type': 'application/json' },
+          })
+        }) as unknown as typeof fetch
+      }
+
+      // Bare port: first probe finds nothing, so a start is attempted.
+      const bare = harness()
+      bare.deps.fetchImpl = healthFromCall(2)
+      await handleWebDashboard('14996', bare.deps)
+      expect(bare.submitted).toEqual(['/nexus dashboard 14996 127.0.0.1'])
+      expect(bare.opened).toEqual(['http://127.0.0.1:14996'])
+
+      // Port and host together, and the submitted text carries the host.
+      const pair = harness()
+      pair.deps.fetchImpl = healthFromCall(2)
+      await handleWebDashboard('14996 0.0.0.0', pair.deps)
+      expect(pair.submitted).toEqual(['/nexus dashboard 14996 0.0.0.0'])
+      expect(pair.opened).toEqual(['http://0.0.0.0:14996'])
+    })
+
+    it('no argument still starts the configured default, untouched by the subcommand path', async () => {
+      const h = harness()
+      let calls = 0
+      h.deps.fetchImpl = (async () => {
+        calls += 1
+        if (calls < 2) throw new Error('fetch failed')
+        return new Response(JSON.stringify({ ok: true, uptime: 1 }), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }) as unknown as typeof fetch
+
+      await handleWebDashboard(undefined, h.deps)
+
+      expect(h.submitted).toEqual(['/nexus dashboard 14992 127.0.0.1'])
+      expect(h.opened).toEqual(['http://127.0.0.1:14992'])
+    })
+  })
+
+  describe('parseDashboardSubcommand', () => {
+    it('names only the two the server implements, case-insensitively', () => {
+      expect(parseDashboardSubcommand('stop')).toBe('stop')
+      expect(parseDashboardSubcommand('STOP')).toBe('stop')
+      expect(parseDashboardSubcommand('state')).toBe('state')
+      expect(parseDashboardSubcommand('  State ')).toBe('state')
+      // Everything else is an address, or a typo, and belongs to the parser.
+      for (const input of [undefined, '', '  ', '4748', '4748 0.0.0.0', 'abc', 'sto', 'st', 'stateful']) {
+        expect(parseDashboardSubcommand(input)).toBeUndefined()
+      }
+    })
+
+    it('agrees with the server about which arguments are subcommands', () => {
+      // The TUI cannot import the server's private `handleDashboardCommand`, so
+      // the contract is restated here against the same rule it implements:
+      // first token, lowercased, compared for equality. `stateful` is the
+      // case that matters — a `startsWith` implementation would claim it.
+      const serverSays = (argument: string): 'stop' | 'state' | undefined => {
+        const sub = argument.trim().split(/\s+/).filter(Boolean)[0]?.toLowerCase()
+        return sub === 'state' || sub === 'stop' ? sub : undefined
+      }
+      for (const input of ['stop', 'state', 'Stop', 'STATE', 'stop 4747', 'sto', 'stateful', '  stop  ', '4748', '']) {
+        expect(parseDashboardSubcommand(input)).toBe(serverSays(input))
+      }
+    })
+
+    it('is not a port parser: it leaves the port arguments to the port parser', () => {
+      // The subcommand check and the port check are separate, and a port is
+      // not a subcommand. The two functions together cover the argument, and
+      // each is pinned by its own test.
+      const fallback = { port: 4747, host: '127.0.0.1' }
+      for (const input of ['4748', '4748 0.0.0.0']) {
+        expect(parseDashboardSubcommand(input)).toBeUndefined()
+        expect(parseWebDashboardTarget(input, fallback)).toEqual({ target: { port: 4748, host: input.includes(' ') ? '0.0.0.0' : '127.0.0.1' } })
+      }
     })
   })
 
