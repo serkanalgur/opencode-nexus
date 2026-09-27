@@ -6,6 +6,7 @@
 [![npm downloads](https://img.shields.io/npm/dw/@serkanalgur/opencode-nexus?style=flat-square&color=22c55e)](https://www.npmjs.com/package/@serkanalgur/opencode-nexus)
 [![stars](https://img.shields.io/github/stars/serkanalgur/opencode-nexus?style=flat-square&color=f59e0b)](https://github.com/serkanalgur/opencode-nexus/stargazers)
 [![license](https://img.shields.io/npm/l/@serkanalgur/opencode-nexus?style=flat-square&color=8b5cf6)](https://github.com/serkanalgur/opencode-nexus/blob/main/LICENSE)
+[![Socket Badge](https://badge.socket.dev/npm/package/@serkanalgur/opencode-nexus/latest)](https://socket.dev/npm/package/@serkanalgur/opencode-nexus/overview)
 [![opencode](https://img.shields.io/badge/OpenCode-V2-6366f1?style=flat-square)](https://opencode.ai)
 [![typescript](https://img.shields.io/badge/TypeScript-5.5+-3178c6?style=flat-square)](https://www.typescriptlang.org/)
 [![sponsor](https://img.shields.io/badge/Sponsor-GitHub-ea4aaa?style=flat-square&logo=github)](https://github.com/sponsors/serkanalgur)
@@ -26,21 +27,23 @@ OpenCode Nexus is an agent orchestration plugin for [OpenCode V2](https://openco
 
 | Capability | Description |
 |------------|-------------|
-| **Real Sessions** | Each agent runs in its own OpenCode session via `ctx.session.create()` |
+| **Real Sessions** | Each agent runs in its own OpenCode session. The preferred path dispatches through OpenCode's built-in `subagent` tool so the child is parent-linked; `ctx.session.create()` is the fallback when no parent tool context is available, and the spawn is logged as degraded |
 | **Role-Based Agents** | Architect, Coder, Reviewer, Tester, Explorer, Documenter — each with specialized prompts |
+| **Custom Roles** | Your own roles, from `.opencode/nexus.jsonc` or `nexus.roles.add` for the session |
 | **DAG Execution** | Tasks are parallelized based on dependency graphs with priority queuing |
-| **Cost-Aware Routing** | Scores models by quality/cost/speed, selects optimal per task complexity |
-| **Self-Healing** | Retries with exponential backoff, context transfer, escalation policies |
+| **Cost-Aware Routing** | Scores models by quality and cost, selects optimal per task complexity. A speed score is computed and reported but does not affect selection |
+| **Self-Healing** | Retries with exponential backoff, context transfer, then an escalation policy. The retry counts are configurable; the fallback model list is a hardcoded default, not file-configurable |
+| **Config Hot-Reload** | Edits to `nexus.jsonc` take effect without a restart — a `filesystem.changed` fast path plus a 2s poll of the two config files, debounced 150ms |
 | **Web Dashboard** | A live view of sessions, agents, tasks, costs and config, served over HTTP + WebSocket (default port 4747) — started on request from `/nexus-dashboard` or the agent, never automatically |
 | **TUI Dashboard** | Monitor agents, budget, and config from the terminal |
 | **Team Mode** | Lead agent orchestrates specialist agents in parallel |
 | **Todo & Goal Tracking** | Enforce task completion, persist objectives across sessions |
-| **Persistent Memory** | SQLite-backed memory store with TTL and search |
+| **Persistent Memory** | SQLite-backed memory store with per-entry TTL (off by default) and substring search. Reachable from the orchestrator API, not from a registered tool |
 | **Learning Module** | Pattern recognition from failures, confidence scoring |
 | **JSONC Config** | Read/write project and global config files with comments |
 | **OpenCode LSP opt-in** | On startup, inserts `"lsp": true` into your global `opencode.jsonc` if it isn't already there. That is the whole of it — Nexus does not read LSP state, manage servers, or report anything about them |
-| **AST-Grep** | Pattern-aware code search and rewriting |
-| **Security Scanning** | Automated secrets and vulnerability detection |
+| **AST-Grep** | Pattern-aware code search |
+| **Security Scanning** | Regex detection of hardcoded secrets and known-dangerous constructs |
 | **Slash Commands** | `/nexus`, `/nexus-dashboard`, `/nexus-web`, `/nexus-overview`, `/nexus-config`, `/nexus-model`, `/nexus-status`, `/nexus-reset` |
 
 ---
@@ -48,15 +51,14 @@ OpenCode Nexus is an agent orchestration plugin for [OpenCode V2](https://openco
 ## Installation
 
 ```bash
-# Using npm
-npm install -g @serkanalgur/opencode-nexus
-
-# Using bun
-bun add -g @serkanalgur/opencode-nexus
-
-# Add to OpenCode config
-opencode plugin @serkanalgur/opencode-nexus --global
+# Install the plugin and add it to your global OpenCode config
+opencode plugin add @serkanalgur/opencode-nexus
 ```
+
+This package is an OpenCode plugin, not a command-line tool: it declares no
+`bin`, so there is nothing for a global install to put on your `$PATH` and no
+CLI to invoke afterwards. `opencode plugin` takes a subcommand (`list`, `add`,
+`check`, `update`, `remove`) and has no `--global` flag.
 
 Or manually add to `~/.config/opencode/opencode.jsonc`:
 
@@ -68,11 +70,16 @@ Or manually add to `~/.config/opencode/opencode.jsonc`:
 
 ### Auto-Setup
 
-On first load, Nexus automatically:
-- Creates `nexus-orchestrator` agent in `~/.config/opencode/agents/`
-- Creates subagent files: `nexus-coder`, `nexus-explorer`, `nexus-reviewer`, `nexus-tester`, `nexus-architect`, `nexus-documenter`
-- Enables LSP in OpenCode config
-- Configures agent models from `.opencode/nexus.jsonc`
+On every plugin load, Nexus:
+- Writes `nexus-orchestrator` to `~/.config/opencode/agents/nexus-orchestrator.md`
+- Writes the six subagent files: `nexus-coder`, `nexus-explorer`, `nexus-reviewer`, `nexus-tester`, `nexus-architect`, `nexus-documenter`
+- Reads role→model mappings from `.opencode/nexus.jsonc` (and the global config) and resolves them per spawn; the generated agent files carry no model pin
+- Best-effort: if `~/.config/opencode/opencode.jsonc` already exists and does not already mention `"lsp"`, inserts `"lsp": true`; silently does nothing if the file is absent
+
+**The agent files are rewritten on every load, not created once.** Any hand-edit
+to them is lost the next time OpenCode starts. Edit `nexus.jsonc` for models and
+budget, or `nexus.roles.add` for an extra role; do not edit the generated agent
+files.
 
 ---
 
@@ -119,7 +126,9 @@ Use nexus.goal.set with description="Build complete auth system"
 
 ### Cost-Aware Model Selection
 
-Models are configured per role in `.opencode/nexus.jsonc`. Nexus scores models by quality, cost, and speed — then picks the optimal one:
+Models are configured per role in `.opencode/nexus.jsonc`. Nexus scores models by quality and cost, then picks the optimal one. A speed score is computed and reported alongside, but it is not a term in the overall score, so it never affects which model is selected.
+
+Example (the model ids below are illustrative — use whatever your provider offers):
 
 ```jsonc
 {
@@ -142,8 +151,11 @@ Failed tasks follow a 4-step escalation chain:
 
 1. **Retry** — Exponential backoff (1s, 2s, 4s...)
 2. **Respawn** — Collect context, spawn new agent with transferred state
-3. **Fallback Model** — Try cheaper alternative model
+3. **Fallback Model** — Try a cheaper alternative model. The fallback list (`google/gemini-2.5-flash`, then `anthropic/claude-haiku-4-5`) is a hardcoded default in `src/orchestrator.ts`, not something `nexus.jsonc` can change
 4. **Alert** — Emit escalation event, mark as failed
+
+The retry count, retry delay and context-transfer toggle are configurable under
+`selfHealing`; the fallback models are not.
 
 ### Web Dashboard
 
@@ -278,20 +290,33 @@ nexus.goal.complete()
 
 ### LSP Integration
 
-OpenCode's built-in LSP servers are auto-enabled. Supports 30+ languages including TypeScript, Python, Go, Rust, and more.
+None, beyond one line. On plugin load Nexus inserts `"lsp": true` into
+`~/.config/opencode/opencode.jsonc` — but only if that file already exists and
+does not already contain the string `"lsp"`. The edit is best-effort and its
+failure is silent. Nexus has no language list, no LSP state, and no surface that
+reports anything about LSP.
 
 ### AST-Grep
 
-Pattern-aware code search and rewriting:
+Pattern-aware code search, shelling out to `sg run`:
 
 ```
 nexus.astgrep.search(pattern="console.log($$$)", language="typescript", directory="src/")
-nexus.astgrep.rewrite(pattern="var $X", rewrite="const $X", language="typescript", directory="src/")
 ```
+
+There is no `nexus.astgrep.rewrite` tool. The `AstGrep` class has a `rewrite`
+method, but it is not registered — and it builds its shell command by
+interpolating the pattern into the string, which is presumably why.
 
 ### Security Scanning
 
-Automated secrets and vulnerability detection:
+Regex detection of hardcoded secrets and known-dangerous constructs. The scanner
+is six secret patterns (API key, password, token, private key, `-----BEGIN …
+PRIVATE KEY-----`, AWS credentials) and eight dangerous-substring patterns
+(`eval(`, `exec(`, `child_process`, `innerHTML=`, `document.write(`,
+`new Function(`, `__proto__=`, direct `process.env`). It is per-file and
+per-line with no dataflow or CVE awareness; secret matches are reported
+`critical` and dangerous-pattern matches `medium` regardless of context.
 
 ```
 nexus.security.scan(content="const API_KEY = \"sk-123\"", filename="config.ts")
@@ -299,7 +324,11 @@ nexus.security.scan(content="const API_KEY = \"sk-123\"", filename="config.ts")
 
 ### Persistent Memory
 
-SQLite-backed memory store that survives restarts:
+SQLite-backed memory store that survives restarts. Entries never expire unless
+you pass a per-entry `ttl` — the store's `defaultTTL` is `0` — and `search` is
+a `LIKE '%q%'` substring match, not a full-text or ranked search. Reachable
+through the orchestrator API (`orchestrator.memoryStore`); no registered tool
+exposes it.
 
 ```typescript
 orchestrator.memoryStore.set({
@@ -346,13 +375,25 @@ Nexus creates 7 agent files in `~/.config/opencode/agents/`:
 | `nexus-explorer` | subagent | Explore codebases (read-only) |
 | `nexus-documenter` | subagent | Write documentation |
 
-### Clarify Skill
+### Clarify
 
-When instructions are ambiguous, use `nexus.clarify`:
+`nexus.clarify` does not ask the user anything and does not wait for a reply. It
+formats the question — with a numbered option list and a stated default — and
+returns that text as tool content, so the *model* is the one that ends up
+holding the question:
 
 ```
 nexus.clarify(question="Should I use JWT or OAuth?", options="JWT, OAuth", assumption="JWT")
+→ ❓ Should I use JWT or OAuth?
+  Options:
+  1. JWT
+  2. OAuth
+  💡 Default: JWT
 ```
+
+The repository also contains a `skills/ask-if-clarify/SKILL.md` prompt. Nothing
+in `src/` loads it and it is not in `package.json`'s `files` list, so it is not
+installed with the package — treat it as a repo document, not a shipped feature.
 
 ---
 
@@ -366,10 +407,17 @@ nexus.clarify(question="Should I use JWT or OAuth?", options="JWT, OAuth", assum
 | `nexus.background` | Move agents to background | `{}` |
 | `nexus.result` | Get agent result | `{ sessionID }` |
 | `nexus.status` | Orchestrator status | `{ detailed? }` |
+| `nexus.agents` | List active agents, as JSON | `{ filter? }` — filter by agent status |
 | `nexus.costs` | Cost report & budget | `{}` |
+| `nexus.notifications.test` | Send one OS notification and report whether it was delivered, and why not | `{}` |
+| `nexus.dashboard` | Full orchestrator state as JSON | `{}` |
+| `nexus.queue` | Current task list with priorities, as JSON | `{}` |
 | `nexus.forecast` | Predict costs | `{ tasks }` |
 | `nexus.model.costs` | Show/set model pricing | `{ model?, setInput?, setOutput? }` |
-| `nexus.preset` | Apply preset config | `{ name }` |
+| `nexus.preset` | Apply a preset config, or drop the session override | `{ mode?: 'apply' \| 'clear', name? }` — `clear` (2.6.0+) drops the in-process preset/TUI override so `nexus.jsonc` is in control again; no file is modified |
+| `nexus.template` | List or instantiate a task template | `{ name?, baseDir? }` — `name: 'list'` (or omitted) lists; `baseDir` resolves the template's file paths, defaulting to cwd |
+| `nexus.roles.list` | List custom agent roles from `nexus.jsonc` | `{}` |
+| `nexus.roles.add` | Register a custom role **for this session only** | `{ name, displayName, prompt, emoji?, model? }` — a config reload replaces the registry from the file, so a role added this way and not written to `nexus.jsonc` stops resolving on the next reload |
 | `nexus.config.save` | Save config to disk | `{ level: 'project' \| 'global' }` |
 | `nexus.config.init` | Initialize config files | `{ level }` |
 | `nexus.dashboard.start` | Start the web dashboard server (port must be free) | `{ port?, host? }` |
@@ -393,7 +441,7 @@ nexus.clarify(question="Should I use JWT or OAuth?", options="JWT, OAuth", assum
 | `nexus.astgrep.search` | Search AST patterns | `{ pattern, language, directory }` |
 | `nexus.astgrep.status` | Check ast-grep install | `{}` |
 | `nexus.security.scan` | Scan for security issues | `{ content, filename? }` |
-| `nexus.clarify` | Ask clarifying question | `{ question, options?, assumption? }` |
+| `nexus.clarify` | Format a clarifying question and return it to the model (it does not query the user) | `{ question, options?, assumption? }` |
 | `nexus.worktree.enable` | Enable worktree isolation | `{ repoRoot? }` |
 | `nexus.worktree.list` | List worktrees | `{}` |
 | `nexus.worktree.disable` | Disable worktrees | `{}` |
@@ -434,16 +482,12 @@ answer it has no reason to read. The table above is the TUI palette.
 
 ### Agent Models
 
-Configure via `/nexus` or `Ctrl+N`:
+Press **Ctrl+N** or type `/nexus` to pick a model per role, then choose project
+or global. That writes the `models` block of `nexus.jsonc`; the example in
+[Cost-Aware Model Selection](#cost-aware-model-selection) shows its shape.
 
-```
-🏗️ Architect: opencode/muse-spark-1.3-contributor-free
-💻 Coder:     opencode/mimo-v2.6-flash-free
-🔍 Reviewer:  opencode/muse-spark-1.2-contributor-free
-🧪 Tester:    opencode-go/mimo-v2.5
-🔬 Explorer:  opencode/big-pickle
-📝 Documenter: opencode/big-pickle
-```
+The resolved map is read at spawn time, so an edit to `nexus.jsonc` applies to
+the next spawn without a restart.
 
 ### Web Dashboard
 
@@ -462,6 +506,44 @@ both accept:
 
 The server has no authentication, which is why `host` defaults to loopback.
 Leave it there unless you have put your own authentication in front of it.
+
+### Notifications
+
+```jsonc
+{
+  "notifications": {
+    "enabled": true
+  }
+}
+```
+
+`enabled` (default `true`) is the whole block, and it is read once at orchestrator
+construction — changing it takes effect on the next reload or restart, not on the
+next event.
+
+One switch governs every notification site: task-complete, task-failed and the
+budget alert/limit notifications alike. There is no per-site or per-level
+setting; `false` silences all of them and each suppressed send is counted rather
+than attempted.
+
+`nexus.status` reports the outcome as a `notifications` object — `sent`,
+`failed`, `suppressed`, `lastError`, `lastErrorAt`, `enabled`, `platform` — in
+both the detailed and the summary branch. `nexus.notifications.test` sends one
+probe and reports whether the OS notifier accepted it and, if not, why; the
+probe is deliberately not counted in `sent`/`failed`.
+
+### Config Diagnostics
+
+`nexus.status` carries a `config` object that answers "why did my spawn use an
+unexpected model":
+
+| Field | Meaning |
+|---|---|
+| `sessionOverride` | An in-process preset or TUI override is active, so `models` describes memory rather than disk |
+| `diskModelsIgnored` | The same fact, named for the diagnosis: the file's `models` block is being shadowed right now. Clear it with `nexus.preset(mode="clear")` |
+| `trigger` | `initial`, `event` (a `filesystem.changed`) or `poll`. `poll` on every reload means the host is not delivering events for these files |
+| `loadCount`, `loadedAt` | How many times config has been loaded, and when |
+| `project`, `global` | The two paths consulted, and which existed |
 
 ### Custom Roles
 
@@ -520,7 +602,7 @@ nexus.template(name="documentation") — Documentation update
 │                                                              │
 │  ┌────────────────────────────────────────────────────┐     │
 │  │                    MODULES                          │     │
-│  │  Health Monitor │ Learning │ Message Store (SQLite) │     │
+│  │  Health Monitor │ Learning │ Message Store (JSONL)  │     │
 │  │  Persistent Mem │ Fan-Out  │ Notifications (OS)     │     │
 │  │  State Broadcaster │ Module Registry │ Security     │     │
 │  │  Cost Forecaster │ Performance Tracker │ AST-Grep   │     │
@@ -561,7 +643,7 @@ bun run build
 bun test
 
 # Type check
-npx tsc --noEmit
+bun run typecheck
 ```
 
 ---
@@ -583,6 +665,6 @@ MIT License - see [LICENSE](LICENSE) for details.
 **Built with ❤️ by [Serkan Algur](https://github.com/serkanalgur)**
 
 [![GitHub](https://img.shields.io/badge/GitHub-serkanalgur-181717?style=flat-square&logo=github)](https://github.com/serkanalgur)
-[![npm](https://img.shields.io/badge/npm-@serkanalgur-cb3837?style=flat-square&logo=npm)](https://www.npmjs.com/package/@serkanalgur)
+[![npm](https://img.shields.io/badge/npm-@serkanalgur-cb3837?style=flat-square&logo=npm)](https://www.npmjs.com/package/@serkanalgur/opencode-nexus)
 
 </div>
