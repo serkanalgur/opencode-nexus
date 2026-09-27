@@ -801,9 +801,46 @@ nexus.clarify(question="Should I use JWT or OAuth?", options="JWT, OAuth", assum
   💡 Default: JWT
 ```
 
-The repository also contains a `skills/ask-if-clarify/SKILL.md` prompt. Nothing
-in `src/` loads it and it is not in `package.json`'s `files` list, so it is not
-installed with the package — treat it as a repo document, not a shipped feature.
+### Skills
+
+Three design skills are installed to `~/.config/opencode/skills/` on plugin
+load, alongside the generated agent files:
+
+| Skill | What it is for |
+|-------|----------------|
+| `nexus-design-taste` | The convergence catalogue — uniform card grids, one radius everywhere, a gradient hero, all-caps eyebrows, middot slogans, arrows on every link — each with a concrete alternative, plus when structure carries information and when it is decoration |
+| `nexus-interface-a11y` | WCAG 2.2 AA thresholds to write into a design direction: contrast, target size, focus, colour, motion, reflow. Every figure cites its success criterion and level |
+| `nexus-design-review` | Auditing an existing interface, severity-ordered, reporting in the same six fields a design brief uses. Reports; does not edit |
+
+**The installed files are plugin-managed.** A file is written when it is missing
+or when the content this version ships differs from what is on disk, so an
+ordinary plugin load never rewrites an unchanged file and never churns its
+mtime. A release that changes a skill's text does update the installed copy, and
+**that update will overwrite a hand-edited global copy** — the file is treated as
+owned by the plugin.
+
+**To customise a skill, do not edit the global copy.** Put your version in your
+project's `.opencode/skills/` instead:
+
+```
+.opencode/skills/nexus-design-taste/SKILL.md
+```
+
+OpenCode registers skill sources in precedence order — built-in, then
+`.claude/skills` and `.agents/skills`, then `~/.config/opencode/skills`, then
+**project `.opencode/skills`**, then explicit `skills` config entries — and later
+sources win. A project copy therefore shadows the installed one, per project,
+with no configuration and no nexus setting involved. This is the intended
+extension point; there is deliberately no in-plugin override flag, because
+OpenCode's own precedence already resolves it and a second mechanism would be a
+second source of truth that could disagree with the first.
+
+The `nexus-` prefix is what makes that work: a user copy *shadows* the installed
+skill rather than appearing beside it as two unrelated skills.
+
+The repository also contains `skills/ask-if-clarify/SKILL.md`. It is not in
+`NEXUS_SKILL_NAMES` in `src/skills-install.ts`, so nothing installs it — it is
+a repo document, not a shipped feature.
 
 ---
 

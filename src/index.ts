@@ -12,6 +12,7 @@ import { TEMPLATES, instantiateTemplate, listTemplates } from "./templates"
 import { GoalManager } from "./goal"
 import { TeamManager } from "./team"
 import { AstGrep } from "./astgrep"
+import { installNexusSkills, nexusSkillsDir } from "./skills-install"
 import { describeDashboardStart, startDashboardServer } from "./dashboard"
 import {
   formatModelPrice,
@@ -1445,6 +1446,31 @@ A design decision, in this shape:
       // Best-effort, exactly as the primary agent file is. A convention layer
       // that can prevent the agent files from being written is a convention
       // layer that has broken something else to add guidance.
+    }
+
+    // Install the `nexus-*` design skills into `~/.config/opencode/skills/`.
+    //
+    // Same shape and same moment as the agent files above — on plugin load,
+    // best-effort, never able to break startup — but a different destination and
+    // a different trigger. These are compared by content and only written when
+    // they differ, so a load that changes nothing leaves the files, and their
+    // mtimes, alone. See `src/skills-install.ts` for why there is deliberately
+    // no override mechanism here: OpenCode's own skill precedence already lets a
+    // user's project `.opencode/skills` copy shadow this global one.
+    try {
+      const results = installNexusSkills(nexusSkillsDir(), homedir())
+      for (const { name, path, action } of results) {
+        // A skill that did not ship is the whole feature failing silently, and
+        // this is the only in-process signal there is. Named and loud, because
+        // `docs/COMPATIBILITY.md` claims skills are supported.
+        if (action === 'unavailable') {
+          console.warn(`[nexus] Skill ${name} is not present in the installed package; skipping ${path}`)
+        }
+      }
+    } catch {
+      // Best-effort, like every other file this plugin writes on load. The
+      // skills are guidance; failing to install guidance must never be the
+      // reason the orchestrator does not start.
     }
 
     // Initialize orchestrator with OpenCode context for real session API access
