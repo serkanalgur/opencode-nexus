@@ -72,7 +72,7 @@ Or manually add to `~/.config/opencode/opencode.jsonc`:
 
 On every plugin load, Nexus:
 - Writes `nexus-orchestrator` to `~/.config/opencode/agents/nexus-orchestrator.md`
-- Writes the six subagent files: `nexus-coder`, `nexus-explorer`, `nexus-reviewer`, `nexus-tester`, `nexus-architect`, `nexus-documenter`
+- Writes the seven subagent files: `nexus-coder`, `nexus-explorer`, `nexus-reviewer`, `nexus-tester`, `nexus-architect`, `nexus-documenter`, `nexus-designer`
 - Reads role→model mappings from `.opencode/nexus.jsonc` (and the global config) and resolves them per spawn; the generated agent files carry no model pin
 - Best-effort: if `~/.config/opencode/opencode.jsonc` already exists and does not already mention `"lsp"`, inserts `"lsp": true`; silently does nothing if the file is absent
 
@@ -772,7 +772,7 @@ const solutions = orchestrator.learning.findSolutions('TypeScript TS2345 error')
 
 ## Agents
 
-Nexus creates 7 agent files in `~/.config/opencode/agents/`:
+Nexus creates 8 agent files in `~/.config/opencode/agents/`:
 
 | Agent | Mode | Purpose |
 |-------|------|---------|
@@ -783,6 +783,7 @@ Nexus creates 7 agent files in `~/.config/opencode/agents/`:
 | `nexus-tester` | subagent | Write and run tests |
 | `nexus-explorer` | subagent | Explore codebases (read-only) |
 | `nexus-documenter` | subagent | Write documentation |
+| `nexus-designer` | subagent | Decide UI/UX direction — layout, hierarchy, states, copy (read-only) |
 
 ### Clarify
 
@@ -1173,14 +1174,14 @@ convention is decided; an off answer recorded for a specific repository
 (see below) still wins over `enabled: true`, because the more specific statement
 does.
 
-**Where the convention lands.** The six generated subagent files in
+**Where the convention lands.** The seven generated subagent files in
 `~/.config/opencode/agents` (`nexus-architect`, `-coder`, `-explorer`, `-tester`,
-`-reviewer`, `-documenter`) are rewritten on every plugin load, so a hand-edit
-there does not survive a restart. That is what makes them the durable place for
-a convention, and each of the six gains a `## Git Convention` section when the
-convention is active *and* the working directory is a git work tree on a branch.
-Outside a repository, or on a detached HEAD, the files are written exactly as
-before and the section is absent — the condition is deliberate, because
+`-reviewer`, `-documenter`, `-designer`) are rewritten on every plugin load, so a
+hand-edit there does not survive a restart. That is what makes them the durable
+place for a convention, and each of the seven gains a `## Git Convention` section
+when the convention is active *and* the working directory is a git work tree on a
+branch. Outside a repository, or on a detached HEAD, the files are written exactly
+as before and the section is absent — the condition is deliberate, because
 unconditionally telling an agent to work on a branch in a directory that has no
 branches is worse than saying nothing.
 
@@ -1310,7 +1311,8 @@ nexus.template(name="documentation") — Documentation update
 │  │              AGENTS (auto-created)                   │     │
 │  │  nexus-orchestrator (primary)                       │     │
 │  │  nexus-architect, nexus-coder, nexus-reviewer        │     │
-│  │  nexus-tester, nexus-explorer, nexus-documenter      │     │
+│  │  nexus-tester, nexus-explorer, nexus-documenter,      │     │
+│  │  nexus-designer                                       │     │
 │  └────────────────────────────────────────────────────┘     │
 └─────────────────────────────────────────────────────────────┘
 ```

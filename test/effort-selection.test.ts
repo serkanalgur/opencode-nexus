@@ -1266,7 +1266,12 @@ describe('no variant axis reached pricing', () => {
     const onDir = writeProjectConfig('effort-rank-on', { effort: { enabled: true, maxEffort: 'max' } })
     const off = await harness(offDir, [{ id: 'anthropic', name: 'Anthropic', models: { 'claude-opus-4-7': { id: 'claude-opus-4-7', variants: v('low', 'high') } } }])
     const on = await harness(onDir, [{ id: 'anthropic', name: 'Anthropic', models: { 'claude-opus-4-7': { id: 'claude-opus-4-7', variants: v('low', 'high') } } }])
-    for (const role of ['architect', 'coder', 'reviewer', 'tester', 'explorer', 'documenter']) {
+    // Every built-in role, taken from `getRoles()` rather than a hand-copied
+    // list of six. This assertion is about ranking, not about which roles
+    // exist, so it should hold for all of them — and a literal here is a list
+    // that silently stops covering roles added after it was written, which is
+    // exactly what happened to `designer`.
+    for (const role of new NexusConfigManager().getRoles()) {
       for (const overall of [0, 45, 90]) {
         const a = select(off.orchestrator, role, overall)
         const b = select(on.orchestrator, role, overall)

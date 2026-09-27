@@ -14,6 +14,14 @@ export interface NexusModelConfig {
   tester?: string
   explorer?: string
   documenter?: string
+  /**
+   * The design director's model, a NAMED field like the six above rather than
+   * a bare index-signature key. The index signature would accept
+   * `models: { desginer: "..." }` just as happily, so a misspelling is
+   * invisible either way — but a named field is discoverable at the type and
+   * in the editor, and `getRoles()` can be checked against these names.
+   */
+  designer?: string
   [key: string]: string | undefined
 }
 
@@ -619,7 +627,15 @@ const DEFAULT_CONFIG: NexusFullConfig = {
     reviewer: "openai/gpt-5-mini",
     tester: "anthropic/claude-haiku-4-5",
     explorer: "google/gemini-2.5-flash",
-    documenter: "anthropic/claude-haiku-4-5"
+    documenter: "anthropic/claude-haiku-4-5",
+    // A DEFAULT, not an omission. The unset-fallback chain in
+    // `getModelForRole` ends at `config.models.coder`, so a `designer` key
+    // absent from here would put every design director on the coder's model —
+    // a different model's judgement, at coder prices, with nothing logged.
+    // A design director decides and does not implement, which is the architect's
+    // job description, so it takes the architect's model here for the same
+    // reason the architect does.
+    designer: "anthropic/claude-sonnet-4-6"
   },
   budget: {
     maxTotalCost: 10.00,
@@ -1202,8 +1218,12 @@ export class NexusConfigManager {
   }
 
   // Get all available roles
+  //
+  // The picker, the summary, and the "which model does this role use" lookup all
+  // read this list, so a role missing from HERE is a role the user cannot pick a
+  // model for — which is why it is one literal rather than six.
   getRoles(): string[] {
-    return ['architect', 'coder', 'reviewer', 'tester', 'explorer', 'documenter']
+    return ['architect', 'coder', 'reviewer', 'tester', 'explorer', 'documenter', 'designer']
   }
 
   // Get role display name
@@ -1214,7 +1234,8 @@ export class NexusConfigManager {
       reviewer: 'Reviewer',
       tester: 'Tester',
       explorer: 'Explorer',
-      documenter: 'Documenter'
+      documenter: 'Documenter',
+      designer: 'Designer'
     }
     return names[role] || role
   }
@@ -1227,7 +1248,12 @@ export class NexusConfigManager {
       reviewer: '🔍',
       tester: '🧪',
       explorer: '🔬',
-      documenter: '📝'
+      documenter: '📝',
+      // 🎨 is the palette, and it is distinct from all six above: 🏗️ is a
+      // building, so "designer" could not borrow it without two roles wearing
+      // the same badge in the sidebar and the same leading glyph in a session
+      // title.
+      designer: '🎨'
     }
     return emojis[role] || '🤖'
   }
@@ -1484,6 +1510,11 @@ export const PRESETS: Record<string, NexusPreset> = {
         tester: 'google/gemini-2.5-flash',
         explorer: 'google/gemini-2.5-flash',
         documenter: 'google/gemini-2.5-flash',
+        // The whole point of this preset is that every role runs on the cheapest
+        // model that can be asked. A frontier model here would be a bug in
+        // spirit: the designer would quietly cost more than the six roles it
+        // plans for, against a $1 total ceiling chosen to be a real ceiling.
+        designer: 'google/gemini-2.5-flash',
       },
       budget: {
         maxTotalCost: 1.00,
@@ -1509,6 +1540,13 @@ export const PRESETS: Record<string, NexusPreset> = {
         tester: 'anthropic/claude-haiku-4-5',
         explorer: 'google/gemini-2.5-flash',
         documenter: 'anthropic/claude-haiku-4-5',
+        // The design director is the architect's peer here, not the coder's: it
+        // decides, and the coder implements. This preset already pays sonnet for
+        // the architect and gpt-5-mini for the reviewer, so a design decision
+        // gets sonnet rather than the cheap end — a bad layout decision costs a
+        // rewrite of the feature, which is the same argument the architect
+        // placement makes.
+        designer: 'anthropic/claude-sonnet-4-6',
       },
       budget: {
         maxTotalCost: 10.00,
@@ -1534,6 +1572,15 @@ export const PRESETS: Record<string, NexusPreset> = {
         tester: 'anthropic/claude-sonnet-4-6',
         explorer: 'anthropic/claude-sonnet-4-6',
         documenter: 'anthropic/claude-haiku-4-5',
+        // Sonnet, deliberately NOT gpt-5 the way the reviewer gets it. The
+        // reviewer's job is to catch defects in a diff that already exists, so
+        // the strongest available model is close to free money there. The
+        // design director's output is a judgement about something that does not
+        // exist yet, where a confident wrong answer is not caught by any later
+        // reviewer — a test passes, a reviewer finds no bug, and the interface is
+        // still wrong. Frontier reasoning is worth less on a job whose failure
+        // mode is invisible to every other agent in the graph.
+        designer: 'anthropic/claude-sonnet-4-6',
       },
       budget: {
         maxTotalCost: 50.00,
@@ -1559,6 +1606,13 @@ export const PRESETS: Record<string, NexusPreset> = {
         tester: 'google/gemini-2.5-flash',
         explorer: 'google/gemini-2.5-flash',
         documenter: 'google/gemini-2.5-flash',
+        // Haiku, not flash, even though four of the six roles here are flash.
+        // This preset demotes the architect to haiku for the same reason it
+        // demotes the reviewer to gpt-5-mini: keep the judgement roles off the
+        // cheapest tier. Flash writes the code; a design decision made on flash
+        // is the input to all of that code, so the cost of getting it wrong is
+        // paid several times over while the saving is paid once.
+        designer: 'anthropic/claude-haiku-4-5',
       },
       budget: {
         maxTotalCost: 3.00,

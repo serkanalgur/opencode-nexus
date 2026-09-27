@@ -39,6 +39,7 @@ export type AgentRole =
   | 'tester'
   | 'explorer'
   | 'documenter'
+  | 'designer'
   | string
 
 export type AgentStatus = 

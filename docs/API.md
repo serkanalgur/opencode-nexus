@@ -40,7 +40,7 @@ Spawn a real agent session via the OpenCode plugin context.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `config.role` | `string` | Agent role: `architect`, `coder`, `reviewer`, `tester`, `explorer`, or `documenter` |
+| `config.role` | `string` | Agent role: `architect`, `coder`, `reviewer`, `tester`, `explorer`, `documenter`, or `designer` |
 | `config.model` | `string?` | Optional model override. When omitted the best model is selected automatically based on task complexity and budget. |
 
 ##### execute(request: ExecutionRequest): Promise\<ExecutionResult\>
