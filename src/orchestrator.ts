@@ -3,7 +3,7 @@ import type {
   Agent, Task, DAG, DAGNode, ExecutionRequest, ExecutionResult,
   AgentRole, ComplexityScore, ModelSelection, BudgetConstraint,
   AgentStatus,
-  CostReport, AgentMessage, MemoryEntry, MemoryScope,
+  CostReport, AgentMessage, MemoryEntry, MemoryScope, LastRecall,
   SpawnConfig, RecoveryAction, HealthStatus, NexusConfig, TaskResult,
   CostProvenance, SpendSplit, CostReportUncollected
 } from "./types"
@@ -12,7 +12,7 @@ import { StateBroadcaster } from "./broadcast"
 import { DashboardModule, describeDashboardStart, parseDashboardTarget, startDashboardServer } from "./dashboard"
 import { detectCycles } from "./dag"
 import { MessageStore, type MessageStoreConfig } from "./message-store"
-import { PersistentMemoryStore, type MemoryStoreConfig } from "./memory-store"
+import { PersistentMemoryStore, isNewerThan, type MemoryStoreConfig } from "./memory-store"
 import { HealthMonitor } from "./health"
 import { MessageRouter } from "./fanout"
 import { NotificationManager, type NotificationOptions } from "./notifications"
@@ -36,7 +36,22 @@ import {
   type UsageSource,
 } from "./forecast"
 import { WorktreeManager } from "./worktree"
+import {
+  buildGitCheckReport,
+  detectGitState,
+  resolveGitFlow,
+  writeGitFlowDecision,
+  type GitCheckReport,
+  type GitFlowDecision,
+  type GitState,
+  type ResolvedGitFlow,
+} from "./git-flow"
 import { TodoEnforcer } from "./todo"
+import {
+  recallForTask as runRecall,
+  type RecallOutcome,
+  type RecallRequest,
+} from "./memory-recall"
 
 /**
  * Subset of OpenCode's `Tool.Context` that `spawnAgent` needs to fabricate a
@@ -215,6 +230,38 @@ const DELTA_READ_BACKOFF_MS: readonly number[] = [1000, 2000, 4000]
  * deliberately lower because these rows cost more to serialise.
  */
 const MAX_UNCOLLECTED_SESSIONS = 200
+
+/**
+ * Named in the memory-eviction warning so the message says which scope is the
+ * exempt one rather than leaving the reader to go and look.
+ *
+ * The exemption itself lives in `COUNT_EXEMPT_SCOPES` in `src/memory-store.ts`,
+ * beside the eviction it governs. This is only the label.
+ */
+const COUNT_EXEMPT_SCOPES_LABEL = 'project'
+
+/**
+ * The git convention's defaults, as a standalone constant.
+ *
+ * Held here rather than only inside `mergeConfig`'s `defaults` literal because
+ * `NexusConfig.gitFlow` is OPTIONAL — an external `NexusConfig` literal may omit
+ * it — so `defaults.gitFlow` is typed `... | undefined` and spreading it
+ * produces a block whose fields are all `boolean | undefined`. That is the
+ * "type says boolean, runtime says undefined" shape, and a consumer reading
+ * `requireBranch` off it would get `undefined` where it expects `false`.
+ *
+ * These values must stay identical to `DEFAULT_CONFIG.gitFlow` in
+ * `src/config.ts`, which is the file-settable level, and to the single gate's
+ * documented default. Three copies of one default is already too many; the two
+ * config-level ones are asserted equal by `test/git-flow.test.ts` so they cannot
+ * drift silently.
+ */
+const GIT_FLOW_DEFAULTS: Required<NonNullable<NexusConfig['gitFlow']>> = {
+  enabled: true,
+  conventionalCommits: true,
+  requireBranch: true,
+  prBeforeMerge: true,
+}
 
 /**
  * One outstanding "bill the rest of this session" obligation, keyed by
@@ -472,7 +519,24 @@ export interface SpawnOptions {
 /** How a child session was created — lets callers know which path was taken. */
 export type SpawnPath = 'subagent-tool' | 'session-create'
 
-export type SpawnedAgent = Agent & { spawnPath?: SpawnPath }
+export type SpawnedAgent = Agent & {
+  spawnPath?: SpawnPath
+  /**
+   * The exact text `spawnAgent` delivered to the child session, with any
+   * recollection block already appended.
+   *
+   * Present so a caller that ALSO delivers the task — the degraded
+   * `ctx.session.prompt` fallback in `index.ts` — sends this instead of
+   * re-deriving the task from its own arguments. That fallback used to send the
+   * caller's original string, which bypassed the composed text entirely and
+   * made "recollections are injected on spawn" true of one of the two spawn
+   * paths rather than both.
+   *
+   * Equals the caller's own text when nothing was recalled, so sending it is
+   * always safe and never a behaviour change on the common path.
+   */
+  deliveredText?: string
+}
 
 export interface ModelScore {
   model: string
@@ -736,6 +800,14 @@ export class NexusOrchestrator {
 
   // Memory (SQLite-backed persistent store)
   public memoryStore: PersistentMemoryStore
+  /**
+   * What the most recent spawn injected, and how much of it.
+   *
+   * Reset to `null` on every spawn, INCLUDING a spawn that injected nothing, so
+   * a stale reading from a previous task is never read as this task's cost.
+   * Set at both injection points, in `executeTask` and in `spawnAgent`.
+   */
+  private lastRecall: LastRecall | null = null
 
   // Topic-based fan-out router
   public messageRouter: MessageRouter
@@ -787,6 +859,23 @@ export class NexusOrchestrator {
 
   // Git worktree manager for agent isolation
   public worktreeManager: WorktreeManager | null = null
+
+  /**
+   * Detected git state, and the path it was detected at.
+   *
+   * MEMOISED on purpose. Detection costs two `git` processes — about 80 ms on
+   * the development machine, where `spawnSync` itself is ~40 ms (see
+   * `detectGitState`'s doc for the measurement) — and it answers questions
+   * about the WORKING DIRECTORY, which does not change while the process runs.
+   * Recomputing it per tool call would pay that on every `nexus.git.check` for
+   * an answer that cannot have changed.
+   *
+   * Not invalidated on config reload, and deliberately: a reload changes
+   * `gitFlow`, not the checkout. The gate is re-resolved from this cached state
+   * every time, so a config edit takes effect immediately.
+   */
+  private cachedGitState: GitState | null = null
+  private cachedGitStatePath: string | null = null
 
   // Todo enforcer for task tracking
   public todoEnforcer: TodoEnforcer = new TodoEnforcer()
@@ -927,7 +1016,7 @@ export class NexusOrchestrator {
   constructor(config?: Partial<NexusConfig>, messageStoreConfig?: Partial<MessageStoreConfig>, memoryStoreConfig?: Partial<MemoryStoreConfig>) {
     this.config = this.mergeConfig(config)
     this.budget = this.config.budget
-    this.configManager = new NexusConfigManager(this.config.dashboard, this.config.notifications, this.config.customRoles)
+    this.configManager = new NexusConfigManager(this.config.dashboard, this.config.notifications, this.config.customRoles, this.config.gitFlow)
     this.moduleRegistry = new ModuleRegistry()
     this.messageStore = new MessageStore(messageStoreConfig)
     this.memoryStore = new PersistentMemoryStore(memoryStoreConfig)
@@ -1322,6 +1411,75 @@ export class NexusOrchestrator {
   }
 
   /**
+   * Git state for `cwd`, or for the process working directory.
+   *
+   * The ONLY place the orchestrator asks git anything. Everything else that
+   * needs to know whether there is a repository, a branch or a remote goes
+   * through here, so there is one memoisation and one failure story: a `git`
+   * that is missing, slow or broken yields `known: false` and no exception, and
+   * no task is ever aborted by a convention layer.
+   */
+  getGitState(cwd?: string): GitState {
+    const path = cwd || process.cwd()
+    if (this.cachedGitState === null || this.cachedGitStatePath !== path) {
+      this.cachedGitState = detectGitState(path)
+      this.cachedGitStatePath = path
+    }
+    return this.cachedGitState
+  }
+
+  /**
+   * The effective convention for `cwd`, after config AND any per-repo answer.
+   *
+   * The single gate. `nexus.git.check` and the agent-markdown injection both
+   * call this and neither re-reads the config block, so `gitFlow.enabled` has
+   * one reader rather than the two-or-more that let `dashboard.enabled` and
+   * `notifications.enabled` drift into dead knobs.
+   */
+  resolveGitFlow(cwd?: string): ResolvedGitFlow {
+    return resolveGitFlow(
+      this.configManager.getConfig().gitFlow,
+      this.getGitState(cwd),
+    )
+  }
+
+  /**
+   * The read-only report behind `nexus.git.check`.
+   *
+   * REPORTS, NEVER BLOCKS AND NEVER WRITES. It refuses nothing, and it runs no
+   * `git commit`, `git push` or `git merge` — there is no such call in
+   * `src/git-flow.ts` to make. `recordGitFlowDecision` is the only method here
+   * that touches the filesystem, and it writes nexus's OWN global config
+   * directory, never the user's repository.
+   */
+  checkGitFlow(cwd?: string): GitCheckReport {
+    return buildGitCheckReport(this.getGitState(cwd), this.configManager.getConfig().gitFlow)
+  }
+
+  /**
+   * Record the per-repo answer to the one question this layer asks.
+   *
+   * Keyed by the REPOSITORY identity — `git rev-parse --git-common-dir`'s parent
+   * — and NOT by the top level of the work tree. Those differ inside a linked
+   * worktree, where `--show-toplevel` returns the worktree's own path; keying on
+   * it would re-ask a user who had already answered, once per worktree. See
+   * `GitState.repoId`.
+   *
+   * Persisted in `~/.config/opencode/nexus-gitflow.json` — see
+   * `gitFlowDecisionPath()` for why not the repository and not `nexus.jsonc`.
+   */
+  recordGitFlowDecision(decision: GitFlowDecision, cwd?: string): GitFlowDecision {
+    const state = this.getGitState(cwd)
+    if (!state.repoId) {
+      throw new Error(
+        'Not inside a git work tree, so there is no repository to record a decision about. '
+        + 'Run this from inside a repository, or set `gitFlow.enabled: false` in nexus.jsonc instead.',
+      )
+    }
+    return writeGitFlowDecision(state.repoId, decision)
+  }
+
+  /**
    * Export current state for TUI/dashboard consumption
    */
   getState(): OrchestratorState {
@@ -1540,12 +1698,6 @@ export class NexusOrchestrator {
         messageTTL: 60000,
         persistence: false
       },
-      memory: {
-        enabled: true,
-        storage: 'memory',
-        maxEntriesPerScope: 1000,
-        syncInterval: 5000
-      },
       dashboard: {
         enabled: true,
         port: 4747,
@@ -1554,6 +1706,7 @@ export class NexusOrchestrator {
       notifications: {
         enabled: true
       },
+      gitFlow: { ...GIT_FLOW_DEFAULTS },
       security: {
         sastEnabled: true,
         secretsScanning: true,
@@ -1587,9 +1740,19 @@ export class NexusOrchestrator {
       agents: { ...defaults.agents, ...partial?.agents },
       selfHealing: { ...defaults.selfHealing, ...partial?.selfHealing },
       communication: { ...defaults.communication, ...partial?.communication },
-      memory: { ...defaults.memory, ...partial?.memory },
       dashboard: { ...defaults.dashboard, ...partial?.dashboard },
       notifications: { ...defaults.notifications, ...partial?.notifications },
+      // Merged per-key rather than carried through the blanket `...partial`
+      // above, because a caller passing `{ gitFlow: { enabled: false } }` would
+      // otherwise REPLACE the whole block and leave the other three toggles
+      // undefined at runtime while the type claims they are booleans.
+      //
+      // Off `GIT_FLOW_DEFAULTS` rather than off `defaults.gitFlow`, because
+      // `NexusConfig.gitFlow` is OPTIONAL (so an external literal may omit it)
+      // and spreading an optional property yields a block whose fields are all
+      // `boolean | undefined` — which is precisely the "type says boolean,
+      // runtime says undefined" shape this line exists to prevent.
+      gitFlow: { ...GIT_FLOW_DEFAULTS, ...defaults.gitFlow, ...partial?.gitFlow },
       security: { ...defaults.security, ...partial?.security },
       learning: { ...defaults.learning, ...partial?.learning },
       // Present only when the caller supplied it; see the note on
@@ -1948,6 +2111,34 @@ export class NexusOrchestrator {
       // Build the prompt for the agent
       const rolePrompt = this.buildRolePrompt(node.task.requiredRole)
       let taskPrompt = `${rolePrompt}\n\n## Task\n${node.task.name}\n\n${node.task.description}\n\n## Scope\nFiles: ${node.task.files.include.join(', ')}`
+
+      // Recollections, AFTER the task and BEFORE the context-transfer block.
+      // The position is part of the marking: the transfer block immediately
+      // below already establishes that a trailing block is narration, not
+      // instruction, and a recollection belongs in the same register as the
+      // thing it most resembles.
+      //
+      // NOT injected into `buildRolePrompt`. That returns a role string shared
+      // by every task of that role, and recollection placed there becomes
+      // instruction by accumulation — a note that fires on every coder's task is
+      // indistinguishable from the system prompt, which is the specific
+      // outcome the whole marking scheme exists to prevent.
+      const recall = this.recallForTask({
+        files: node.task.files.include,
+        text: `${node.task.name}\n${node.task.description}`,
+      })
+      if (recall.block) {
+        taskPrompt += `\n\n${recall.block}`
+        this.lastRecall = {
+          agentId: agent.id,
+          taskId: node.id,
+          taskName: node.task.name,
+          notes: recall.shown,
+          characters: recall.characters,
+        }
+      } else {
+        this.lastRecall = null
+      }
 
       if (transferContext) {
         taskPrompt += `\n\n## Previous Agent Context (from failed agent ${transferContext.previousAgentId})`
@@ -3100,6 +3291,40 @@ export class NexusOrchestrator {
     // delivers it — that is the single delivery point (no second prompt).
     const taskText = options?.task || config.task?.description || config.task?.name || ''
 
+    // Recollections are appended HERE, and only when `options.task` is present.
+    //
+    // `options.task` is the precise discriminator: only `spawnAndDeliver` in
+    // `index.ts` passes it, and only those two paths (plus the degraded re-prompt
+    // they perform) are delivered from inside this method. Every other caller —
+    // the DAG's `spawnAndExecute`, and the model-fallback respawn — passes no
+    // options and has its prompt sent afterwards by `executeTask`, which does
+    // its own recall. Gating on the flag is what keeps that to ONE store read
+    // per task instead of two, and what keeps a DAG prompt from carrying the
+    // same block twice.
+    //
+    // Composing in one place is also what closes the third delivery point. The
+    // degraded `ctx.session.prompt` in `index.ts` re-sends this text and used
+    // to read `opts.task` directly, bypassing `taskText` — so "injected on
+    // spawn" was true of one of the two tool paths. It now reads
+    // `agent.deliveredText`, which is the composed string.
+    //
+    // No `Task` and therefore no `files.include` on this path: `config.task` is
+    // usually undefined here and the caller passed a string. `spawnAgent` is
+    // given both, so retrieval falls back to paths named inside the text and
+    // then to distinctive words. That is a weaker signal than a declared file
+    // scope, and the difference is the honest cost of this path having no
+    // `Task` object.
+    const deliversTextHere = options?.task !== undefined
+    const recall = deliversTextHere
+      ? this.recallForTask({
+          files: config.task?.files.include ?? [],
+          text: options?.task || '',
+        })
+      : null
+    const deliveredText = recall?.block
+      ? `${taskText}\n\n${recall.block}`
+      : taskText
+
     let spawnPath: SpawnPath = 'session-create'
     let childSessionID: string
 
@@ -3114,7 +3339,7 @@ export class NexusOrchestrator {
         tool: subagentTool,
         agent: agentType,
         description: title,
-        prompt: taskText,
+        prompt: deliveredText,
         model: modelConfig,
         parent,
         callID: agentId,
@@ -3163,6 +3388,13 @@ export class NexusOrchestrator {
       name: title,
       role: config.role,
       status: 'idle',
+      // What this method actually delivered, with any recollection block already
+      // appended. A caller that re-sends the task itself MUST send this rather
+      // than the caller's original string: that is how the degraded
+      // `ctx.session.prompt` in `index.ts` stays on the same text the subagent
+      // path would have delivered, and it is why the degraded path is covered
+      // rather than documented as a gap.
+      deliveredText,
       model: {
         provider,
         model: modelName || 'default',
@@ -3185,6 +3417,23 @@ export class NexusOrchestrator {
     }
 
     this.agents.set(agentId, agent)
+
+    // Recorded on the tool path only, because that is the only path where
+    // `spawnAgent` performs the recall. `executeTask` records its own for the
+    // DAG path, so `lastRecall` always describes the most recent spawn that
+    // actually injected something, and is null when the last one injected
+    // nothing.
+    if (recall) {
+      this.lastRecall = recall.block
+        ? {
+            agentId,
+            taskId: agentId,
+            taskName: options?.task || 'direct-spawn',
+            notes: recall.shown,
+            characters: recall.characters,
+          }
+        : null
+    }
 
     // Auto-add todo for the spawned task
     const taskDesc = config.task?.name || `Agent ${config.role} task`
@@ -3752,20 +4001,241 @@ export class NexusOrchestrator {
 
   // === Memory ===
 
+  /**
+   * The one seam between a task and the memory store.
+   *
+   * The alias on the import (`runRecall`) is deliberate: the pure function in
+   * `src/memory-recall.ts` and this method do the same thing at different
+   * layers, and giving them the same name would make `recallForTask(...)` in
+   * the body below ambiguous to read — this class's own method is spelled
+   * `this.recallForTask`.
+   *
+   * Every automatic read goes through here, so there is one place that decides
+   * what a task is allowed to be reminded of. `src/memory-recall.ts` holds the
+   * policy; this holds the wiring and nothing else, which is the same split
+   * `src/git-flow.ts` establishes for the git convention.
+   *
+   * Cost: one synchronous SQLite read per task, on the spawn path and not on
+   * the token-read path. The real cost is tokens — the block is prepended to
+   * the prompt and `readSessionTokens` counts it in `input`, so the BILL is
+   * accurate, but nothing else says how much of a task's input was
+   * recollection. `lastRecall` reports it so a prompt-weight regression is
+   * visible rather than inferred from a cost line.
+   *
+   * A FAILED READ DEGRADES TO SILENCE, and is reported. The store is closed by
+   * `shutdown()`, and a spawn that races teardown would otherwise throw out of
+   * prompt construction and take the task with it — which is exactly what
+   * `test/task-cost.test.ts`'s "a task that times out after teardown" asserts
+   * must not happen. Recollection is an enhancement; no enhancement is worth an
+   * aborted task. The `console.warn` is what keeps the degradation from being
+   * invisible: to the agent a failed read and a miss look the same, and only
+   * one of them is a problem.
+   */
+  recallForTask(request: RecallRequest): RecallOutcome {
+    try {
+      return runRecall(this.memoryStore, request)
+    } catch (err) {
+      console.warn(
+        `[nexus] memory: could not read the memory store (${err instanceof Error ? err.message : String(err)}). `
+        + 'No recollections were injected for this task. The store is most likely closed by shutdown().'
+      )
+      return { block: null, matched: 0, shown: 0, characters: 0 }
+    }
+  }
+
+  /**
+   * What the most recent spawn injected, or `null` if it injected nothing.
+   *
+   * Null is the common case and is not a failure: the store is empty by default,
+   * so until a human writes the first note every task recalls nothing. That is
+   * the intended cold start, and a reader who sees `null` here is seeing the
+   * feature working, not broken.
+   */
+  getLastRecall(): LastRecall | null {
+    return this.lastRecall
+  }
+
+  /**
+   * Append one entry and announce it.
+   *
+   * `confidence` is `null`, and was `1.0`. A hardcoded 1.0 is a claim nobody
+   * made: the orchestrator did not know how sure it was about a blob it
+   * assembled from a failure, and recording 1.0 in a column the retrieval path
+   * renders made an absent confidence indistinguishable from a considered one.
+   * `null` renders as "not stated" and means exactly that. See
+   * `MemoryEntry.confidence`.
+   *
+   * THE ONE AUTOMATIC WRITE IN THE WHOLE FEATURE, and it is not one: this is the
+   * escalation context transfer, it writes `scope: 'session'`, and `session` is
+   * excluded from automatic injection on two independent grounds. The governing
+   * principle is that nothing is written without someone asking, and the one
+   * exception is a transfer between two attempts at the SAME task — written and
+   * consumed within one escalation, for the same agent, and never surfaced to a
+   * task that did not cause it.
+   */
   setMemory(scope: MemoryScope, key: string, value: unknown, author: string): void {
     const entry = this.memoryStore.set({
       key,
       value,
       scope,
       author,
-      confidence: 1.0,
+      confidence: null,
       tags: []
     })
+    this.notifyMemoryWritten(entry)
+  }
+
+  /**
+   * Announce a write that went through the store directly.
+   *
+   * The single place a write is announced, so the `memory:set` broadcast and
+   * the eviction report cannot diverge between the two writers. `setMemory` and
+   * the `memory.set` TOOL both come through here, and a third writer added
+   * later has one function to call rather than two things to remember.
+   *
+   * Public because the tool holds the store, not this class's private handle on
+   * it — the tool writes through `orchestrator.memoryStore` and announces
+   * through here.
+   */
+  notifyMemoryWritten(entry: MemoryEntry): void {
     this.emit('memory:set', entry)
+    this.announceEviction()
+  }
+
+  /**
+   * Report an eviction, loudly, at the moment it happens.
+   *
+   * Eviction is never silent: a note that vanished with no output is a note the
+   * user assumes was never written, and then never writes again. Three
+   * surfaces carry it — a `console.warn` in the terminal, the running total in
+   * `getMemoryEvictionTotals()`, and the `memory.set` TOOL RESULT, which is the
+   * one that reaches the person who caused the loss, at the moment they caused
+   * it.
+   *
+   * WHY THIS IS NOT AN ORCHESTRATOR EVENT, which the design asked for and which
+   * this deliberately does not do.
+   *
+   * `test/broadcast-event-coverage.test.ts` asserts BOTH directions against the
+   * SOURCE TEXT of this file: every event name handed to the emitter must appear
+   * in `BROADCAST_EVENTS`, and every name in `BROADCAST_EVENTS` must be emitted
+   * here. So a new event name cannot be added here alone — it also needs a line
+   * in `src/broadcast.ts`, and then `test/dashboard-page-contract.test.ts`
+   * requires `dashboard/index.html` to carry a matching `case` label for it. The
+   * dashboard page is outside this change's file scope, so the event is not
+   * added rather than added half-way, where it would fail a test or reach a
+   * client the page could not render.
+   *
+   * (That test parses the source rather than the AST, so it also reads event
+   * names out of COMMENTS. This paragraph therefore names the event as
+   * `memory:evicted` in backticks and never as a call — a doc comment that
+   * quotes the emitter is indistinguishable from a call site to it.)
+   *
+   * The follow-up, when the dashboard page is next edited, is exactly three
+   * things: the name added to `BROADCAST_EVENTS` in `src/broadcast.ts`, a
+   * `case` for it in the page's message switch, and its three fields added to
+   * the payload contract in `test/dashboard-page-execution.test.ts`. The
+   * `console.warn` below and the `memory.set` tool result are what stand in
+   * until then, and neither loses information — the event would have carried
+   * the same three fields.
+   */
+  private announceEviction(): void {
+    const eviction = this.memoryStore.takeEviction()
+    if (!eviction) return
+    const when = eviction.oldestEvictedAt ? eviction.oldestEvictedAt.toISOString() : 'unknown'
+    console.warn(
+      `[nexus] memory: evicted ${eviction.count} entrie(s) from scope "${eviction.scope}" to stay within ` +
+      `maxEntries (oldest removed was written ${when}). ${COUNT_EXEMPT_SCOPES_LABEL} is never evicted by count.`
+    )
+  }
+
+  /**
+   * Cumulative per-scope evictions this process has performed.
+   *
+   * Process-scoped, not durable: it resets on restart and therefore
+   * UNDER-reports across restarts. `memory.list` says so when it prints this.
+   */
+  getMemoryEvictionTotals(): Record<string, number> {
+    return this.memoryStore.getEvictionTotals()
   }
 
   getMemory(scope: MemoryScope, key: string): MemoryEntry | undefined {
     return this.memoryStore.get(key, scope) ?? undefined
+  }
+
+  /**
+   * Every version stored under a key, oldest first, and how many of them there
+   * are.
+   *
+   * `set` appends rather than upserting, so a corrected note leaves the old one
+   * readable and "how many versions of this key exist" is a real question a
+   * user needs answered. The count is returned alongside rather than left for a
+   * caller to infer from a list length, because the number is the part a user
+   * reads and the list is the part they skim.
+   */
+  versionsOfMemory(scope: MemoryScope, key: string): { entries: MemoryEntry[]; count: number } {
+    const entries = this.memoryStore.getByKey(key, scope)
+    return { entries, count: entries.length }
+  }
+
+  /**
+   * Search notes, with the scope the caller is allowed to see.
+   *
+   * THE ALLOWLIST IS A PARAMETER, NOT A CONSTANT INSIDE THIS METHOD, and the
+   * reason is D1: the underlying `search` matches over VALUES as well as keys,
+   * and a `session` entry is `collectContext(agent)` — an escalation blob that
+   * nests the failing agent's own memory entries inside itself. The moment a
+   * search tool exists, a user asking what nexus remembers about retries gets
+   * back another agent's failure log rendered as though it were a note about
+   * their project.
+   *
+   * So the tool passes `['project']` by default and `['project', 'session']` when
+   * a user explicitly asks to include internal escalation context, and labels
+   * those hits as internal when it does. `learning` is never offered: it is an
+   * unused string in this table that shares a name with a different, unpersisted
+   * mechanism (`src/learning.ts`).
+   */
+  searchMemory(query: string, scopes: readonly MemoryScope[]): MemoryEntry[] {
+    // De-duplicated because a key can appear in two eligible scopes, and a
+    // result list that shows the same note twice reads as two notes.
+    const seen = new Set<string>()
+    const out: MemoryEntry[] = []
+    for (const scope of scopes) {
+      for (const entry of this.memoryStore.search(query, scope)) {
+        if (seen.has(entry.id)) continue
+        seen.add(entry.id)
+        out.push(entry)
+      }
+    }
+    return out.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
+  }
+
+  /**
+   * The newest version of every key in a scope, newest first.
+   *
+   * `getByScope` returns every VERSION, and with an appending store a key
+   * corrected three times appears three times. A listing that shows three rows
+   * for one note is worse than one that shows the note and says how many
+   * versions it has, so this collapses to the newest and reports the rest.
+   */
+  listMemory(scope: MemoryScope, limit: number): { entries: MemoryEntry[]; versionsSuperseded: number } {
+    const all = this.memoryStore.getByScope(scope)
+    const newest = new Map<string, MemoryEntry>()
+    for (const entry of all) {
+      const held = newest.get(entry.key)
+      // Compared by id, not by timestamp and not by arrival order. Both of those
+      // were wrong here and one of them was wrong intermittently: two writes in
+      // the same millisecond share a timestamp, and `getByScope` returns
+      // newest-first, so a plain assignment kept the OLDEST version — a user who
+      // corrected a note was shown the text they had replaced, on about half the
+      // runs. `isNewerThan` has no ties.
+      if (!held || isNewerThan(entry, held)) {
+        newest.set(entry.key, entry)
+      }
+    }
+    const collapsed = [...newest.values()]
+      .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
+      .slice(0, limit)
+    return { entries: collapsed, versionsSuperseded: all.length - collapsed.length }
   }
 
   // === Query ===

@@ -62,6 +62,62 @@ export interface NexusNotificationsConfig {
 }
 
 /**
+ * Whether the orchestrator steers agents into a conventional
+ * branch/commit/PR path.
+ *
+ * FILE-SETTABLE, and merged field by field for the same reason `dashboard` is:
+ * a level that sets only `enabled` must not blank out the three toggles
+ * resolved beneath it. It was spread-merged once, and the result was a level
+ * setting `gitFlow: { "enabled": false }` silently resetting the convention
+ * toggles to their defaults — the dashboard block's lost-sibling bug reached by
+ * a different route.
+ *
+ * EVERY KEY HERE IS READ. That is the design constraint, not an accident: a
+ * knob that reads as a control and is inert is worse than no knob, and this
+ * repository has shipped two of them (`dashboard.enabled` and
+ * `notifications.enabled`, both dead until 2.7.0). Each of the four resolves
+ * through the ONE gate in `src/git-flow.ts` (`resolveGitFlow`), and each is
+ * spelled out in the generated agent markdown.
+ */
+export interface NexusGitFlowConfig {
+  /**
+   * Whether the convention applies at all.
+   *
+   * The bottom of the gate, and the only key that turns everything off. An
+   * OFF per-repo decision still wins over a `true` here — the more specific
+   * statement beats the more general one.
+   */
+  enabled: boolean
+  /**
+   * Whether commit subjects are held to Conventional Commits.
+   *
+   * Read twice: it decides whether the conventional-commit rule appears in the
+   * generated agent markdown, and whether `nexus.git.check` validates subjects
+   * at all. Turning it off does not make a non-conventional commit good; it
+   * stops the layer from claiming it is bad.
+   */
+  conventionalCommits: boolean
+  /**
+   * Whether agents are told to work on a branch rather than on the default one.
+   *
+   * Read once, in the agent-markdown section. Also the reason the report says
+   * "detached HEAD, so there is nothing to enforce" rather than failing: a
+   * checkout that cannot hold a branch is not a rule violation, it is an
+   * environment that has no place for the rule.
+   */
+  requireBranch: boolean
+  /**
+   * Whether agents are told to open a pull request rather than merge into the
+   * branch they are on.
+   *
+   * Read once, in the agent-markdown section. The check does NOT enforce it:
+   * whether a PR is open is not knowable from a local checkout, and the report
+   * says so rather than guessing from the presence of a remote.
+   */
+  prBeforeMerge: boolean
+}
+
+/**
  * One entry of the `customRoles` block, as authored in `nexus.jsonc`.
  *
  * This is the SHAPE A WELL-FORMED ENTRY HAS, not a promise that the file
@@ -104,6 +160,7 @@ export interface NexusFullConfig {
   }
   dashboard: NexusDashboardConfig
   notifications: NexusNotificationsConfig
+  gitFlow: NexusGitFlowConfig
   customRoles: NexusCustomRoleConfig[]
 }
 
@@ -347,6 +404,17 @@ const DEFAULT_CONFIG: NexusFullConfig = {
   notifications: {
     enabled: true
   },
+  // On by default, for the reason spelled out at the one gate in
+  // `src/git-flow.ts`: the convention validates rather than blocks, and nothing
+  // in that file writes to git. Kept identical to the orchestrator's own
+  // `NexusConfig.gitFlow` defaults so the two agree when neither a config file
+  // nor a constructor says otherwise.
+  gitFlow: {
+    enabled: true,
+    conventionalCommits: true,
+    requireBranch: true,
+    prBeforeMerge: true
+  },
   // Empty rather than absent: a user with no custom roles is the default, and
   // an empty list is what every merge level falls through to, so "no
   // `customRoles` block anywhere" and "an empty one" resolve the same way.
@@ -386,6 +454,14 @@ export class NexusConfigManager {
    */
   private notificationsBase: NexusNotificationsConfig
   /**
+   * Programmatic starting point for the `gitFlow` block, beneath the file
+   * levels and above `DEFAULT_CONFIG`. Same single-consumer rationale as
+   * `dashboardBase`: the orchestrator seeds it from its own constructor config
+   * and every consumer reads the merged result, so the setting is readable from
+   * one place with a defined precedence rather than two without one.
+   */
+  private gitFlowBase: NexusGitFlowConfig
+  /**
    * Programmatic starting point for the `customRoles` block, beneath the file
    * levels and above `DEFAULT_CONFIG`. Same single-consumer rationale as
    * `dashboardBase`.
@@ -400,7 +476,8 @@ export class NexusConfigManager {
   constructor(
     dashboardBase?: Partial<NexusDashboardConfig>,
     notificationsBase?: Partial<NexusNotificationsConfig>,
-    customRolesBase?: readonly NexusCustomRoleConfig[]
+    customRolesBase?: readonly NexusCustomRoleConfig[],
+    gitFlowBase?: Partial<NexusGitFlowConfig>
   ) {
     // Config files are loaded later via loadFromPath(basePath)
     this.projectConfig = null
@@ -408,6 +485,7 @@ export class NexusConfigManager {
     this.dashboardBase = { ...DEFAULT_CONFIG.dashboard, ...dashboardBase }
     this.notificationsBase = { ...DEFAULT_CONFIG.notifications, ...notificationsBase }
     this.customRolesBase = customRolesBase ? customRolesBase.map(role => ({ ...role })) : []
+    this.gitFlowBase = { ...DEFAULT_CONFIG.gitFlow, ...gitFlowBase }
   }
 
   /**
@@ -538,6 +616,21 @@ export class NexusConfigManager {
       notifications: {
         enabled: this.storageConfig?.notifications?.enabled ?? this.projectConfig?.notifications?.enabled
           ?? this.globalConfig?.notifications?.enabled ?? this.notificationsBase.enabled
+      },
+      // Field by field, for the same reason as `dashboard` above: a level that
+      // sets only `enabled` must not blank out its siblings. All four keys are
+      // merged independently so `{ "gitFlow": { "enabled": false } }` in a
+      // project file turns the convention off WITHOUT also resetting
+      // `conventionalCommits` to true on top of a global file that set it false.
+      gitFlow: {
+        enabled: this.storageConfig?.gitFlow?.enabled ?? this.projectConfig?.gitFlow?.enabled
+          ?? this.globalConfig?.gitFlow?.enabled ?? this.gitFlowBase.enabled,
+        conventionalCommits: this.storageConfig?.gitFlow?.conventionalCommits ?? this.projectConfig?.gitFlow?.conventionalCommits
+          ?? this.globalConfig?.gitFlow?.conventionalCommits ?? this.gitFlowBase.conventionalCommits,
+        requireBranch: this.storageConfig?.gitFlow?.requireBranch ?? this.projectConfig?.gitFlow?.requireBranch
+          ?? this.globalConfig?.gitFlow?.requireBranch ?? this.gitFlowBase.requireBranch,
+        prBeforeMerge: this.storageConfig?.gitFlow?.prBeforeMerge ?? this.projectConfig?.gitFlow?.prBeforeMerge
+          ?? this.globalConfig?.gitFlow?.prBeforeMerge ?? this.gitFlowBase.prBeforeMerge
       },
       // NOT field by field, because an array has no fields to merge. The
       // highest-precedence level that DEFINES the block wins wholesale, which
@@ -767,6 +860,13 @@ export class NexusConfigManager {
     // Notifications — same reason, and with `enabled: false` this is the
     // setting a user is most likely to have deliberately turned off.
     result.notifications = { ...current.notifications }
+
+    // Git flow — same reason, and all four fields rather than one: a block
+    // written out partially would let the next `saveProjectConfig` silently
+    // restore a convention the user had turned off. Omitting the block
+    // ENTIRELY is the worse case, and it is what an omission here produces:
+    // `saveProjectConfig()` writes the RETURNED object as the whole file.
+    result.gitFlow = { ...current.gitFlow }
 
     // Custom roles — same reason. This one is the whole block: a
     // `customRoles` array omitted here is every role the user wrote deleted

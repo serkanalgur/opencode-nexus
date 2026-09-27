@@ -38,7 +38,7 @@ OpenCode Nexus is an agent orchestration plugin for [OpenCode V2](https://openco
 | **TUI Dashboard** | Monitor agents, budget, and config from the terminal |
 | **Team Mode** | Lead agent orchestrates specialist agents in parallel |
 | **Todo & Goal Tracking** | Enforce task completion, persist objectives across sessions |
-| **Persistent Memory** | SQLite-backed memory store with per-entry TTL (off by default) and substring search. Reachable from the orchestrator API, not from a registered tool |
+| **Persistent Memory** | SQLite store, three tools, and automatic retrieval of notes keyed to a task's files. **Nothing is ever written automatically** — a miss injects silence, never a guess |
 | **Learning Module** | Pattern recognition from failures, confidence scoring |
 | **JSONC Config** | Read/write project and global config files with comments |
 | **OpenCode LSP opt-in** | On startup, inserts `"lsp": true` into your global `opencode.jsonc` if it isn't already there. That is the whole of it — Nexus does not read LSP state, manage servers, or report anything about them |
@@ -324,15 +324,125 @@ nexus.security.scan(content="const API_KEY = \"sk-123\"", filename="config.ts")
 
 ### Persistent Memory
 
-SQLite-backed memory store that survives restarts. Entries never expire unless
-you pass a per-entry `ttl` — the store's `defaultTTL` is `0` — and `search` is
-a `LIKE '%q%'` substring match, not a full-text or ranked search. Reachable
-through the orchestrator API (`orchestrator.memoryStore`); no registered tool
-exposes it.
+A SQLite store at `~/.local/share/opencode-nexus/memory.db` that survives
+restarts, plus three tools (`memory.set`, `memory.search`, `memory.list`) and
+**automatic retrieval**: when a task is about to run, notes keyed to the files
+that task touches are placed in the agent's prompt.
+
+The governing rule, and the reason the automatic half exists at all:
+
+> **Memory does not speak over what the code says. It says what the code does
+> not.** Writes are explicit, attributed and timestamped. There is **no
+> automatic writing**.
+
+A miss injects silence, never a guess. That asymmetry is the whole argument for
+retrieval over a tool: an agent that forgets to call `memory.search` fails
+silently, an injection that misses also fails silently, and only one of them
+cannot invent a claim about your codebase.
+
+#### Writing a note
+
+```bash
+nexus.memory.set(
+  key="file:src/memory-store.ts",
+  value="set() appends rather than upserts — the primary key is a fresh id",
+  author="alice"
+)
+```
+
+**Nothing is injected unless the key is `file:<path>`.** One convention, and a
+note that misses it is a note that is silently never shown. `memory.set` says so
+in its result, and tells you the key to use instead. Any other key is still
+stored, and is reachable through `memory.search` and `memory.list`.
+
+`author` is required and **self-reported** — nothing verifies it, and it is
+shown to readers as a claim rather than a record. `confidence` is optional on
+purpose: an entry that records no confidence is not a low-confidence entry, and
+a default would make your uncertainty invisible to whoever reads it later.
+
+#### `set` appends
+
+Writing the same key twice leaves **both** versions readable. The newest is the
+one agents are shown, and the injected block says how many earlier versions it
+supersedes. This is deliberate: it keeps the store able to answer *"when did we
+believe this?"*, which is the question a stale-memory bug always turns out to
+be. `memory.search` returns both versions rather than hiding one, because
+`memory.set` told you it kept them.
+
+**There is no `memory.delete` tool.** Removal is API-only
+(`orchestrator.memoryStore.delete(key, scope)`), because an agent that finds a
+note inconvenient will delete it to unblock itself, and there is no
+confirmation step an agent honours. **So there is no in-product way for a
+non-programmer to remove a wrong note** — correcting it means writing a new
+version. If this feature gets used enough for that gap to matter, a dashboard
+affordance is the first thing to build.
+
+#### What is injected, and how it is marked
+
+Up to 5 notes, 800 characters, 240 per value. The block opens by describing
+itself, every line carries an author and a **relative** age (`written 6 weeks
+ago` — a date is a fact that goes stale silently; an age degrades), and the
+value sits inside a quoted, attributed line.
+
+The quotation is the load-bearing part. A stored value can contain an
+imperative — someone will write *"always run `bun run migrate` first"* — and
+because it is quoted and attributed, it reads as a quotation of a note rather
+than a directive. The other three mechanisms (register, attribution, position
+after the task) are conventions an agent can talk past; this one is structure.
+
+Truncation is announced in the block (`showing 3 of 9 notes`). A block that
+silently shows three of nine reads as "those were all of them".
+
+Only `scope: 'project'` is ever injected, for two independent reasons: only
+`project` is written by a human, and a `session` entry is an escalation blob
+that nests the failing agent's own memory entries inside itself. Only the
+`project` scope is writable by the tool; `session` belongs to the orchestrator's
+own context transfer and `learning` is the name of a different, automatically
+written mechanism (see below).
+
+#### Five things this feature will not tell you
+
+1. **It is inert on day one, for everyone.** The store ships empty, so the first
+   release injects nothing anywhere. The tools are the day-one value; the
+   injection is what makes a written note *sticky*.
+2. **It only fires on a file the writer named.** With ~10 hand-written entries,
+   expect 1–3 to fire on any given task.
+3. **It will not tell you when a note has gone stale, because nothing in the
+   system can.** There is no automatic writing, so no mechanism revalidates,
+   refreshes or expires a note.
+4. **Every matching task pays that cost forever**, for a note a human wrote once
+   and may never have checked.
+5. **A stale note that is confidently wrong is worse than no note.** The
+   `speedScore` precedent above is this at release scale.
+
+#### Storage, eviction, and the rest of the details
+
+Entries never expire unless you pass a per-entry `ttl`, and for `project` notes
+that is deliberate: nothing rewrites a note, so an expiry would delete it
+permanently. `search` is a `LIKE '%q%'` substring match over keys **and**
+values, unranked — a result count is a hit count, never a relevance count.
+
+Per-scope caps are enforced (1000 by default) and **eviction is never silent**:
+it is reported by `memory.list`, in a `console.warn`, and in the `memory.set`
+result that caused it. The `project` scope is **exempt** — evicting a durable
+note because disposable `temp` entries arrived would be the wrong trade. Those
+eviction totals are per-process and reset on restart, so they under-report
+across runs; `memory.list` says so.
+
+Two removed knobs, rather than wired: `MemoryStoreConfig.defaultTTL` and the
+`NexusConfig.memory` block. Both were read by nothing, and an `enabled: false`
+that does not disable anything is worse than no block — a user who sets it
+believes they have turned something off. `NexusConfig.memory` is a **breaking
+type change**; delete the block, because it was already inert.
+
+The database file is the most exposed and least marked surface: it is a plain
+SQLite file whose only provenance is the `author` column. The dashboard activity
+log deliberately does **not** render stored values — only which key, in which
+scope, by whom.
 
 ```typescript
 orchestrator.memoryStore.set({
-  key: 'api-pattern',
+  key: 'file:api-pattern',
   value: { endpoint: '/users', method: 'GET' },
   scope: 'project',
   author: 'architect',
@@ -438,10 +548,14 @@ installed with the package — treat it as a repo document, not a shipped featur
 | `nexus.performance.best` | Best model for role | `{ role }` |
 | `nexus.history.list` | Execution history | `{ count? }` |
 | `nexus.history.stats` | Execution statistics | `{}` |
+| `nexus.memory.set` | Write a durable note. The only way in — nothing is ever written automatically, and nothing is injected into a task's prompt unless the key is `file:<path>`. **Appends**, so a correction is a new version rather than a replacement | `{ key, value, author, scope?: 'project' \| 'temp', confidence?, tags?, ttl? }` — `scope` defaults to `project`; `session` and `learning` are not writable. Omit `confidence` if you are unsure: an entry with no confidence is not a low-confidence entry |
+| `nexus.memory.search` | Substring search over keys **and** values. Unranked, so a result count is hits, not relevance, and nothing is verified against the code. Project scope only by default | `{ query, includeSession? }` — `includeSession: true` also returns internal escalation context, labelled as such and never injected into a task |
+| `nexus.memory.list` | List notes in a scope, newest version of each key first, with entry counts by scope and anything evicted for exceeding a per-scope cap | `{ scope?: 'project' \| 'session' \| 'temp', limit? }` — `limit` defaults to 50 |
 | `nexus.astgrep.search` | Search AST patterns | `{ pattern, language, directory }` |
 | `nexus.astgrep.status` | Check ast-grep install | `{}` |
 | `nexus.security.scan` | Scan for security issues | `{ content, filename? }` |
 | `nexus.clarify` | Format a clarifying question and return it to the model (it does not query the user) | `{ question, options?, assumption? }` |
+| `nexus.git.check` | Report the git convention for this repository: branch, conventional commit subjects, uncommitted work, whether the branch is published. Read-only — runs no `git commit`/`push`/`merge` and never refuses. Asks once per repository, and `decision` records the answer | `{ decision?: 'on' \| 'off', cwd? }` — omit `decision` to just report; `cwd` defaults to the working directory |
 | `nexus.worktree.enable` | Enable worktree isolation | `{ repoRoot? }` |
 | `nexus.worktree.list` | List worktrees | `{}` |
 | `nexus.worktree.disable` | Disable worktrees | `{}` |
@@ -531,6 +645,87 @@ than attempted.
 both the detailed and the summary branch. `nexus.notifications.test` sends one
 probe and reports whether the OS notifier accepted it and, if not, why; the
 probe is deliberately not counted in `sent`/`failed`.
+
+### Git Flow
+
+On by default, and **validating rather than blocking**: it tells agents what
+convention to follow and reports where you stand, but nothing in Nexus ever runs
+`git commit`, `git push` or `git merge` on your behalf.
+
+`.opencode/nexus.jsonc` (project) and `~/.config/opencode/nexus.jsonc` (global)
+both accept:
+
+```jsonc
+{
+  "gitFlow": {
+    "enabled": true,              // master switch; removes the convention entirely
+    "conventionalCommits": true,  // hold commit subjects to the Conventional Commits form
+    "requireBranch": true,        // tell agents to work on a branch, not the default one
+    "prBeforeMerge": true         // tell agents to open a PR rather than merge
+  }
+}
+```
+
+All four default to `true`. The block is merged **field by field** across the
+storage (TUI) > project > global > constructor levels, so a level that sets only
+`enabled` does not blank out the three toggles resolved beneath it.
+
+Every key is read. `requireBranch`, `conventionalCommits` and `prBeforeMerge`
+each control one clause of the generated agent markdown — switch one off and
+that clause is not emitted. `enabled` is the master switch and the one place the
+convention is decided; an off answer recorded for a specific repository
+(see below) still wins over `enabled: true`, because the more specific statement
+does.
+
+**Where the convention lands.** The six generated subagent files in
+`~/.config/opencode/agents` (`nexus-architect`, `-coder`, `-explorer`, `-tester`,
+`-reviewer`, `-documenter`) are rewritten on every plugin load, so a hand-edit
+there does not survive a restart. That is what makes them the durable place for
+a convention, and each of the six gains a `## Git Convention` section when the
+convention is active *and* the working directory is a git work tree on a branch.
+Outside a repository, or on a detached HEAD, the files are written exactly as
+before and the section is absent — the condition is deliberate, because
+unconditionally telling an agent to work on a branch in a directory that has no
+branches is worse than saying nothing.
+
+`nexus-orchestrator.md`, the primary agent, is written separately and does not
+carry the section: the convention is directed at the subagents that write code,
+and the primary agent's job is to delegate to them.
+
+The cost of that choice, stated plainly: those files are global and shared by
+every project you run Nexus in, so this is not project-scoped guidance, and two
+projects open at once will overwrite each other's copy.
+
+**Asking once per repository.** Nexus cannot prompt a subagent — a subagent is
+driven by tool calls and has no other channel to you — so the ask travels out
+through the tool result: `nexus.git.check` tells the agent to ask you, and the
+agent relays it in its own next message. The answer is recorded by calling the
+same tool with `decision: "on"` or `decision: "off"`, and is stored globally in
+`~/.config/opencode/nexus-gitflow.json`, keyed by repository. It is deliberately
+not written into your repository (no untracked file for you to gitignore) and not
+into `nexus.jsonc` (a per-repository map is not something one project file can
+describe). Two worktrees of the same repository share one answer.
+
+If you never answer, the convention stays **on**. The reasoning: the cost of
+guessing wrong is a report that says `conventional: false` about three commits,
+which a reader ignores, while defaulting off would leave the feature inert for
+every user who does not answer.
+
+**What `nexus.git.check` checks, and what it does not.** It reports:
+
+- whether HEAD is on a feature branch, and which;
+- whether the commit subjects on **this branch since it diverged from its base**
+  are conventional — the same set a pull request would contain, not the whole
+  history, and capped at the 50 most recent commits with the cap stated in the
+  report when it bites;
+- whether the branch is published to a remote, and whether you have uncommitted
+  work;
+- which ref it used as the base, because the base decides the verdict.
+
+It does **not** determine whether a pull request is *open* — that is not knowable
+from a local checkout without querying the forge, so the report says so rather
+than inferring it from the presence of a remote. It runs no git write, refuses
+nothing, and says both in its own output.
 
 ### Config Diagnostics
 
@@ -645,6 +840,65 @@ bun test
 # Type check
 bun run typecheck
 ```
+
+---
+
+## Release Notes
+
+### Unreleased — memory retrieval
+
+**Added**
+
+- `nexus.memory.set` / `search` / `list`. Memory was reachable only through
+  `orchestrator.memoryStore`; it now has a tool surface.
+- **Automatic retrieval at spawn.** A task whose declared file scope (or whose
+  prose names a path) matches a note keyed `file:<path>` gets that note in its
+  prompt, marked as recollection, with an author, a relative age, and the value
+  quoted. Capped at 5 notes / 800 characters. See
+  [Persistent Memory](#persistent-memory) for the key convention and the five
+  things this feature will not tell you.
+- Enforced per-scope entry caps, with `project` **exempt**, and eviction
+  reported by `memory.list`, by `console.warn`, and in the `memory.set` result
+  that caused it.
+- `getByKey` is now ordered (`timestamp`, then a monotonic id), so "the newest
+  version of a key" is a contract rather than an accident of rowid order. Two
+  writes in the same millisecond previously had their winner chosen by
+  `Math.random()`.
+
+**Changed / removed**
+
+- **BREAKING: the `NexusConfig.memory` block is gone** (`enabled`, `storage`,
+  `maxEntriesPerScope`, `syncInterval`). Nothing read any of it — `enabled` was
+  never a gate on anything. Delete it from your config; it was already inert.
+- `MemoryStoreConfig.defaultTTL` is gone, also unread. With no automatic
+  writing, an expiry would delete a note permanently, so "nothing expires" is
+  the honest default and a knob offering otherwise was a lie.
+- `MemoryEntry.confidence` is now `number | null`. It was `REAL DEFAULT 1.0` and
+  `setMemory` hardcoded `1.0`, so every entry carried a confidence nobody had
+  expressed.
+- `PersistentMemoryStore.search(query, scope?)` takes an optional scope. It had
+  none, so a search tool would have returned another agent's escalation blob
+  rendered as a note. `memory.search` is `project`-only by default, with
+  `includeSession` as a labelled opt-in.
+- Added `PersistentMemoryStore.path`, `takeEviction()`, `getEvictionTotals()`, and
+  the exported `isNewerThan()`.
+
+**Known gap, stated rather than discovered**
+
+- **There is no in-product way to remove a wrong note.** `memory.delete` is
+  API-only by design — an agent that finds a note inconvenient will delete it to
+  unblock itself, and there is no confirmation step an agent honours. Correcting
+  a note means writing a new version, which supersedes the old one and keeps it
+  readable. **This is the first thing to build if the feature gets used enough
+  for it to matter.**
+
+**Not done, and why**
+
+- Eviction is not an orchestrator event. `test/broadcast-event-coverage.test.ts`
+  requires every emitted event to be in `BROADCAST_EVENTS`, which would then
+  require a `case` in `dashboard/index.html`. That file was out of scope for this
+  change, so eviction is reported through a `console.warn`, a counter, and the
+  tool result instead. The follow-up is three lines.
 
 ---
 
