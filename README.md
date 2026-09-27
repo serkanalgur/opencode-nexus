@@ -196,10 +196,17 @@ both accept:
   "effort": {
     "enabled": false,        // master switch; nothing below is consulted when off
     "maxEffort": "high",     // ceiling: none, minimal, low, medium, high, xhigh, max
-    "minDifficulty": 0       // 0-100; below this, no effort is chosen at all
+    "minDifficulty": 0       // 0-100; a task must REACH this to be given any effort
   }
 }
 ```
+
+**The rule, as one sentence.** A task is asked for the highest published level at
+or below `min(difficultyBucket(overall), maxEffort)`, and is asked for **nothing**
+only when `overall < minDifficulty`. The threshold is the single setting that
+says "too easy to bother"; the difficulty table never says it, and its lowest
+bucket is the floor `low`. The threshold is checked at `src/orchestrator.ts:4279`
+and the ceiling is taken as the lower of the two at `src/orchestrator.ts:4288`.
 
 **Higher effort means more reasoning tokens at the same per-token rate.** It
 does not make a token cheaper or dearer, so nothing in the cost arithmetic
@@ -212,12 +219,26 @@ their only axis is context size.
 **What "how hard" means.** The difficulty is the `overall` score from the
 analysis the orchestrator already runs on every spawn, and that score already
 decides the quality/cost weight split, so ranking and effort cannot disagree
-about where a task stops being easy. The buckets are `0-20 → none`, `21-40 →
-minimal`, `41-55 → low`, `56-70 → medium`, `71-85 → high`, `86-95 → xhigh`,
-`96-100 → max`; the `40` and `70` boundaries are the ones the existing weight
-split already uses. That analysis is a heuristic, not a measurement — it reads
-no source files and guesses a code size from the file count — so the interior
-boundaries are a policy claim rather than a fact about your task.
+about where a task stops being easy. The buckets are `0-40 → low`, `41-70 →
+medium`, `71-85 → high`, `86-95 → xhigh`, `96-100 → max`
+(`src/model-ref.ts:410-416`); the `40` and `70` boundaries are the ones the
+existing weight split already uses, so the table mirrors the ranker's three
+regimes — cheap, balanced, quality-favoured — one bucket each. There is no
+"don't bother" bucket: the table tiles `0-100` with no gap and runs *upward* from
+`low`, which is what makes `minDifficulty` the only place that decision can be
+made. That analysis is a heuristic, not a measurement — it reads no source files
+and guesses a code size from the file count — so the `85` and `95` boundaries are
+a policy claim rather than a fact about your task.
+
+**`none` is a published level, not a difficulty bucket.** The seven names
+(`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` —
+`src/model-ref.ts:349`) are the vocabulary of what models *publish*; a real
+observed catalogue is `["none","medium","high","xhigh"]`. The five names the
+difficulty table can *produce* are the upper five of those. `none` and `minimal`
+are still honoured when a model publishes them and nothing better qualifies
+under the ceiling — a model publishing only `none` under a `low` ceiling is
+answered `none` — but no difficulty score selects them. Raising `minDifficulty`
+is how you stop spending effort on easy work; the table has no opinion about it.
 
 **Only published levels are ever requested.** Nexus takes the highest level the
 model actually publishes that is at or below the ceiling. A model publishing
@@ -227,6 +248,13 @@ than the ceiling allows. `maxEffort: "high"` is therefore a real cost control
 rather than a label: at the default, the two hardest buckets (`xhigh` and `max`)
 are not reachable, because an estimate of how hard a task is does not justify
 several times the reasoning budget to answer it. Raise it if you disagree.
+
+**A ceiling below the floor is honoured, not rounded up.** `maxEffort: "minimal"`
+is a level the difficulty table cannot produce, and it still binds: the answer is
+whatever the model publishes at or below `minimal`, which for most catalogues is
+nothing at all — reported as such, never quietly raised to `low`. Rounding up
+would spend more reasoning budget than the ceiling allows, which is the one thing
+a cost control must not do.
 
 **An effort you named yourself is not rewritten — but on the DAG path it is only
 a candidate.** A configured `anthropic/claude-sonnet-4-6#minimal` is never
@@ -253,9 +281,16 @@ in the bill can be traced to the decision that caused it.
 **Every key is read.** `enabled` decides whether the automatic choice is made at
 all — with it off, no selection outcome differs in any way, and a `#variant` you
 wrote behaves exactly as before. `maxEffort` clamps the choice, and
-`minDifficulty` skips tasks below it. The block is merged **field by field**
-across the storage (TUI) > project > global > constructor levels, so a level
-that sets only `enabled` does not blank out the two numbers resolved beneath it.
+`minDifficulty` decides which tasks get one at all: at the default `0` every task
+clears the threshold and the floor bucket `low` applies to all of them, so the
+default is "never skip", not "skip nothing because the table already did". Any
+value you set moves the outcome for at least one score — `0` differs from `1` at
+difficulty 0, and every threshold from `2` to `100` differs from the one below it
+at difficulty `threshold - 1`. Values outside `0-100` are clamped to that range
+rather than rejected (`src/config.ts:258`). The block is merged **field by
+field** across the storage (TUI) > project > global > constructor levels, so a
+level that sets only `enabled` does not blank out the two numbers resolved
+beneath it.
 
 ### Self-Healing with Escalation
 
