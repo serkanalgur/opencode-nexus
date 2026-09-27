@@ -87,10 +87,11 @@ files.
 
 ### 1. Configure Agent Models
 
-Press **Ctrl+N** or type `/nexus` to open the fullscreen configuration panel. It
-lists every config value — including the model per role — and `tab` switches
-whether a save writes to this project or to your global config. To skip the panel
-and pick one role's model, run `/nexus model <role>`.
+Press **Ctrl+N** or type `/nexus` to open the [configuration
+dialogs](#the-configuration-dialogs). You choose a block, you choose a setting
+in it, and you choose where a save writes — this project or your global config.
+Nothing is written until you choose **Save and close**. To skip straight to one
+role's model, run `/nexus model <role>`.
 
 ### 2. Use the Nexus Orchestrator
 
@@ -116,7 +117,7 @@ Use nexus.goal.set with description="Build complete auth system"
 ### 3. Use Slash Commands
 
 ```
-/nexus              # Open the fullscreen configuration panel
+/nexus              # Open the configuration dialogs
 /nexus dashboard    # Start the web dashboard and open it in your browser
 /nexus status       # Show the config summary
 /nexus model coder  # Pick the model for a role
@@ -323,7 +324,7 @@ and the file it came from:
 ```
 [nexus] ~/.opencode/nexus.jsonc has 2 key(s) Nexus does not read:
 budget.maxCostPerAgent, selfHealing.backoffMultiplier. They are ignored, and the
-next save from the config panel will remove them from the file.
+next save from the config dialogs will remove them from the file.
 ```
 
 This is not a warning about a mistake you have to avoid; it is the upgrade
@@ -346,8 +347,8 @@ orchestrator at `initialize()` and again on every reload, and the single value
 they land in is the one the dashboard and `/nexus status` display — so what you
 see is what is in force. (The one exception is a programmatic run: an
 `ExecutionRequest.budget` replaces the ceiling for that run and survives later
-reloads, so the panel keeps showing the file's value while the run is held to
-the caller's. That is deliberate — a reload mid-run must not move the ceiling
+reloads, so what the config dialogs and `/nexus status` show stays the file's
+value while the run is held to the caller's. That is deliberate — a reload mid-run must not move the ceiling
 out from under spend already measured against the old one.) A `budget` block is
 written out in full on save, so editing one of these cannot delete the others.
 
@@ -364,7 +365,7 @@ file-settable.** It is a real, enforced switch — `true` makes `maxTotalCost`
 thing that can stop work. It is reachable programmatically (a constructor
 argument, or an `ExecutionRequest.budget` for one run) and it survives a config
 reload, but there is no `hardLimit` in `NexusFullConfig.budget`, so no file,
-preset or config-panel row can set it. That is a decision, not an oversight: the
+preset or config-dialog row can set it. That is a decision, not an oversight: the
 alternative was a fourth file key that turns a paused run back on, and a budget
 you cannot stop work on is a limit rather than a report. If you need the
 terminal behaviour, embed the orchestrator and pass it. **If you were told to
@@ -824,17 +825,17 @@ installed with the package — treat it as a repo document, not a shipped featur
 ## TUI Commands
 
 The TUI plugin registers exactly these slash commands. With no argument,
-`/nexus` opens the fullscreen [configuration panel](#the-configuration-panel);
-with one, it dispatches to a subcommand (`config`/`c`, `status`/`s`,
-`dashboard`/`d`, `web`/`w`, `overview`, `model`/`m`, `reset`).
+`/nexus` opens the [configuration dialogs](#the-configuration-dialogs); with
+one, it dispatches to a subcommand (`config`/`c`, `status`/`s`, `dashboard`/`d`,
+`web`/`w`, `overview`, `model`/`m`, `reset`).
 
 | Command | Alias | Description |
 |---------|-------|-------------|
-| `/nexus` | `Ctrl+N` | Fullscreen configuration panel, or a subcommand |
+| `/nexus` | `Ctrl+N` | The configuration dialogs, or a subcommand |
 | `/nexus-dashboard` | `/nd` | Start the web dashboard and open it. If one is already serving, opens that and starts nothing — see [Web Dashboard](#web-dashboard) |
 | `/nexus-web` | `/nw` | Alias of `/nexus-dashboard` |
 | `/nexus-overview` | `/no` | Config, budget and dashboard-status overview. Prints text; starts nothing |
-| `/nexus-config` | `/nc` | The fullscreen configuration panel — every config value, not just models and budget |
+| `/nexus-config` | `/nc` | The configuration dialogs — every config block, not just models and budget |
 | `/nexus-model` | `/nm` | Select a model for a role |
 | `/nexus-status` | `/ns` | Show the config summary |
 | `/nexus-reset` | — | Reset all settings to defaults |
@@ -853,99 +854,118 @@ answer it has no reason to read. The table above is the TUI palette.
 
 ## Configuration
 
-### The configuration panel
+### The configuration dialogs
 
 `/nexus-config` (or `/nc`, or **Ctrl+N**, or `/nexus` with no argument) opens a
-fullscreen panel listing **every** value in the merged config — `models`,
-`budget`, `selfHealing`, `dashboard`, `notifications`, `gitFlow`, `effort` and
-`customRoles`, which is every block `NexusFullConfig` declares
-(`src/config.ts:269`) — with a control per value. It replaces a wizard that
-asked the same questions one dialog at a time: a scope question, then six model
-questions in a row, then a budget prompt. One screen now holds all of it —
-9 switches, 7 numbers, 8 model and text values and 1 list.
+flow of ordinary host dialogs over **every** value in the merged config —
+`models`, `budget`, `selfHealing`, `dashboard`, `notifications`, `gitFlow`,
+`effort` and `customRoles`, which is every block `NexusFullConfig` declares
+(`src/config.ts:291`) — with a control per value.
+
+The flow is three levels deep, and you can reach any level from any other:
+
+| Level | What it shows | Choosing a row does |
+|-------|---------------|---------------------|
+| **The hub** | One row per config block with its setting count, the save scope, **Save and close**, and **Close without saving** | Enters that block, or ends the flow |
+| **A block** | One row per field in that block, each labelled with its current value, plus **← Back** | Opens that field's editor |
+| **A field** | Two rows for a switch, a line of text for a number or a string, or the provider-grouped model picker | Stages the value and returns to the block |
 
 Everything is reachable and operable from the keyboard; there is no mouse in a
-terminal and nothing here needs one.
+terminal and nothing here needs one. The host owns the keyboard while a dialog is
+open, which is why this flow registers no key bindings of its own.
 
-| Key | Does |
-|-----|------|
-| `↑` `↓`, `k` `j` | Move between settings |
-| `home` `end`, `g` `G` | First / last setting |
-| `space`, `enter` | Toggle a switch, or open the value under the cursor for editing |
-| `tab` | Switch the save scope between project and global |
-| `s`, `Ctrl+S` | Save |
-| `r` | Discard this session's edits and start again from what is on disk |
-| `esc` | Close — after asking, if there are unsaved edits |
+**Escape goes up one level, and it is not a trap.** `esc` in a field returns to
+its block, `esc` in a block returns to the hub, and `esc` in the hub leaves.
+There is no "are you sure" prompt, because there is nothing to be sure about:
+**nothing is written until you choose Save**, so the most leaving can cost you is
+a dialog you chose to leave. Every screen is at most two escapes from the
+outside, and the flow's own test walks its state space from the hub and asserts
+exactly that.
 
-Within an open value, `enter` accepts and `esc` cancels. At the discard prompt,
-`y` throws the edits away and `n` keeps them. The keymap is one table
-(`PANEL_BINDINGS` in `src/config-panel.ts`) that generates the bindings, the
-footer and the tests, so the keys the footer advertises are the keys that are
-bound.
+**What is on screen is what gets written.** A staged value shows on its row with
+a `*` beside it, **Save and close** writes the whole thing and says which file it
+wrote, and **Close without saving** says plainly that your file is unchanged. A
+save with nothing staged says so rather than rewriting the file for nothing.
 
-**What is on screen is what gets written.** The panel edits a draft. Nothing
-reaches `nexus.jsonc` until you save, a changed value is marked `*` before you
-save, `r` reverts, and `esc` with unsaved edits asks rather than discarding
-silently.
+**A number that will not parse says so.** Type `12abc` into a number prompt and
+the dialog answers `"12abc" is not a plain decimal number. Nothing was changed.`
+— the value is left exactly as it was and you are back on the block's list to try
+again. The free-text budget prompt this replaced parsed with `parseFloat` and, on
+a bad value, fell through to nothing at all (`git show 07460d5^:src/tui.tsx:860`):
+the dialog closed, the value did not change, and a rejection was
+indistinguishable from a keypress that missed. `0x10` is refused for the same
+reason from the other direction — `Number("0x10")` is 16 — so the text is checked
+for a plain decimal shape as well as parsed, and nothing is written that you did
+not type in full.
 
-**A number that will not parse says so.** Typing `abc` into a number cell leaves
-the cell open, shows `"abc" is not a number.`, and changes nothing. The
-free-text budget prompt this replaced parsed with `parseFloat` and, on a bad
-value, fell through to nothing at all (`git show HEAD:src/tui.tsx:860`) — the
-dialog closed, the value did not change, and a rejection was indistinguishable
-from a keypress that missed.
+#### A switch is two rows, because the host has no checkbox
 
-#### The checkbox is a component built here, not a host widget
-
-The host's TUI plugin API has **no checkbox**. This is checkable against the
+The host's TUI plugin API has **no checkbox**, and this is checkable against the
 host's own declarations: in
-`node_modules/@opencode/plugin/dist/tui/context.d.ts`, the `ui` object
-(`UI`, line 396) has exactly seven members — `dialog` (397), `toast` (398),
-`format` (399), `router` (402), `panel` (407), `tabs` (420) and `slot` (442).
-There is no boolean, no multi-select, no form and no number input among them.
+`node_modules/@opencode/plugin/dist/tui/context.d.ts`, the `ui` object (`UI`,
+line 396) has exactly seven members — `dialog` (397), `toast` (398), `format`
+(399), `router` (402), `panel` (407), `tabs` (420) and `slot` (442).
 `DialogSelectOption` (line 297) carries only `title`, `value`, `description?`,
 `footer?`, `category?` and `disabled?`, and `dialog.select` (line 321) resolves a
-**single** value, so it is structurally single-select.
+**single** value, so it is structurally single-select. There is no boolean
+widget, no multi-select, no form and no number input among them.
 
-So the `[x]` / `[ ]` next to each switch is drawn by this plugin, and `space` or
-`enter` on that row inverts the value. Three host APIs are used to build it:
+So a switch is a two-row list — `✅ Enabled` and `☐ Disabled` — and the glyph is
+part of the row's own title rather than a separate control. That is a real
+limitation of the host, and the workaround does not pretend otherwise: the row
+your key is already on is marked `(current)`, so the list opens where you are and
+you can always see which of the two you are about to change. Choosing the row a
+key is already on writes that same value — it is how you say "off, and I mean
+off" — and it is deliberately *not* an inversion of what was there, because
+inverting would make "choose the row I am already on" mean the opposite of what
+it says.
 
-- `ui.panel.open(name, { presentation: 'fullscreen' })` (line 409) for the frame —
-  a host-sized, focus-owning panel that owns the chrome and resolves key
-  conflicts;
-- the `session.panel` slot, for the content, rendered with the `@opentui/solid`
-  renderer this plugin already used for its sidebar — no new rendering stack;
-- `context.keymap.layer({ target })`, the documented way to attach keys to a
-  renderable this plugin drew.
-
-`ui.dialog.show` (line 313) — the other escape hatch — is not used.
+`ui.dialog.prompt` (line 320) takes the numbers and the strings, and
+`ui.dialog.alert` is how a refused value is reported. `ui.panel` (407) and
+`ui.slot` (442) are **not used**: the configuration surface draws nothing, so it
+does not need a panel to draw it in, and it therefore does **not** need an open
+session. A fullscreen configuration panel shipped in 2.12.0, built on
+`ui.panel.open(..., { presentation: "fullscreen" })` with its own
+`session.panel` claim and its own `keymap.layer({ target })`; the user found it
+problematic and asked for the popup mode back, so it is gone, and the three call
+sites that opened it now open this flow. A test also asserts that no part of the
+adapter can reintroduce that route.
 
 #### Where it needs to run
 
-The panel is a *session* panel, so it needs an open session. Run from the home
-screen it says so and opens nothing, rather than appearing to work.
-
-`/nexus`, `/nexus config` and `/nexus-config` all open the panel, and the old
-wizard is gone — no entry point reaches it. `/nexus model <role>` is unchanged
-and still opens that one role's picker directly, which is the quicker path when
-the only thing to change is a model.
+Anywhere the other TUI commands work. The panel was a *session* panel, so it
+needed an open session and refused to open without one; a dialog does not.
+`/nexus`, `/nexus config` and `/nexus-config` all open the flow.
+`/nexus model <role>` is unchanged and still opens that one role's picker
+directly, which is the quicker path when the only thing to change is a model.
 
 #### How it finds settings
 
-The panel does not contain a list of config blocks. It walks the keys of the
+The flow does not contain a list of config blocks. It walks the keys of the
 merged config and the shape of each value, so a block added to `NexusFullConfig`
-appears in it with no change here. A value the panel has no editor for is still
-shown and is reported as read-only rather than skipped — a setting that is
-silently missing is the same defect as a setting that does nothing.
+appears in it with no change here. A value it has no editor for is still offered
+— as a row the host renders and refuses, using its own `disabled` flag — and is
+reported rather than skipped, because a setting that is silently missing is the
+same defect as a setting that does nothing. The real config produces none, and
+the test suite asserts it, so a new key of an unanticipated shape fails the suite
+rather than arriving as a value nobody can change.
 
+All 24 of the merged config's settings are reachable: 9 switches, 7 numbers, 6
+model references and 2 plain strings, across the 8 blocks above. That is not an
+assertion about a list written out beside the code. The test walks the merged
+config with its own independent walker, requires that every leaf it finds has a
+row in some block's dialog, and separately walks the flow's own state space from
+the hub and requires that every field's editor is a screen the user can actually
+be in.
 ### Agent Models
 
-Press **Ctrl+N** or type `/nexus` to open the panel and move to the `models`
-block, or run `/nexus model <role>` to jump straight to one role's picker. The
-picker is grouped by provider and is the same widget in both places; from the
-panel, choosing a model stages it like any other edit rather than writing
-immediately. Saving writes the `models` block of `nexus.jsonc`; the example in
-[Cost-Aware Model Selection](#cost-aware-model-selection) shows its shape.
+Press **Ctrl+N** or type `/nexus` to open the configuration dialogs and enter the
+`models` block, or run `/nexus model <role>` to jump straight to one role's
+picker. The picker is grouped by provider and is the same widget in both places;
+from the dialogs, choosing a model stages it like any other edit rather than
+writing immediately. Saving writes the `models` block of `nexus.jsonc`; the
+example in [Cost-Aware Model Selection](#cost-aware-model-selection) shows its
+shape.
 
 The model list is grouped under a heading per provider — `OpenCode Go`,
 `Claude` — so a multi-provider install reads as sections rather than one flat
