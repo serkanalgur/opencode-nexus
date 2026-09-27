@@ -86,20 +86,22 @@ export interface ProviderLabelSource {
  * no provider at all, so there is nothing to group it under and inventing a
  * provider for it would be a guess. `slice(0, -1)` on a slashless ref would
  * silently chop the last character, hence the explicit guard.
+ *
+ * Re-exported from `src/model-ref.ts` — the single copy of the ref grammar —
+ * with its three-valued behaviour intact. It cannot be
+ * `tryParseModelRef(...)?.providerID`, because the host's grammar rejects a
+ * bare id outright and this function's whole job is to answer about one.
  */
-export function providerIDFromRef(ref: string): string | undefined {
-  const slash = ref.indexOf("/")
-  return slash > 0 ? ref.slice(0, slash) : undefined
-}
+export { providerIDFromRefLoose as providerIDFromRef } from "./model-ref"
 
 /**
  * The model half of a ref, bare id returned unchanged.
  *
- * Re-exported from `forecast.ts` rather than reimplemented: `bareModelId` is
- * already documented as the single copy of this rule in the plugin, and the
- * string surface and the object surface have to agree on what the tail of a
- * ref means. A second copy would be free to drift from the pricing path, which
- * resolves bare ids the same way.
+ * Delegates rather than reimplementing: the ref grammar lives in
+ * `src/model-ref.ts` (re-exported through `forecast.ts`), and the string
+ * surface and the object surface have to agree on what the tail of a ref
+ * means. A second copy would be free to drift from the pricing path, which
+ * resolves bare ids the same way — which is precisely what happened here.
  */
 export function modelIDFromRef(ref: string): string {
   return bareModelId(ref)

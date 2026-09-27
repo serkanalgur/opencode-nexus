@@ -228,7 +228,7 @@ const TASK = {
 async function runExecute({ getThrows = false, price = false }: { getThrows?: boolean; price?: boolean } = {}) {
   const orchestrator = new NexusOrchestrator({
     schedulerInterval: 1,
-    selfHealing: { enabled: false, maxRetries: 3, retryDelay: 0, backoffMultiplier: 2, contextTransfer: false },
+    selfHealing: { enabled: false, maxRetries: 3, retryDelay: 0, contextTransfer: false },
   })
   await orchestrator.initialize(makeCtx({ getThrows }) as never)
   // `price` installs real per-1K rates, so the pricing source resolves to

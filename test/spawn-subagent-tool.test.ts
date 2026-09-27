@@ -92,7 +92,7 @@ function createCtx(opts: { withToolDomain: boolean; subagentCalls?: any[] }) {
 
 function newOrchestrator(ctx: any) {
   return new NexusOrchestrator({
-    budget: { maxTotalCost: 10.00, maxCostPerTask: 1.00, maxCostPerAgent: 2.00, alertThreshold: 0.2, hardLimit: false }
+    budget: { maxTotalCost: 10.00, maxCostPerTask: 1.00, alertThreshold: 0.2, hardLimit: false }
   })
 }
 

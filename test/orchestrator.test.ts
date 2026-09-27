@@ -24,7 +24,7 @@ describe('NexusOrchestrator', () => {
 
   beforeEach(() => {
     orchestrator = new NexusOrchestrator({
-      budget: { maxTotalCost: 10.00, maxCostPerTask: 1.00, maxCostPerAgent: 2.00, alertThreshold: 0.2, hardLimit: false }
+      budget: { maxTotalCost: 10.00, maxCostPerTask: 1.00, alertThreshold: 0.2, hardLimit: false }
     })
     orchestrator.initialize(mockCtx as any)
   })
@@ -167,7 +167,7 @@ describe('NexusOrchestrator', () => {
 
     it('should check budget limits', () => {
       const orch = new NexusOrchestrator({
-        budget: { maxTotalCost: 1.00, maxCostPerTask: 0.50, maxCostPerAgent: 0.50, alertThreshold: 0.8, hardLimit: true }
+        budget: { maxTotalCost: 1.00, maxCostPerTask: 0.50, alertThreshold: 0.8, hardLimit: true }
       })
 
       // Track costs

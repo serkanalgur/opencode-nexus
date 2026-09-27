@@ -72,8 +72,8 @@ type Ctx = ReturnType<typeof mockCtx>
 function newOrchestrator(overrides?: Record<string, unknown>) {
   return new NexusOrchestrator({
     schedulerInterval: 1,
-    selfHealing: { enabled: false, maxRetries: 0, retryDelay: 0, backoffMultiplier: 2, contextTransfer: false },
-    budget: { maxTotalCost: 10.0, maxCostPerTask: 1.0, maxCostPerAgent: 2.0, alertThreshold: 0.2, hardLimit: false },
+    selfHealing: { enabled: false, maxRetries: 0, retryDelay: 0, contextTransfer: false },
+    budget: { maxTotalCost: 10.0, maxCostPerTask: 1.0, alertThreshold: 0.2, hardLimit: false },
     ...overrides
   } as never)
 }
@@ -259,7 +259,7 @@ describe('notifications: budget:exceeded now notifies', () => {
   it('sends a notification when the hard limit trips, and still pauses', async () => {
     const dir = makeTempDir()
     const orchestrator = await initialized(dir, {
-      budget: { maxTotalCost: 1, maxCostPerTask: 1, maxCostPerAgent: 2, alertThreshold: 0.2, hardLimit: true }
+      budget: { maxTotalCost: 1, maxCostPerTask: 1, alertThreshold: 0.2, hardLimit: true }
     })
     const { manager, invocations } = recordingNotifications()
     orchestrator.notifications = manager
@@ -285,7 +285,7 @@ describe('notifications: budget:exceeded now notifies', () => {
     // conditions, so this is not an `else`: the alert is skipped because the
     // terminal event has already latched, not because the conditions are equal.
     const orchestrator = await initialized(makeTempDir(), {
-      budget: { maxTotalCost: 1, maxCostPerTask: 1, maxCostPerAgent: 2, alertThreshold: 0.2, hardLimit: true }
+      budget: { maxTotalCost: 1, maxCostPerTask: 1, alertThreshold: 0.2, hardLimit: true }
     })
     const { manager, invocations } = recordingNotifications()
     orchestrator.notifications = manager
@@ -312,7 +312,7 @@ describe('notifications: budget:exceeded now notifies', () => {
 
   it('does not re-notify on either budget event after the limit has latched', async () => {
     const orchestrator = await initialized(makeTempDir(), {
-      budget: { maxTotalCost: 1, maxCostPerTask: 1, maxCostPerAgent: 2, alertThreshold: 0.2, hardLimit: true }
+      budget: { maxTotalCost: 1, maxCostPerTask: 1, alertThreshold: 0.2, hardLimit: true }
     })
     const { manager, invocations } = recordingNotifications()
     orchestrator.notifications = manager
@@ -334,7 +334,7 @@ describe('notifications: budget:exceeded now notifies', () => {
 
   it('does not notify for the limit when there is no hard limit', async () => {
     const orchestrator = await initialized(makeTempDir(), {
-      budget: { maxTotalCost: 1, maxCostPerTask: 1, maxCostPerAgent: 2, alertThreshold: 0.2, hardLimit: false }
+      budget: { maxTotalCost: 1, maxCostPerTask: 1, alertThreshold: 0.2, hardLimit: false }
     })
     const { manager, invocations } = recordingNotifications()
     orchestrator.notifications = manager
@@ -352,7 +352,7 @@ describe('notifications: budget:exceeded now notifies', () => {
 
   it('still sends the pre-existing budget:alert notification', async () => {
     const orchestrator = await initialized(makeTempDir(), {
-      budget: { maxTotalCost: 1, maxCostPerTask: 1, maxCostPerAgent: 2, alertThreshold: 0.2, hardLimit: false }
+      budget: { maxTotalCost: 1, maxCostPerTask: 1, alertThreshold: 0.2, hardLimit: false }
     })
     const { manager, invocations } = recordingNotifications()
     orchestrator.notifications = manager
@@ -425,7 +425,7 @@ describe('notifications: config block', () => {
     // `sendNotification` is the thing that keeps a future regression from
     // becoming a process exit, and a test is what makes it stay.
     const orchestrator = await initialized(makeTempDir(), {
-      budget: { maxTotalCost: 1, maxCostPerTask: 1, maxCostPerAgent: 2, alertThreshold: 0.2, hardLimit: true }
+      budget: { maxTotalCost: 1, maxCostPerTask: 1, alertThreshold: 0.2, hardLimit: true }
     })
     let rejects = 0
     const logged: string[] = []

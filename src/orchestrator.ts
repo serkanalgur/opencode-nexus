@@ -7,10 +7,11 @@ import type {
   SpawnConfig, RecoveryAction, HealthStatus, NexusConfig, TaskResult,
   CostProvenance, SpendSplit, CostReportUncollected
 } from "./types"
-import { NexusConfigManager, type NexusConfigLoadInfo, type NexusConfigReloadTrigger } from "./config"
+import { NexusConfigManager, type NexusConfigLoadInfo, type NexusConfigReloadTrigger, type NexusEffortConfig } from "./config"
 import { StateBroadcaster } from "./broadcast"
 import { DashboardModule, describeDashboardStart, parseDashboardTarget, startDashboardServer } from "./dashboard"
 import { detectCycles } from "./dag"
+import { effortForDifficulty, effortIndex, formatModelRef, parseModelRef, priceKeyForRef, reconcileEffort, tryParseModelRef, type ModelEffort } from "./model-ref"
 import { MessageStore, type MessageStoreConfig } from "./message-store"
 import { PersistentMemoryStore, isNewerThan, type MemoryStoreConfig } from "./memory-store"
 import { HealthMonitor } from "./health"
@@ -541,6 +542,15 @@ export type SpawnedAgent = Agent & {
 export interface ModelScore {
   model: string
   provider: string
+  /**
+   * The `#variant` half of the candidate reference, WITHOUT the `#`, or
+   * `undefined` for a variant-free one. Carried alongside `model` rather than
+   * inside it because `model` is the bare id the pricing path resolves against,
+   * and slicing the id off is what dropped the variant before. `undefined` when
+   * the reference is not parseable at all — a bare id leaves `model` empty (see
+   * `scoreModel`), and inventing a variant for it would be a guess.
+   */
+  variant?: string
   costScore: number      // 0-1, lower cost = higher score
   qualityScore: number   // 0-1, from estimateModelQuality
   speedScore: number     // 0-1, estimated based on model size
@@ -781,10 +791,36 @@ export class NexusOrchestrator {
   private tasks: Map<string, Task> = new Map()
   private dag: DAG | null = null
   private config: NexusConfig
+  /**
+   * The budget in force, which is the file's budget unless an
+   * `ExecutionRequest.budget` has claimed it. See `syncFileConfig()`.
+   */
   public budget: BudgetConstraint
+  /**
+   * The `ExecutionRequest.budget` a caller supplied, remembered so that a later
+   * config reload does not move the ceiling out from under spend already
+   * measured against it. `null` when no request has supplied one.
+   */
+  private budgetOverride: BudgetConstraint | null = null
   private running: boolean = false
   private paused: boolean = false
   private budgetExceeded: boolean = false
+  /**
+   * Per-task running totals, and the tasks that have already been reported over
+   * `maxCostPerTask`. Backs `checkTaskBudget`.
+   *
+   * A task is a node, and every attempt at a node spawns a FRESH agent
+   * (`spawnAndExecute`), so a task's spend is genuinely the sum of its
+   * attempts' — which is the right granularity for a per-task figure, because
+   * the escalation chain is what turns one runaway task into three bills.
+   *
+   * The latch is a `Set` rather than a boolean because the total's latch
+   * (`budgetExceeded`) describes one run-wide terminal event, and this is not
+   * that: N tasks can each go over, and a user who wants to know which ones
+   * needs all N named, not the first.
+   */
+  private costByTask: Map<string, number> = new Map()
+  private tasksOverBudget: Set<string> = new Set()
 
   // Cost tracking
   public totalSpent: number = 0
@@ -1021,6 +1057,34 @@ export class NexusOrchestrator {
   // feature exists to remove; `getProviderList` narrows it on the way out.
   private providerNames: Map<string, unknown> = new Map()
 
+  /**
+   * `providerID/modelID` → the variant ids that model actually publishes.
+   *
+   * A SECOND thing off the SAME `provider.list()` snapshot as `providerNames`,
+   * taken in the same call for the same reason: one list, one snapshot, so a
+   * model cannot have a label from boot and a variant set from a later read.
+   * `ProviderInfo.models` carries each `ModelInfo`, and `ModelInfo.variants` is
+   * `Array<ModelVariant>` — the array whose `[]` means "this model publishes no
+   * variants".
+   *
+   * EXISTENCE IS THE WHOLE CONTRACT, and the distinction from an empty array is
+   * load-bearing. Both mean "ask for no variant", but they mean different
+   * things and the difference is reported in `ModelSelection.reasoning`:
+   * absent = the catalogue never told us (no `ctx.provider`, a throw, a
+   * non-array, a model with no `variants` field), empty = the model publishes
+   * none. Inventing a variant for a model we have no catalogue entry for would
+   * be the one thing this feature must never do, since the host may reject an
+   * unknown variant id and the failure would surface as a failed spawn rather
+   * than a wrong effort.
+   *
+   * The value is `string[]` narrowed to the ids, in the host's own order, and a
+   * row whose `variants` is not an array is STORED AS ABSENT rather than as an
+   * empty list — the same "a malformed row degrades to no information" rule
+   * `loadModelCosts` follows, and the one place the two disagree is the one
+   * where claiming "publishes none" would be a claim we cannot support.
+   */
+  private publishedVariants: Map<string, readonly string[]> = new Map()
+
   // Set when a spawn fell back to ctx.session.create() instead of the built-in
   // subagent tool (child session not parent-linked). null when the last spawn
   // used the subagent tool.
@@ -1029,13 +1093,26 @@ export class NexusOrchestrator {
   constructor(config?: Partial<NexusConfig>, messageStoreConfig?: Partial<MessageStoreConfig>, memoryStoreConfig?: Partial<MemoryStoreConfig>) {
     this.config = this.mergeConfig(config)
     this.budget = this.config.budget
-    this.configManager = new NexusConfigManager(this.config.dashboard, this.config.notifications, this.config.customRoles, this.config.gitFlow)
+    this.configManager = new NexusConfigManager(this.config.dashboard, this.config.notifications, this.config.customRoles, this.config.gitFlow, this.config.effort, this.config.budget, this.config.selfHealing)
     this.moduleRegistry = new ModuleRegistry()
     this.messageStore = new MessageStore(messageStoreConfig)
     this.memoryStore = new PersistentMemoryStore(memoryStoreConfig)
     this.messageRouter = new MessageRouter()
 
-    // Initialize escalation policy from config selfHealing settings
+    // Initialize escalation policy from config selfHealing settings.
+    //
+    // The three self-healing keys are ALSO written by `syncFileConfig()` rather
+    // than only here, and the `fallbackModels` copy stays here because it is a
+    // template rather than a setting.
+    //
+    // Both assignments are needed, and neither is redundant. `syncFileConfig()`
+    // runs at the end of this constructor and again on every load from disk, so
+    // this block is what a reload OVERWRITES; but `syncFileConfig()` derives
+    // `selfHealing` from the manager, and the manager is constructed one line
+    // above from `this.config.selfHealing` — so with neither, `this.config`'s
+    // value was never a level anything could read and the backoff base was the
+    // default for the life of the process. `nexus.jsonc` said `retryDelay:
+    // 4321`, the config panel displayed 4321, and the backoff ran 1s/2s/4s.
     this.escalationPolicy = {
       ...DEFAULT_ESCALATION,
       // Copied, not shared: step 3 escalations `shift()` entries off this list,
@@ -1067,6 +1144,94 @@ export class NexusOrchestrator {
     // forecaster prices from the same per-1K table as everything else instead of
     // carrying a second, divergent price universe.
     this.forecaster = new CostForecaster((model, provider) => this.getModelCost(model, provider))
+
+    // The two blocks the config FILES own, resolved once so that the snapshot
+    // fields below (`this.budget`, `escalationPolicy`) are not left holding the
+    // constructor's defaults for the lifetime of the process. At construction
+    // time the manager has loaded nothing yet, so this is a no-op in practice —
+    // it is here so there is exactly ONE place that writes those fields, and
+    // `initialize()` and `reloadConfigFromDisk()` can both be the second caller.
+    this.syncFileConfig()
+  }
+
+  /**
+   * Push the two file-owned blocks — `budget` and `selfHealing` — out of the
+   * config manager and into the fields the rest of this class reads.
+   *
+   * ── WHY PUSH, AND WHY IT HAD TO BE PUSH ──
+   *
+   * `this.config` is seeded ONCE, in the constructor, and `src/index.ts`
+   * constructs `new NexusOrchestrator()` with no argument at all — so in the
+   * shipped product every value in it is a default, whatever the user's
+   * `nexus.jsonc` says. Two blocks then read from it and nothing pushed a file's
+   * values into them:
+   *
+   *   - `selfHealing`, whose `retryDelay` became the escalation backoff base at
+   *     `this.escalationPolicy.retryDelay`. A file saying `retryDelay: 4321`
+   *     parsed, round-tripped and displayed, and the backoff still ran
+   *     1s/2s/4s.
+   *   - `budget`, of which `maxCostPerTask` gates `checkTaskBudget` and whose
+   *     `maxTotalCost` is what the dashboard and the config panel both SHOW.
+   *     A user who set `maxCostPerTask: 0.01` and saw no notification concluded
+   *     the notification was broken.
+   *
+   * The point-of-use alternative — read `this.configManager.getConfig()` at each
+   * site, the way `applyEffort` reads `.effort` — is not available for either
+   * block. `escalationPolicy` is a SNAPSHOT field read deep inside the retry
+   * path, and `this.budget` is a snapshot field by contract (see the note on
+   * `OrchestratorState.config.budget`: `execute()` may replace it with a caller's
+   * `ExecutionRequest.budget`). Re-reading the manager at each of the ~6 read
+   * sites would put two different answers for the same knob in the same object
+   * and still leave the displayed payload reading the other one. So the manager
+   * is the authority and these fields are its cache, refreshed whenever the
+   * files are read.
+   *
+   * Two consequences, both deliberate:
+   *
+   *   1. `hardLimit` is NOT taken from the file. It is absent from
+   *      `NexusFullConfig.budget` — it has never been expressible in
+   *      `nexus.jsonc` — and adding it here would either silently start
+   *      honouring a key the schema does not offer, or (worse) drop the
+   *      constructor's value on every reload. The constructor value is carried
+   *      across explicitly so a programmatic `hardLimit: true` survives a
+   *      reload. See the README for why the file does not grow the key.
+   *   2. `this.budget` is only overwritten when no `ExecutionRequest.budget`
+   *      has claimed it for this orchestrator, because a config reload mid-run
+   *      must not move the ceiling out from under spend already measured
+   *      against the old one.
+   */
+  private syncFileConfig(): void {
+    const file = this.configManager.getConfig()
+
+    // `NexusFullConfig.selfHealing` and `NexusConfig.selfHealing` are the same
+    // four fields, so this is a copy rather than a cast. It is written out field
+    // by field anyway: a `spread` here would be a place where a fifth field could
+    // be added to one type and silently not reach the other.
+    const selfHealing: NexusConfig['selfHealing'] = {
+      enabled: file.selfHealing.enabled,
+      maxRetries: file.selfHealing.maxRetries,
+      retryDelay: file.selfHealing.retryDelay,
+      contextTransfer: file.selfHealing.contextTransfer
+    }
+
+    // The advisory ceilings come from the file; `hardLimit` does not, and
+    // preserving it here is what keeps a constructor-supplied hard limit from
+    // being reset to `false` by the first `nexus.jsonc` that mentions a budget.
+    const budget: BudgetConstraint = {
+      maxTotalCost: file.budget.maxTotalCost,
+      maxCostPerTask: file.budget.maxCostPerTask,
+      alertThreshold: file.budget.alertThreshold,
+      hardLimit: this.config.budget.hardLimit
+    }
+
+    this.config = { ...this.config, selfHealing, budget }
+    this.budget = this.budgetOverride ?? budget
+    this.escalationPolicy = {
+      ...this.escalationPolicy,
+      maxRetries: selfHealing.maxRetries,
+      retryDelay: selfHealing.retryDelay,
+      enableRespawn: selfHealing.contextTransfer
+    }
   }
 
   /**
@@ -1080,6 +1245,13 @@ export class NexusOrchestrator {
     // Use plugin location directory, not process.cwd() which may be wrong
     const projectDir = ctx.location.directory
     this.configManager.loadFromPath(projectDir)
+
+    // …and push the two file-owned blocks into the snapshot fields, immediately
+    // after the load and BEFORE anything that reads them. `selfHealing.retryDelay`
+    // and `budget.maxCostPerTask` were both constructor-only until this call, so
+    // the very first `nexus.jsonc` a project ships was ignored for the life of
+    // the process even though the config panel displayed it as set.
+    this.syncFileConfig()
 
     // Register the roles from the just-loaded config, before anything can ask
     // for one. It has to be here rather than at the end of initialize(): a
@@ -1292,6 +1464,11 @@ export class NexusOrchestrator {
    * So: one snapshot, taken at `initialize()`, shared by the dashboard and the
    * `model.costs` tool by construction, with the staleness documented on all
    * three surfaces rather than papered over on one of them.
+   *
+   * `publishedVariants` is filled from the SAME loop, and that is the reason it
+   * is here rather than a second `provider.list()` call: one call, one
+   * snapshot, and no way for the two maps to disagree about which models the
+   * host published.
    */
   private async loadProviderNames(): Promise<void> {
     try {
@@ -1307,8 +1484,57 @@ export class NexusOrchestrator {
         // rows disagreeing about one id is not a case worth guessing at.
         if (!this.providerNames.has(provider.id)) this.providerNames.set(provider.id, provider.name)
       }
+
+      this.collectPublishedVariants(data)
     } catch {
       // Provider naming is best-effort — every consumer falls back to the raw id
+    }
+  }
+
+  /**
+   * Fill `publishedVariants` from an already-fetched `ProviderInfo[]`.
+   *
+   * Takes the array rather than fetching it, so it runs off the ONE
+   * `provider.list()` the loader above already made, and it runs even when every
+   * row was rejected for labelling — the label filter drops a row with no
+   * `id`, and such a row can still carry models.
+   *
+   * KEYED BY `priceKeyForRef`, i.e. `providerID/modelID` with any `#variant`
+   * stripped, because that is the key a `ModelSelection`'s halves rebuild and
+   * therefore the key the lookup is given. It is the SAME key the price table
+   * joins on, deliberately: one normaliser, so a model priced as `p/m` is the
+   * same model whose variants are listed as `p/m`.
+   *
+   * Nothing is filtered out of a `variants` array. A variant id is a string the
+   * host published, `reconcileEffort` is the one place that decides whether a
+   * name is a rung on the ladder, and vetting ids here would put a second,
+   * different copy of that rule in the file.
+   */
+  private collectPublishedVariants(providers: readonly unknown[]): void {
+    for (const provider of providers) {
+      if (!provider || typeof provider !== 'object') continue
+      const { id, models } = provider as { id?: unknown; models?: unknown }
+      if (typeof id !== 'string' || id.length === 0) continue
+      if (!models || typeof models !== 'object') continue
+      for (const [key, model] of Object.entries(models as Record<string, unknown>)) {
+        if (!model || typeof model !== 'object') continue
+        const { variants } = model as { variants?: unknown }
+        // A model with no `variants` field is ABSENT, not empty: absence means
+        // "not published by the catalogue", empty means "published, and there
+        // are none", and `ModelSelection.reasoning` reports the two differently.
+        if (!Array.isArray(variants)) continue
+        const ids: string[] = []
+        for (const variant of variants) {
+          if (variant && typeof variant === 'object' && typeof (variant as { id?: unknown }).id === 'string') {
+            ids.push((variant as { id: string }).id)
+          }
+        }
+        // The catalogue's own key wins over the reconstructed one. It is the id
+        // the host indexes by, and a model whose `id` disagreed with its key
+        // would be a row worth trusting under the host's own spelling.
+        const modelID = typeof (model as { id?: unknown }).id === 'string' ? (model as { id: string }).id : key
+        this.publishedVariants.set(priceKeyForRef(`${id}/${modelID}`), ids)
+      }
     }
   }
 
@@ -1601,7 +1827,7 @@ export class NexusOrchestrator {
       name: a.name,
       role: a.role,
       status: a.status,
-      model: `${a.model.provider}/${a.model.model}`,
+      model: this.modelSpendKey(a.model),
       sessionID: a.sessionID,
       spawnedAt: a.spawnedAt.toISOString(),
       tasksCompleted: a.metrics.tasksCompleted,
@@ -1684,7 +1910,7 @@ export class NexusOrchestrator {
         agentId: agent.id,
         taskId: this.taskIdForAgent(agent.id),
         role: agent.role,
-        model: `${agent.model.provider}/${agent.model.model}`,
+        model: this.modelSpendKey(agent.model),
         state: sessionStateOfAgent(agent.status),
         spawnedAt: agent.spawnedAt.toISOString(),
         lastKnownTokens: agent.metrics.totalTokens,
@@ -1773,7 +1999,21 @@ export class NexusOrchestrator {
     })
   }
 
-  /** The id of the task currently assigned to `agentId`, or null. */
+  /**
+   * The id of the task currently assigned to `agentId`, or null.
+   *
+   * `assignedAgent` is written once per attempt, in `spawnAndExecute`, and never
+   * cleared — so this is a first-match scan over insertion order rather than a
+   * live reverse index. That is sound for the caller this now has
+   * (`checkTaskBudget`) and worth saying why: every attempt at a node spawns a
+   * FRESH agent, so a single agent id is ever assigned to exactly one task, and
+   * the first match is therefore the only match. A late charge from a
+   * terminated agent of an earlier attempt of the same node still resolves to
+   * that node, which is the correct attribution — it is still that task's money.
+   *
+   * It is NOT sound as a general "which task is this agent on" query, and it is
+   * not used as one.
+   */
   private taskIdForAgent(agentId: string): string | null {
     for (const task of this.tasks.values()) {
       if (task.assignedAgent === agentId) return task.id
@@ -1788,29 +2028,34 @@ export class NexusOrchestrator {
       defaultTimeout: 300000,
       budget: {
         maxTotalCost: 10.00,
+        // Read, by `checkBudget`. See `BudgetConstraint.maxCostPerTask` for
+        // what it does and, at length, what it does not do.
         maxCostPerTask: 1.00,
-        maxCostPerAgent: 2.00,
         alertThreshold: 0.2,
         hardLimit: false
       },
+      // `defaultRole` and `spawnDelay` are GONE, and were read by nothing —
+      // see `NexusConfig.agents`. `healthCheckInterval` below is read, at the
+      // `HealthMonitor` construction in `initialize()` and in
+      // `cleanupStaleData`, and stays.
       agents: {
-        defaultRole: 'coder',
-        spawnDelay: 100,
         healthCheckInterval: 30000
       },
       selfHealing: {
         enabled: true,
         maxRetries: 3,
+        // Read, at the `escalationPolicy` construction in the constructor.
         retryDelay: 1000,
-        backoffMultiplier: 2,
+        // `backoffMultiplier` is GONE: the backoff in `handleFailure` is
+        // `policy.retryDelay * Math.pow(2, retryCount)`, with the 2 written
+        // into the expression. See `NexusConfig.selfHealing`.
         contextTransfer: true
       },
-      communication: {
-        mode: 'pubsub',
-        maxQueueSize: 100,
-        messageTTL: 60000,
-        persistence: false
-      },
+      // The `communication` and `security` blocks are GONE, and neither had a
+      // reader. Both are argued in `NexusConfig`: `communication` matched no
+      // module at all, and `security` matched `src/security.ts` in no field
+      // name — a real module, already wired, already taking its settings from
+      // its own `SecurityConfig`.
       dashboard: {
         enabled: true,
         port: 4747,
@@ -1820,11 +2065,6 @@ export class NexusOrchestrator {
         enabled: true
       },
       gitFlow: { ...GIT_FLOW_DEFAULTS },
-      security: {
-        sastEnabled: true,
-        secretsScanning: true,
-        scopeEnforcement: true
-      },
       learning: {
         enabled: true,
         patternStorage: 'memory',
@@ -1852,7 +2092,11 @@ export class NexusOrchestrator {
       budget: { ...defaults.budget, ...partial?.budget },
       agents: { ...defaults.agents, ...partial?.agents },
       selfHealing: { ...defaults.selfHealing, ...partial?.selfHealing },
-      communication: { ...defaults.communication, ...partial?.communication },
+      // No `communication` line: the block is gone from `NexusConfig` along with
+      // its only writer. A caller who still passes one is not rejected at
+      // runtime — `...restDefaults` / `...partial` are typed, so the property
+      // simply is not on the type any more — but nothing reads it either way,
+      // which is what the deletion is asserting.
       dashboard: { ...defaults.dashboard, ...partial?.dashboard },
       notifications: { ...defaults.notifications, ...partial?.notifications },
       // Merged per-key rather than carried through the blanket `...partial`
@@ -1866,7 +2110,12 @@ export class NexusOrchestrator {
       // `boolean | undefined` — which is precisely the "type says boolean,
       // runtime says undefined" shape this line exists to prevent.
       gitFlow: { ...GIT_FLOW_DEFAULTS, ...defaults.gitFlow, ...partial?.gitFlow },
-      security: { ...defaults.security, ...partial?.security },
+      // No `security` line, for the reason given above `dashboard`. Note what
+      // this does NOT touch: `this.securityScanner` below is constructed from
+      // `SecurityScanner`'s OWN defaults and scans every task's output at
+      // `scanContent` in `executeTask`. That is a live, wired path, and it is
+      // unaffected by the deletion — which is the whole finding, and the reason
+      // the block was scaffolding rather than a broken connection.
       learning: { ...defaults.learning, ...partial?.learning },
       // Present only when the caller supplied it; see the note on
       // `restDefaults` above and `NexusConfig.cost`.
@@ -1907,6 +2156,13 @@ export class NexusOrchestrator {
     const projectDir = this.ctx?.location.directory
     if (projectDir) {
       this.configManager.loadFromPath(projectDir, trigger)
+      // The roles are not the only thing a reload has to refresh. `selfHealing`
+      // and `budget` are read from snapshot fields, and a reload that refreshed
+      // only `configManager` left those holding the values the CONSTRUCTOR saw —
+      // which, in the shipped product, is to say the defaults. A user editing
+      // `retryDelay` in `nexus.jsonc` and reloading would see the file value in
+      // `/nexus config` and the old backoff in the retry.
+      this.syncFileConfig()
       // Re-read the roles too, and from the same merged config every other
       // consumer reads, so there is one answer to "which roles are in effect".
       // Unlike `notifications` — which is snapshotted into a manager at
@@ -1965,6 +2221,7 @@ export class NexusOrchestrator {
 
       // 3. Apply budget constraints
       if (request.budget) {
+        this.budgetOverride = request.budget
         this.budget = request.budget
       }
 
@@ -2132,10 +2389,12 @@ export class NexusOrchestrator {
   }
 
   /**
-   * Resolve the "providerID/modelID" reference that `spawnAgent` requires.
+   * Resolve the "providerID/modelID[#variant]" reference `spawnAgent` requires.
    *
    * `ModelSelection.model` is the bare id (`scoreModel` splits the candidate
-   * on "/"), so the two halves have to be rejoined here.
+   * through the shared ref parser), so the halves have to be rejoined here — and
+   * the variant with them. Rebuilt through `formatModelRef` rather than by hand
+   * so the `#` appears exactly when, and only when, a variant is set.
    */
   private selectQualifiedModel(node: DAGNode): string {
     // Analyze complexity and select model
@@ -2156,7 +2415,7 @@ export class NexusOrchestrator {
       )
     }
 
-    return `${model.provider}/${model.model}`
+    return formatModelRef({ providerID: model.provider, id: model.model, variant: model.variant })
   }
 
   /**
@@ -2348,11 +2607,11 @@ export class NexusOrchestrator {
       agent.metrics.totalTokens += result.tokensUsed
       // Single accounting path: trackCost owns totalSpent, costByAgent,
       // costByModel and the budget check.
-      this.trackCost(agent.id, `${agent.model.provider}/${agent.model.model}`, result.cost, result.tokensUsed, result.costProvenance)
+      this.trackCost(agent.id, this.modelSpendKey(agent.model), result.cost, result.tokensUsed, result.costProvenance)
 
       // Record performance metrics
       this.performanceTracker.record({
-        model: agent.model.model,
+        model: this.modelLabelKey(agent.model),
         role: node.task.requiredRole,
         success: result.success,
         duration: result.duration,
@@ -2366,7 +2625,7 @@ export class NexusOrchestrator {
         taskId: node.id,
         taskName: node.task.name,
         role: node.task.requiredRole,
-        model: agent.model.model,
+        model: this.modelLabelKey(agent.model),
         status: 'success',
         cost: result.cost,
         costProvenance: result.costProvenance,
@@ -2419,7 +2678,7 @@ export class NexusOrchestrator {
       // `collectResults` — the same two-step the spawn-failure path uses.
       this.dag!.markFailed(node.id, new Error(errorMessage))
       node.result = result
-      this.trackCost(agent.id, `${agent.model.provider}/${agent.model.model}`, result.cost, result.tokensUsed, result.costProvenance)
+      this.trackCost(agent.id, this.modelSpendKey(agent.model), result.cost, result.tokensUsed, result.costProvenance)
       agent.metrics.totalCost += result.cost
       agent.metrics.totalTokens += result.tokensUsed
       this.todoEnforcer.completeTask(agent.id)
@@ -2432,7 +2691,7 @@ export class NexusOrchestrator {
         taskName: node.task.name,
         agentId: agent.id,
         role: node.task.requiredRole,
-        model: agent.model.model,
+        model: this.modelLabelKey(agent.model),
         error: errorMessage,
         duration,
         sessionID: agent.sessionID
@@ -2440,7 +2699,7 @@ export class NexusOrchestrator {
 
       // Record performance metrics for failed task
       const performanceId = this.performanceTracker.record({
-        model: agent.model.model,
+        model: this.modelLabelKey(agent.model),
         role: node.task.requiredRole,
         success: result.success,
         duration: result.duration,
@@ -2454,7 +2713,7 @@ export class NexusOrchestrator {
         taskId: node.id,
         taskName: node.task.name,
         role: node.task.requiredRole,
-        model: agent.model.model,
+        model: this.modelLabelKey(agent.model),
         status: 'failed',
         cost: result.cost,
         costProvenance: result.costProvenance,
@@ -2567,7 +2826,7 @@ export class NexusOrchestrator {
   }): void {
     const sessionID = agent.sessionID
     if (!sessionID) return
-    const model = `${agent.model.provider}/${agent.model.model}`
+    const model = this.modelSpendKey(agent.model)
 
     // A task can time out AFTER `shutdown()` has already run — an in-flight
     // `executeTask` outlives the call that started it. Arming here would
@@ -3161,7 +3420,13 @@ export class NexusOrchestrator {
     // provider-qualified and so is every entry in the default policy, but a
     // user-configured policy may hold bare ids — comparing qualified against
     // bare would silently never match and the check would do nothing.
-    const failedRef = `${agent.model.provider}/${agent.model.model}`
+    //
+    // The variant is part of the identity here, and that is deliberate: a
+    // fallback entry naming `p/m` is a DIFFERENT configuration from the
+    // `p/m#high` that just failed, so escalating to it is a real change rather
+    // than the re-run of the identical task the check exists to prevent. For a
+    // variant-free agent this is the same string as before.
+    const failedRef = this.modelSpendKey(agent.model)
     // Only consume anything if there is something USABLE to consume. When every
     // entry equals the failed model there is no escalation to make, and leaving
     // the list intact keeps one node's dead end from becoming the whole
@@ -3347,9 +3612,18 @@ export class NexusOrchestrator {
 
     // Auto-complete model name if missing provider prefix
     // e.g. "mimo-v2.5" → find "opencode-go/mimo-v2.5" in config
+    //
+    // Matched on the parsed MODEL ID, not on `split('/')[1]`. The old
+    // comparison took the second segment, so a two-slash configured ref such as
+    // `openrouter/anthropic/claude-sonnet-4-5` compared `anthropic` against the
+    // caller's bare `claude-sonnet-4-5`, found no match, and threw — a config
+    // entry that is perfectly valid could not be named without its provider
+    // prefix. That is issue #85. It was left alone in the PR that filed it to
+    // keep that PR scoped; that reason no longer holds, because this change
+    // makes `provider/model#variant` a format this line has to parse.
     if (!modelConfig.includes('/')) {
       const allModels = this.configManager.getConfig().models
-      const match = Object.values(allModels).find(m => m?.split('/')[1] === modelConfig)
+      const match = Object.values(allModels).find(m => m && tryParseModelRef(m)?.id === modelConfig)
       if (match) {
         modelConfig = match
       } else {
@@ -3361,9 +3635,23 @@ export class NexusOrchestrator {
       }
     }
 
-    const slashIndex = modelConfig.indexOf('/')
-    const provider = modelConfig.slice(0, slashIndex)
-    const modelName = modelConfig.slice(slashIndex + 1)
+    // ONE parse, and both spawn paths below are driven from it. The reference
+    // may carry a `#variant`; the host's grammar is `providerID/modelID#variant`
+    // (see `src/model-ref.ts`), so a value that is not one is rejected HERE,
+    // loudly, instead of reaching the host as an id that matches no model.
+    let parsedRef: ReturnType<typeof parseModelRef>
+    try {
+      parsedRef = parseModelRef(modelConfig)
+    } catch (error) {
+      const source = config.model ? 'requested' : 'configured for role'
+      throw new Error(
+        `Invalid model "${modelConfig}" (${source} "${config.role}"). ` +
+        `Use "providerID/modelID" or "providerID/modelID#variant" (e.g. "opencode-go/mimo-v2.5#high"). ` +
+        `Cause: ${error instanceof Error ? error.message : String(error)}`
+      )
+    }
+    const provider = parsedRef.providerID
+    const modelName = parsedRef.id
 
     // Build descriptive session title for TUI display
     const roleEmoji = this.configManager.getRoleEmoji(config.role)
@@ -3464,10 +3752,25 @@ export class NexusOrchestrator {
       // so `metadata` would be silently dropped. The equivalent data (role,
       // model, sessionID) lives on the Agent record, which is persisted to
       // ctx.storage as `orchestrator-state` / `nexus-sidebar-state`.
+      // `model` is the STRUCTURED form, and it must carry the variant. The
+      // host's `SessionCreateInput.model` is `{ id, providerID, variant? }`, so
+      // omitting it meant a `p/m#high` reference arrived as the id `"m#high"` —
+      // a model that matches no `ModelInfo` — and the spawn SILENTLY ran on the
+      // default model while `metadata.nexusModel` still recorded `m#high`. The
+      // key is omitted entirely when there is no variant, so a variant-free
+      // spawn passes the same object it always did.
+      //
+      // The `subagent`-tool branch above hands the host the STRING reference
+      // instead, and the host's own `Model.Ref.parse` handles the `#` there.
+      // Both branches are now driven from the single `parsedRef` above, so the
+      // two paths cannot disagree about the same reference; see
+      // `test/model-ref.test.ts`, which asserts that agreement.
       const created = await this.ctx.session.create({
         title,
         agent: agentType,
-        model: modelName ? { providerID: provider, id: modelName } : undefined,
+        model: modelName
+          ? { providerID: provider, id: modelName, ...(parsedRef.variant ? { variant: parsedRef.variant } : {}) }
+          : undefined,
         metadata: {
           nexusRole: config.role,
           nexusTask: config.task?.name || 'direct-spawn',
@@ -3511,6 +3814,15 @@ export class NexusOrchestrator {
       model: {
         provider,
         model: modelName || 'default',
+        // The effort the spawn actually requested, from the SAME `parsedRef`
+        // both spawn paths were driven from. This record is the source for
+        // every downstream key — `modelSpendKey` and `modelLabelKey` both read
+        // it — so a variant omitted here is one that never reaches the cost
+        // ledger, the performance metrics, the execution history, or the state
+        // snapshot. It is built here rather than copied from a caller because
+        // this is the only place a `ModelSelection` for a spawned agent is
+        // constructed.
+        ...(parsedRef.variant ? { variant: parsedRef.variant } : {}),
         estimatedCost: 0,
         estimatedQuality: 0.5,
         reasoning: `Configured for ${config.role}`
@@ -3637,24 +3949,36 @@ export class NexusOrchestrator {
    *   3. a bare-id match across providers — the cheapest wins, so a provider
    *      collision cannot silently shadow the cheaper price
    *
+   * A `#variant` is stripped BEFORE any of the three, and this is the one place
+   * in the plugin a variant is deliberately dropped: `ModelVariant` is
+   * `{ id, settings?, headers?, body? }` and carries no `cost`, so `p/m#xhigh`
+   * and `p/m` are billed at the same rate and differ only in token volume. Not
+   * stripping it was the third silent failure this change fixes — the lookup
+   * missed every key, returned `undefined`, and `CostForecaster.tiersFor` fell
+   * through to `UNKNOWN_PRICING_PER_1K`, so a MEASURED token count was reported
+   * at a 0.01/0.05 guess labelled `unknown-model`. A real figure had become a
+   * fabricated one. Variant-free input reaches the three steps below byte for
+   * byte as it did before, because `priceKeyForRef` is the identity on it.
+   *
    * "Cheapest" compares the BASE tier's input rate, via `selectTier(tiers, 0)`:
    * a prompt size of 0 is below every real context threshold, so this is the
    * base row by construction rather than by indexing `tiers[0]`, which a
    * hand-edited map could have reordered.
    */
   getModelCost(model: string, provider?: string): NexusModelCost | undefined {
-    const exact = this.modelCosts.get(model)
+    const key = priceKeyForRef(model)
+    const exact = this.modelCosts.get(key)
     if (exact) return exact
 
     if (provider) {
-      const qualified = this.modelCosts.get(`${provider}/${model}`)
+      const qualified = this.modelCosts.get(`${provider}/${key}`)
       if (qualified) return qualified
     }
 
-    const bare = bareModelId(model)
+    const bare = bareModelId(key)
     let best: NexusModelCost | undefined
-    for (const [key, cost] of this.modelCosts) {
-      if (bareModelId(key) !== bare) continue
+    for (const [costKey, cost] of this.modelCosts) {
+      if (bareModelId(costKey) !== bare) continue
       if (!best || baseInputRate(cost) < baseInputRate(best)) best = cost
     }
     return best
@@ -3741,8 +4065,19 @@ export class NexusOrchestrator {
     complexity: ComplexityScore,
     estimates?: ReadonlyMap<string, number>
   ): ModelScore {
-    const [provider, ...parts] = modelId.split('/')
-    const model = parts.join('/')
+    // One parse, from the single ref grammar in `src/model-ref.ts`, so a
+    // `#variant` is split off here instead of being swallowed into the model
+    // id. The old destructuring-and-rejoin was right about the two-slash case
+    // and wrong about everything else.
+    //
+    // A BARE id is not a reference and the host rejects it, so the historical
+    // result is reproduced exactly: `provider` is the whole value and `model`
+    // is empty. That is what makes `selectQualifiedModel`'s loud throw fire
+    // instead of a silent wrong-model spawn, and it is preserved deliberately.
+    const parsed = tryParseModelRef(modelId)
+    const provider = parsed ? parsed.providerID : modelId
+    const model = parsed ? parsed.id : ''
+    const variant = parsed?.variant
 
     const estimate = estimates?.get(modelId)
       ?? this.forecaster.estimateCost(complexity, model, provider)
@@ -3772,6 +4107,10 @@ export class NexusOrchestrator {
     return {
       model,
       provider,
+      // Omitted rather than set to `undefined` when there is none, so the
+      // returned object is byte-identical to what it was before a variant could
+      // be carried at all.
+      ...(variant ? { variant } : {}),
       costScore,
       qualityScore: quality,
       // PRE-EXISTING and unchanged: `speedScore` is reported but is not a term
@@ -3803,8 +4142,14 @@ export class NexusOrchestrator {
     // coincidentally-identical calculations.
     const estimates = new Map<string, number>()
     for (const ref of unique) {
-      const [provider, ...parts] = ref.split('/')
-      estimates.set(ref, this.forecaster.estimateCost(complexity, parts.join('/'), provider))
+      // Same parse `scoreModel` uses, so the price estimated here is the price
+      // the ranker compares against. A variant-bearing candidate resolves to the
+      // underlying model's price, which is the correct one: `ModelVariant` has
+      // no `cost` of its own, and effort changes token volume rather than rate.
+      const parsed = tryParseModelRef(ref)
+      const provider = parsed ? parsed.providerID : ref
+      const model = parsed ? parsed.id : ''
+      estimates.set(ref, this.forecaster.estimateCost(complexity, model, provider))
     }
 
     // Score all candidates
@@ -3827,26 +4172,177 @@ export class NexusOrchestrator {
     const best = (affordable.length > 0 ? affordable : scored)
       .sort((a, b) => b.score.overallScore - a.score.overallScore)[0]
 
-    return {
+    return this.applyEffort({
       provider: best.score.provider,
       model: best.score.model,
+      // Threaded from the winning candidate. Omitted when the candidate carried
+      // no variant, so a variant-free selection is the same object as before.
+      ...(best.score.variant ? { variant: best.score.variant } : {}),
       // A per-task estimate in USD, which is what the field is named and what
       // consumers read it as. Read from the same map the filter and the ranker
       // used, so the reported figure is the figure that was compared.
       estimatedCost: estimates.get(best.ref) ?? 0,
       estimatedQuality: best.score.qualityScore,
       reasoning: best.score.reasoning
+    }, complexity, this.configManager.getConfig().effort)
+  }
+
+  /**
+   * The ONE gate every effort decision goes through.
+   *
+   * Called from `selectBestModel` and nowhere else, so there is no second path
+   * that could pick an effort the config did not sanction — the same
+   * single-gate rule `dashboard` and `gitFlow` follow, and the reason a key
+   * cannot be readable from two places with no defined precedence between them.
+   *
+   * ── What this deliberately does NOT do ─────────────────────────────
+   *
+   * It does not re-rank. The question "which model" was already answered by
+   * `scoreModel`, on quality against a per-task dollar estimate, and this runs
+   * on the WINNER. The tempting alternative — re-ordering candidates by price
+   * times an effort-driven token multiplier — was rejected for a specific
+   * reason rather than for being more work: the only token estimate in the
+   * repository is `estimateTokensFor`, whose own comment records that the budget
+   * filter "estimates with `fileCount = 0`, so it prices the low end of what
+   * the real estimator would produce for a task with files in scope" and is
+   * therefore OPTIMISTIC BY CONSTRUCTION. Using an optimistic figure to reorder
+   * models would bake that optimism into which model runs; using the raw
+   * difficulty as a monotone ceiling makes it irrelevant to the ordering,
+   * because the ordering never depended on the estimate. The honest fix for the
+   * optimism is to give the filter the task, which is a separate change.
+   *
+   * The cross-model claim is the one this therefore does not make. "A cheaper
+   * model at `xhigh` may cost more than an expensive model at `low`" is TRUE and
+   * is not answered here, because answering it needs a reasoning-token
+   * multiplier nobody has measured. What is answered is the user's half of it:
+   * the CEILING, which bounds the extra spend for every task regardless of
+   * which model wins.
+   *
+   * ── The cases, and each one's answer ───────────────────────────────
+   *
+   *  - **Off.** `enabled: false` returns the selection untouched, with no
+   *    variant, no reasoning change, and no reference to this feature. The
+   *    returned object is the SAME OBJECT `selectBestModel` built, so "nothing
+   *    changes" is structural rather than a promise — there is no field to
+   *    differ. `test/effort-selection.test.ts` proves it differentially.
+   *  - **The user already named one.** A reference carrying `#variant` is left
+   *    EXACTLY as written and the automatic choice does not run. An explicit
+   *    setting outranking an automatic default is the least surprising order,
+   *    and a config that silently rewrites itself is a defect. When the
+   *    catalogue knows the model and does NOT publish that name, the mismatch
+   *    is REPORTED in `reasoning` — never corrected, never dropped, and never
+   *    a throw, because losing the user's task over a suffix is worse than
+   *    running a model at a level its host may reject.
+   *  - **The model publishes nothing** (`variants: []`). No suffix, and
+   *    `reasoning` says the model publishes no variants. A model that WAS
+   *    addressed with a suffix and now publishes none is a config change, not
+   *    something to paper over — the absence of a suffix on such a model is
+   *    reported rather than being indistinguishable from "off".
+   *  - **The catalogue never told us.** No suffix either, reported as unknown
+   *    rather than as "publishes none", because the two are different facts and
+   *    only one of them is a statement about the model.
+   *  - **The ceiling excludes everything published.** No suffix, reported with
+   *    the ceiling and the published list, because picking any of them would
+   *    spend more than the ceiling allows and pretending otherwise is the one
+   *    thing a cost control must not do.
+   */
+  private applyEffort(
+    selection: ModelSelection,
+    complexity: ComplexityScore,
+    config: NexusEffortConfig
+  ): ModelSelection {
+    if (!config.enabled) return selection
+
+    const key = `${selection.provider}/${selection.model}`
+    const published = this.publishedVariants.get(priceKeyForRef(key))
+
+    // An explicit `#variant` is the user's, and the automatic choice does not
+    // run at all. Checked BEFORE anything else so no catalogue state can
+    // influence it.
+    if (selection.variant !== undefined) {
+      const verdict = published === undefined
+        ? ` (effort: kept the explicit variant you set; this model's published variants are unknown)`
+        : published.includes(selection.variant)
+          ? ` (effort: kept the explicit variant you set)`
+          : ` (effort: kept the explicit variant you set, but ${key} does not publish "${selection.variant}" — it publishes ${published.length === 0 ? 'none' : published.map(name => `"${name}"`).join(', ')})`
+      return { ...selection, reasoning: `${selection.reasoning}${verdict}` }
     }
+
+    const note = (text: string): ModelSelection => ({ ...selection, reasoning: `${selection.reasoning} (effort: ${text})` })
+
+    if (published === undefined) {
+      return note(`not chosen — the model catalogue has no entry for ${key}, so no effort can be verified against one`)
+    }
+    if (published.length === 0) {
+      return note(`not chosen — ${key} publishes no variants`)
+    }
+    if (complexity.overall < config.minDifficulty) {
+      return note(`not chosen — difficulty ${complexity.overall} is below effort.minDifficulty ${config.minDifficulty}`)
+    }
+
+    // The mapping's ceiling and the user's ceiling meet at the lower of the two.
+    // Intersecting them rather than applying only the user's is what makes
+    // `minDifficulty` and `maxEffort` independent controls instead of one
+    // overwriting the other.
+    const wanted = effortForDifficulty(complexity.overall)
+    const ceiling: ModelEffort = effortIndex(wanted) < effortIndex(config.maxEffort) ? wanted : config.maxEffort
+    const chosen = reconcileEffort(ceiling, published)
+
+    if (chosen === undefined) {
+      return note(
+        `not chosen — ${key} publishes ${published.map(name => `"${name}"`).join(', ')}, ` +
+        `none of which is at or below the ${JSON.stringify(ceiling)} ceiling ` +
+        `(difficulty ${complexity.overall} asks for at most ${JSON.stringify(wanted)}, effort.maxEffort is ${JSON.stringify(config.maxEffort)})`
+      )
+    }
+    return { ...selection, variant: chosen, reasoning: `${selection.reasoning} (effort: ${chosen} — difficulty ${complexity.overall} asks for at most ${wanted}, capped by effort.maxEffort ${config.maxEffort}, and ${key} publishes ${published.map(name => `"${name}"`).join(', ')})` }
   }
 
   // === Cost Tracking ===
 
   /**
+   * The `costByModel` / `costHistory` / `tokensByModel` key for a selection:
+   * `providerID/modelID#variant`, or `providerID/modelID` when there is no
+   * variant.
+   *
+   * ONE helper, because these keys were being rebuilt by hand at four separate
+   * call sites and a variant threaded through three of them is exactly how it
+   * ends up kept in one place and dropped in another.
+   *
+   * A variant-bearing reference DOES get its own `costByModel` bucket, and that
+   * is deliberate. `costByModel` is a spend ledger keyed by what was actually
+   * run, and two runs of `p/m` — one at `low`, one at `xhigh` — are two
+   * different spending events with very different token volumes; merging them
+   * would erase the only thing an effort-aware selection is trying to reveal.
+   * The buckets price identically because `ModelVariant` has no `cost` of its
+   * own, and that is not an inconsistency: it is the statement that effort
+   * changes volume, not rate. The PRICE table stays variant-free and
+   * `getModelCost` strips the variant before joining, so the join is still
+   * exact.
+   */
+  private modelSpendKey(selection: ModelSelection): string {
+    return formatModelRef({ providerID: selection.provider, id: selection.model, variant: selection.variant })
+  }
+
+  /**
+   * The `model` label on a `performanceTracker` / `executionHistory` record:
+   * the bare id, plus the variant when there is one (`m`, or `m#high`).
+   *
+   * A variant-free selection yields the bare id it always did, so every existing
+   * performance and history key is unchanged.
+   */
+  private modelLabelKey(selection: ModelSelection): string {
+    return selection.variant ? `${selection.model}#${selection.variant}` : selection.model
+  }
+
+  /**
    * The ONE place spend is mutated. `model` is expected in the same
-   * "providerID/id" form `modelCosts` uses, so `costByModel` and the price
-   * table can be joined directly. `provenance` is required rather than
-   * defaulted: an accounting entry that does not say whether its tokens and
-   * rate were real is a reporting bug, so the caller has to state it.
+   * "providerID/id" form `modelCosts` uses — plus a `#variant` when the agent
+   * ran at a non-default effort, so `costByModel` and the price table can be
+   * joined directly after `getModelCost` strips the variant. `provenance` is
+   * required rather than defaulted: an accounting entry that does not say
+   * whether its tokens and rate were real is a reporting bug, so the caller has
+   * to state it.
    */
   trackCost(agentId: string, model: string, cost: number, tokens: number, provenance: CostProvenance): void {
     this.totalSpent += cost
@@ -3858,6 +4354,10 @@ export class NexusOrchestrator {
     this.recordProvenance(model, cost, provenance)
     this.costHistory.push({ timestamp: Date.now(), cost, agentId, model, tokens, provenance })
     this.checkBudget()
+    // After `checkBudget` and NOT instead of it: the two report different
+    // things, and a run can cross its total while no single task is over — or
+    // the reverse, one task many times over, with the total barely moved.
+    this.checkTaskBudget(agentId, cost)
     this.notifyStateChange()
   }
 
@@ -3948,7 +4448,12 @@ export class NexusOrchestrator {
    * keeps the difference visible in state.
    */
   private async accountTaskCost(agent: Agent, task: Task): Promise<TaskCost> {
-    const model = `${agent.model.provider}/${agent.model.model}`
+    // Variant-bearing, so the cost key says what actually ran. Both consumers
+    // below are variant-safe: `measureCost` reaches `tiersFor`, whose
+    // `bareModelId` strips the variant, and `getModelCost` strips it before
+    // joining the price table — which is right, because `ModelVariant` has no
+    // `cost` and effort changes token volume, not rate.
+    const model = this.modelSpendKey(agent.model)
     const read = agent.sessionID ? await this.readSessionTokens(agent.sessionID) : { read: false as const }
 
     if (read.read) {
@@ -4073,11 +4578,92 @@ export class NexusOrchestrator {
       return
     }
 
-    if (!this.budgetExceeded && remainingPercent <= this.config.budget.alertThreshold) {
+    // `this.budget.alertThreshold` and NOT `this.config.budget.alertThreshold`.
+    // The two are the same object until an `ExecutionRequest.budget` replaces
+    // one, and at that moment `this.config.budget` still holds the CONFIGURED
+    // thresholds while `remaining` above was computed from the request's
+    // ceiling — so the old read compared a number derived from one budget
+    // against a threshold belonging to another, and could report "Budget low"
+    // against a threshold the run is no longer being held to. One budget, one
+    // answer, and it is the one in force.
+    if (!this.budgetExceeded && remainingPercent <= this.budget.alertThreshold) {
       this.emit('budget:alert', { remaining, remainingPercent })
       // Notify on budget alert
       this.sendNotification({ title: 'Nexus: Budget Alert', body: `Budget low: $${remaining.toFixed(2)} remaining (${(remainingPercent * 100).toFixed(1)}%)`, sound: true })
     }
+  }
+
+  /**
+   * The per-TASK half of `checkBudget`: attribute this charge to a task, and
+   * notify the first time a task's running total crosses `maxCostPerTask`.
+   *
+   * CALLED FROM `trackCost` alongside `checkBudget`, and kept separate from it
+   * rather than inlined, because the two answer different questions. The total
+   * asks "is the run out of money"; this asks "which task spent it", and a
+   * single run can be nowhere near its total cap while one task has run up
+   * three times what the user budgeted for it. That is the case the total
+   * cannot see and the case a user most wants named.
+   *
+   * ADVISORY, and it stops nothing. The cost of a turn is only known once the
+   * turn returns or times out, so there is no point at which this could
+   * interrupt work in progress — a ceiling that reports is not a cap, and
+   * calling it one is how this knob was a lie in the first place. It is the
+   * same relationship `maxTotalCost` has to `hardLimit: false`, which is also
+   * only a report. Nothing is dropped, no task is cancelled, no retry is
+   * suppressed: the notification and the work both happen.
+   *
+   * Latched per task, so a task that keeps spending raises one notification
+   * rather than one per charge, and a run with five expensive tasks names five.
+   *
+   * A charge that attributes to no task is not counted against any ceiling and
+   * raises nothing — see the note on `taskIdForAgent` at the call site.
+   */
+  private checkTaskBudget(agentId: string, cost: number): void {
+    const limit = this.budget.maxCostPerTask
+    // A zero or negative ceiling would fire on the first cent of any task. It
+    // is not a documented way to disable a single task's spending — the run's
+    // `maxTotalCost` is — so it is treated as "no per-task ceiling" rather than
+    // as an instruction to notify about every task.
+    if (!Number.isFinite(limit) || limit <= 0) return
+
+    const taskId = this.taskIdForAgent(agentId)
+    if (taskId === null) return
+
+    const taskCost = (this.costByTask.get(taskId) ?? 0) + cost
+    this.costByTask.set(taskId, taskCost)
+    if (taskCost <= limit || this.tasksOverBudget.has(taskId)) return
+
+    this.tasksOverBudget.add(taskId)
+    // A notification and NOTHING ELSE, deliberately.
+    //
+    // The obvious thing here is to emit a `budget:task-exceeded` event beside
+    // it, and it is the wrong thing. `test/broadcast-event-coverage.test.ts`
+    // greps this file and requires every literal emit site to be named in
+    // `BROADCAST_EVENTS`, so an event with no entry in `src/broadcast.ts`
+    // reaches no WebSocket client and no dashboard — which is the same disease
+    // that test was written to end (nine events, including every `cost:delta`,
+    // silently forwarded to nobody). Emitting one anyway would have been the
+    // original sin in miniature. `src/broadcast.ts` is also outside the change
+    // this was made in, so wiring it properly was not available here; shipping
+    // a half-wired event instead of a working notification would have been the
+    // worse of the two.
+    //
+    // So this is reported to the one channel that IS wired: the same
+    // `sendNotification` the hard limit uses, through the same
+    // `notifications.enabled` gate. It reaches the user; it does not pretend to
+    // be an event with subscribers.
+    //
+    // `sound: false`, and deliberately: unlike the run's hard limit this is not
+    // terminal and not rare, so interrupting for every one of them is how a
+    // notification gets muted and then missed when it matters. The body also
+    // says "Not stopped" in as many words, because the ceiling is advisory and a
+    // user who reads "over its per-task budget" is owed the reason nothing
+    // halted.
+    this.sendNotification({
+      title: 'Nexus: Task Over Budget',
+      body: `Task ${taskId} spent $${taskCost.toFixed(2)}, over its $${limit.toFixed(2)} per-task budget. Not stopped — reported only.`,
+      sound: false
+    })
   }
 
   // === Communication ===

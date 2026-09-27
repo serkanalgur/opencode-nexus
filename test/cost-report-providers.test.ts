@@ -118,7 +118,6 @@ async function reportFor(
       enabled: false,
       maxRetries: 3,
       retryDelay: 0,
-      backoffMultiplier: 2,
       contextTransfer: false,
     },
   })

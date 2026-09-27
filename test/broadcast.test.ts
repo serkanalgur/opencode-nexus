@@ -37,7 +37,7 @@ describe('StateBroadcaster', () => {
 
   beforeEach(() => {
     orchestrator = new NexusOrchestrator({
-      budget: { maxTotalCost: 10.00, maxCostPerTask: 1.00, maxCostPerAgent: 2.00, alertThreshold: 0.2, hardLimit: false }
+      budget: { maxTotalCost: 10.00, maxCostPerTask: 1.00, alertThreshold: 0.2, hardLimit: false }
     })
     orchestrator.initialize(mockCtx as any)
     broadcaster = new StateBroadcaster(orchestrator, { throttleMs: 50 })
@@ -374,7 +374,7 @@ describe('NexusOrchestrator.initBroadcaster', () => {
 
   beforeEach(() => {
     orchestrator = new NexusOrchestrator({
-      budget: { maxTotalCost: 10.00, maxCostPerTask: 1.00, maxCostPerAgent: 2.00, alertThreshold: 0.2, hardLimit: false }
+      budget: { maxTotalCost: 10.00, maxCostPerTask: 1.00, alertThreshold: 0.2, hardLimit: false }
     })
     orchestrator.initialize(mockCtx as any)
   })

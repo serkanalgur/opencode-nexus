@@ -87,7 +87,10 @@ files.
 
 ### 1. Configure Agent Models
 
-Press **Ctrl+N** or type `/nexus` to open the configuration dialog. Select where to save (project or global).
+Press **Ctrl+N** or type `/nexus` to open the fullscreen configuration panel. It
+lists every config value — including the model per role — and `tab` switches
+whether a save writes to this project or to your global config. To skip the panel
+and pick one role's model, run `/nexus model <role>`.
 
 ### 2. Use the Nexus Orchestrator
 
@@ -113,7 +116,7 @@ Use nexus.goal.set with description="Build complete auth system"
 ### 3. Use Slash Commands
 
 ```
-/nexus              # Open full configuration dialog
+/nexus              # Open the fullscreen configuration panel
 /nexus dashboard    # Start the web dashboard and open it in your browser
 /nexus status       # Show the config summary
 /nexus model coder  # Pick the model for a role
@@ -173,17 +176,173 @@ had none) until the server restarts; the TUI model picker memoises names per
 project directory for the same reason. A stale name is a wrong *label* on rows
 that are otherwise correct — never a missing model and never a wrong price.
 
+**Effort is not part of the score.** A model with a cheaper per-token rate still
+wins on the same quality/cost comparison it always did, and the quality/cost
+weight split is unchanged. A variant moves token volume, not rate — see
+[Effort-Aware Model Selection](#effort-aware-model-selection) for what does
+choose an effort.
+
+### Effort-Aware Model Selection
+
+Off by default. With it on, Nexus asks the model that won selection to run at a
+reasoning effort matched to how hard it judged the task, instead of leaving that
+to the host's default.
+
+`.opencode/nexus.jsonc` (project) and `~/.config/opencode/nexus.jsonc` (global)
+both accept:
+
+```jsonc
+{
+  "effort": {
+    "enabled": false,        // master switch; nothing below is consulted when off
+    "maxEffort": "high",     // ceiling: none, minimal, low, medium, high, xhigh, max
+    "minDifficulty": 0       // 0-100; below this, no effort is chosen at all
+  }
+}
+```
+
+**Higher effort means more reasoning tokens at the same per-token rate.** It
+does not make a token cheaper or dearer, so nothing in the cost arithmetic
+changes: a variant carries no price of its own (`ModelVariant` has no `cost`
+field), so `p/m` and `p/m#high` are the same rate, and the extra reasoning
+tokens are billed by the existing measured path, which charges reasoning tokens
+alongside output. There is deliberately no variant axis on the price tiers —
+their only axis is context size.
+
+**What "how hard" means.** The difficulty is the `overall` score from the
+analysis the orchestrator already runs on every spawn, and that score already
+decides the quality/cost weight split, so ranking and effort cannot disagree
+about where a task stops being easy. The buckets are `0-20 → none`, `21-40 →
+minimal`, `41-55 → low`, `56-70 → medium`, `71-85 → high`, `86-95 → xhigh`,
+`96-100 → max`; the `40` and `70` boundaries are the ones the existing weight
+split already uses. That analysis is a heuristic, not a measurement — it reads
+no source files and guesses a code size from the file count — so the interior
+boundaries are a policy claim rather than a fact about your task.
+
+**Only published levels are ever requested.** Nexus takes the highest level the
+model actually publishes that is at or below the ceiling. A model publishing
+`low`, `high` and `max` asked to run at `high` gets `high`; one publishing none
+of those gets **no suffix at all**, because picking any of them would spend more
+than the ceiling allows. `maxEffort: "high"` is therefore a real cost control
+rather than a label: at the default, the two hardest buckets (`xhigh` and `max`)
+are not reachable, because an estimate of how hard a task is does not justify
+several times the reasoning budget to answer it. Raise it if you disagree.
+
+**An effort you named yourself is not rewritten — but on the DAG path it is only
+a candidate.** A configured `anthropic/claude-sonnet-4-6#minimal` is never
+reinterpreted: if the model publishes that name, Nexus uses that name, and if it
+does not, Nexus says so in the selection's reasoning and leaves your value
+alone. What it is *not* is a guarantee that this model runs. When a task is
+scheduled through the DAG, `selectBestModel` scores your configured reference
+alongside five built-in alternatives and picks the highest scorer — so a
+cheaper or better-quality alternative can win, and then **neither the model nor
+the variant is used**: the winner's `model` and `variant` are what the spawn
+carries, and your `#minimal` does not travel with it. On the direct-spawn path,
+where you name the model yourself, nothing ranks it and it runs as written.
+
+**When no effort can be chosen, it says which reason.** The `nexus.spawn` result
+line `🤖 Model reasoning:` carries the selection's explanation, and for effort it
+distinguishes: the model publishes no variants; the catalogue has no entry for
+it, so nothing can be verified; the task is easier than `minDifficulty`; or every
+published level is above the ceiling. The first three all mean "no suffix", and
+reporting them separately is what keeps a missing variant from being
+indistinguishable from a typo. When one is chosen, the same line names the
+level, the difficulty, the ceiling, and what the model publishes — so a surprise
+in the bill can be traced to the decision that caused it.
+
+**Every key is read.** `enabled` decides whether the automatic choice is made at
+all — with it off, no selection outcome differs in any way, and a `#variant` you
+wrote behaves exactly as before. `maxEffort` clamps the choice, and
+`minDifficulty` skips tasks below it. The block is merged **field by field**
+across the storage (TUI) > project > global > constructor levels, so a level
+that sets only `enabled` does not blank out the two numbers resolved beneath it.
+
 ### Self-Healing with Escalation
 
 Failed tasks follow a 4-step escalation chain:
 
-1. **Retry** — Exponential backoff (1s, 2s, 4s...)
+1. **Retry** — Exponential backoff: attempt *n* waits `retryDelay * 2ⁿ`, so the
+   default `retryDelay: 1000` gives 1s, 2s, 4s
 2. **Respawn** — Collect context, spawn new agent with transferred state
 3. **Fallback Model** — Try a cheaper alternative model. The fallback list (`google/gemini-2.5-flash`, then `anthropic/claude-haiku-4-5`) is a hardcoded default in `src/orchestrator.ts`, not something `nexus.jsonc` can change
 4. **Alert** — Emit escalation event, mark as failed
 
 The retry count, retry delay and context-transfer toggle are configurable under
-`selfHealing`; the fallback models are not.
+`selfHealing`; the fallback models are not. `selfHealing` has exactly those four
+keys, and all four are read. `retryDelay` in particular is file-settable **and
+file-effective**: it is merged field by field like every other block, pushed
+into the escalation policy at `initialize()` and on every reload, and it is the
+value the backoff multiplies — so `retryDelay: 4321` waits 4321 ms, not 1000 ms
+with a comment saying otherwise. The **2** in the backoff is a literal in
+`handleFailure` and is not configurable — a `backoffMultiplier` key used to sit
+in this block and in the dashboard's config panel, where it was rendered as
+"× 3.50" while the code went on computing `Math.pow(2, retryCount)`. It has been
+removed rather than left to look like a control.
+
+### Keys Nexus does not read
+
+If a `nexus.jsonc` carries a key no current Nexus reads — a leftover from an
+older version, or a typo — Nexus says so once, on load, naming every one of them
+and the file it came from:
+
+```
+[nexus] ~/.opencode/nexus.jsonc has 2 key(s) Nexus does not read:
+budget.maxCostPerAgent, selfHealing.backoffMultiplier. They are ignored, and the
+next save from the config panel will remove them from the file.
+```
+
+This is not a warning about a mistake you have to avoid; it is the upgrade
+notice. Blocks whose key set is yours to invent — `models` and `customRoles` —
+are never reported, because a role name and a custom role are not stale keys.
+
+### Budget
+
+`budget` has **three** file-settable keys, and each one is read:
+
+| Key | What it does |
+|-----|--------------|
+| `maxTotalCost` | The run's total ceiling. Compared against `totalSpent` on every charge |
+| `alertThreshold` | The remaining *fraction* of `maxTotalCost` at or below which the low-budget alert fires |
+| `maxCostPerTask` | An **advisory** per-task ceiling. Notifies once per task, naming the task, when that task's running total crosses it |
+
+All three reach enforcement from the file. They are merged **field by field**
+across storage (TUI) > project > global > constructor, pushed into the
+orchestrator at `initialize()` and again on every reload, and the single value
+they land in is the one the dashboard and `/nexus status` display — so what you
+see is what is in force. (The one exception is a programmatic run: an
+`ExecutionRequest.budget` replaces the ceiling for that run and survives later
+reloads, so the panel keeps showing the file's value while the run is held to
+the caller's. That is deliberate — a reload mid-run must not move the ceiling
+out from under spend already measured against the old one.) A `budget` block is
+written out in full on save, so editing one of these cannot delete the others.
+
+`maxCostPerTask` is advisory for the same reason `maxTotalCost` is:
+a turn already in flight cannot be interrupted, because its cost is only known
+once it returns or times out. So it reports an overspend after the fact and
+**stops nothing** — no task is cancelled, no retry is suppressed, no spend is
+un-charged. What it gives you is the one thing the run total cannot: *which
+task* ran the bill up.
+
+**`hardLimit` is a fourth key on the budget, and it is deliberately not
+file-settable.** It is a real, enforced switch — `true` makes `maxTotalCost`
+**terminal**: the run pauses and notifies, and `maxCostPerTask` is not the only
+thing that can stop work. It is reachable programmatically (a constructor
+argument, or an `ExecutionRequest.budget` for one run) and it survives a config
+reload, but there is no `hardLimit` in `NexusFullConfig.budget`, so no file,
+preset or config-panel row can set it. That is a decision, not an oversight: the
+alternative was a fourth file key that turns a paused run back on, and a budget
+you cannot stop work on is a limit rather than a report. If you need the
+terminal behaviour, embed the orchestrator and pass it. **If you were told to
+set `hardLimit: true` in `nexus.jsonc`, that advice was wrong** — the key there
+is read by nothing, and Nexus now says so on load rather than ignoring it in
+silence.
+
+There is no per-agent ceiling. A `maxCostPerAgent` key used to sit here, in all
+four presets and in the dashboard, where the page scaled every agent's cost bar
+by it and captioned the result "of $N per-agent ceiling · OVER CEILING" — with
+nothing enforcing it. Agents are long-lived and have no task boundary, so a
+per-agent ceiling has no well-defined denominator; it has been removed. The
+agent cost bars are now scaled by `maxTotalCost`, the one cap that is real.
 
 ### Web Dashboard
 
@@ -254,7 +413,12 @@ shows how old the last snapshot is, and labels it stale past 15 seconds.
   This list is nexus's own bookkeeping, not an enumeration of every open session
   on the server, and the page says so on the section itself.
 - **Agents** — role, status, model, session id, and metrics
-- **Budget** — spend against the configured cap, with the alert threshold marked
+- **Budget** — spend against the run's total cap, with the alert threshold
+  marked. The config panel also shows the per-task ceiling, labelled *advisory*
+  because that is what it is: it notifies when one task's running total crosses
+  it and stops nothing, since a turn already in flight cannot be interrupted.
+  The agent cost bars are scaled against the total cap — there is no per-agent
+  ceiling, and there never was one that anything enforced
 - **Tasks and DAG** — the task list, and a graph drawn from the dependency edges
   the state actually reports. Edges pointing at tasks that are not in the
   snapshot, self-edges, and cycles are counted and reported in the section note
@@ -319,8 +483,8 @@ Create a team of specialist agents working in parallel:
 
 ```
 nexus.team.create(name="auth-team", leadRole="architect")
-nexus.team.addMember(teamId="...", role="coder", model="opencode/mimo-v2.6-flash-free")
-nexus.team.addMember(teamId="...", role="reviewer", model="opencode/muse-spark-1.2-contributor-free")
+nexus.team.addMember(teamId="...", role="coder")
+nexus.team.addMember(teamId="...", role="reviewer")
 nexus.team.activate(teamId="...")
 ```
 
@@ -367,6 +531,16 @@ PRIVATE KEY-----`, AWS credentials) and eight dangerous-substring patterns
 `new Function(`, `__proto__=`, direct `process.env`). It is per-file and
 per-line with no dataflow or CVE awareness; secret matches are reported
 `critical` and dangerous-pattern matches `medium` regardless of context.
+
+It also runs automatically over every task's output during execution, and
+emits `security:issues-found`. It is **not** configurable from `nexus.jsonc`:
+`SecurityScanner` takes its settings from its own `SecurityConfig` when it is
+constructed, and the orchestrator constructs it with no arguments. A
+`security` block (`sastEnabled`, `secretsScanning`, `scopeEnforcement`) used to
+exist in the orchestrator's config type and was read by nothing at all — none of
+its three fields shared a name with the module's own options, and
+`scopeEnforcement` describes a capability the scanner does not have in any form.
+It has been removed, so the pattern list above is the whole truth.
 
 ```
 nexus.security.scan(content="const API_KEY = \"sk-123\"", filename="config.ts")
@@ -591,7 +765,7 @@ installed with the package — treat it as a repo document, not a shipped featur
 | `nexus.goal.complete` | Complete goal | `{}` |
 | `nexus.goal.list` | List all goals | `{}` |
 | `nexus.team.create` | Create a team | `{ name, leadRole }` |
-| `nexus.team.addMember` | Add team member | `{ teamId, role, model }` |
+| `nexus.team.addMember` | Add team member | `{ teamId, role }` |
 | `nexus.team.status` | Team status | `{ teamId? }` |
 | `nexus.team.activate` | Start team | `{ teamId }` |
 | `nexus.performance.scores` | Performance scores | `{}` |
@@ -615,17 +789,17 @@ installed with the package — treat it as a repo document, not a shipped featur
 ## TUI Commands
 
 The TUI plugin registers exactly these slash commands. With no argument,
-`/nexus` opens the full configuration dialog; with one, it dispatches to a
-subcommand (`config`/`c`, `status`/`s`, `dashboard`/`d`, `web`/`w`,
-`overview`, `model`/`m`, `reset`).
+`/nexus` opens the fullscreen [configuration panel](#the-configuration-panel);
+with one, it dispatches to a subcommand (`config`/`c`, `status`/`s`,
+`dashboard`/`d`, `web`/`w`, `overview`, `model`/`m`, `reset`).
 
 | Command | Alias | Description |
 |---------|-------|-------------|
-| `/nexus` | `Ctrl+N` | Full configuration dialog, or a subcommand |
+| `/nexus` | `Ctrl+N` | Fullscreen configuration panel, or a subcommand |
 | `/nexus-dashboard` | `/nd` | Start the web dashboard and open it. If one is already serving, opens that and starts nothing — see [Web Dashboard](#web-dashboard) |
 | `/nexus-web` | `/nw` | Alias of `/nexus-dashboard` |
 | `/nexus-overview` | `/no` | Config, budget and dashboard-status overview. Prints text; starts nothing |
-| `/nexus-config` | `/nc` | Configure models & budget |
+| `/nexus-config` | `/nc` | The fullscreen configuration panel — every config value, not just models and budget |
 | `/nexus-model` | `/nm` | Select a model for a role |
 | `/nexus-status` | `/ns` | Show the config summary |
 | `/nexus-reset` | — | Reset all settings to defaults |
@@ -644,10 +818,98 @@ answer it has no reason to read. The table above is the TUI palette.
 
 ## Configuration
 
+### The configuration panel
+
+`/nexus-config` (or `/nc`, or **Ctrl+N**, or `/nexus` with no argument) opens a
+fullscreen panel listing **every** value in the merged config — `models`,
+`budget`, `selfHealing`, `dashboard`, `notifications`, `gitFlow`, `effort` and
+`customRoles`, which is every block `NexusFullConfig` declares
+(`src/config.ts:269`) — with a control per value. It replaces a wizard that
+asked the same questions one dialog at a time: a scope question, then six model
+questions in a row, then a budget prompt. One screen now holds all of it —
+9 switches, 7 numbers, 8 model and text values and 1 list.
+
+Everything is reachable and operable from the keyboard; there is no mouse in a
+terminal and nothing here needs one.
+
+| Key | Does |
+|-----|------|
+| `↑` `↓`, `k` `j` | Move between settings |
+| `home` `end`, `g` `G` | First / last setting |
+| `space`, `enter` | Toggle a switch, or open the value under the cursor for editing |
+| `tab` | Switch the save scope between project and global |
+| `s`, `Ctrl+S` | Save |
+| `r` | Discard this session's edits and start again from what is on disk |
+| `esc` | Close — after asking, if there are unsaved edits |
+
+Within an open value, `enter` accepts and `esc` cancels. At the discard prompt,
+`y` throws the edits away and `n` keeps them. The keymap is one table
+(`PANEL_BINDINGS` in `src/config-panel.ts`) that generates the bindings, the
+footer and the tests, so the keys the footer advertises are the keys that are
+bound.
+
+**What is on screen is what gets written.** The panel edits a draft. Nothing
+reaches `nexus.jsonc` until you save, a changed value is marked `*` before you
+save, `r` reverts, and `esc` with unsaved edits asks rather than discarding
+silently.
+
+**A number that will not parse says so.** Typing `abc` into a number cell leaves
+the cell open, shows `"abc" is not a number.`, and changes nothing. The
+free-text budget prompt this replaced parsed with `parseFloat` and, on a bad
+value, fell through to nothing at all (`git show HEAD:src/tui.tsx:860`) — the
+dialog closed, the value did not change, and a rejection was indistinguishable
+from a keypress that missed.
+
+#### The checkbox is a component built here, not a host widget
+
+The host's TUI plugin API has **no checkbox**. This is checkable against the
+host's own declarations: in
+`node_modules/@opencode/plugin/dist/tui/context.d.ts`, the `ui` object
+(`UI`, line 396) has exactly seven members — `dialog` (397), `toast` (398),
+`format` (399), `router` (402), `panel` (407), `tabs` (420) and `slot` (442).
+There is no boolean, no multi-select, no form and no number input among them.
+`DialogSelectOption` (line 297) carries only `title`, `value`, `description?`,
+`footer?`, `category?` and `disabled?`, and `dialog.select` (line 321) resolves a
+**single** value, so it is structurally single-select.
+
+So the `[x]` / `[ ]` next to each switch is drawn by this plugin, and `space` or
+`enter` on that row inverts the value. Three host APIs are used to build it:
+
+- `ui.panel.open(name, { presentation: 'fullscreen' })` (line 409) for the frame —
+  a host-sized, focus-owning panel that owns the chrome and resolves key
+  conflicts;
+- the `session.panel` slot, for the content, rendered with the `@opentui/solid`
+  renderer this plugin already used for its sidebar — no new rendering stack;
+- `context.keymap.layer({ target })`, the documented way to attach keys to a
+  renderable this plugin drew.
+
+`ui.dialog.show` (line 313) — the other escape hatch — is not used.
+
+#### Where it needs to run
+
+The panel is a *session* panel, so it needs an open session. Run from the home
+screen it says so and opens nothing, rather than appearing to work.
+
+`/nexus`, `/nexus config` and `/nexus-config` all open the panel, and the old
+wizard is gone — no entry point reaches it. `/nexus model <role>` is unchanged
+and still opens that one role's picker directly, which is the quicker path when
+the only thing to change is a model.
+
+#### How it finds settings
+
+The panel does not contain a list of config blocks. It walks the keys of the
+merged config and the shape of each value, so a block added to `NexusFullConfig`
+appears in it with no change here. A value the panel has no editor for is still
+shown and is reported as read-only rather than skipped — a setting that is
+silently missing is the same defect as a setting that does nothing.
+
 ### Agent Models
 
-Press **Ctrl+N** or type `/nexus` to pick a model per role, then choose project
-or global. That writes the `models` block of `nexus.jsonc`; the example in
+Press **Ctrl+N** or type `/nexus` to open the panel and move to the `models`
+block, or run `/nexus model <role>` to jump straight to one role's picker. The
+picker is grouped by provider and is the same widget in both places; from the
+panel, choosing a model stages it like any other edit rather than writing
+immediately. Saving writes the `models` block of `nexus.jsonc`; the example in
 [Cost-Aware Model Selection](#cost-aware-model-selection) shows its shape.
 
 The model list is grouped under a heading per provider — `OpenCode Go`,
@@ -680,6 +942,62 @@ reference.
 
 The resolved map is read at spawn time, so an edit to `nexus.jsonc` applies to
 the next spawn without a restart.
+
+#### Model reference format
+
+A model is written `providerID/modelID`, optionally followed by `#` and a
+variant: `anthropic/claude-sonnet-4-6#high`. **The delimiter is a hash, not an
+at-sign.** `provider/model@high` is not a variant — nothing in Nexus or in
+OpenCode looks for `@`, so it is read as a model literally named `model@high`,
+which matches no model.
+
+The format is not a Nexus convention: it is OpenCode's own `Model.Ref` grammar,
+which `@opencode/plugin` re-exports from `@opencode/schema`. There is one parser
+in `src/model-ref.ts`, and `test/model-ref.test.ts` runs every reference through
+the host's real `Model.Ref.parse` and asserts field-for-field agreement, so the
+two cannot drift apart.
+
+The parser is a transcription of the host's, rather than a call into it, and that
+is deliberate. `@opencode/plugin`'s entrypoint re-exports the entire OpenCode
+schema plus the Effect runtime, and because `src/tui.tsx` reaches
+`src/model-ref.ts` transitively, importing it there pulled 265 KB into the TUI
+bundle — 51 KB to 0.32 MB — to obtain about twenty lines of string slicing.
+Calling the host's parser from the tests instead is free (tests are not bundled)
+and is the stronger check: a shared import could never disagree with itself, so
+nothing was actually verified, whereas a local parser is compared against the
+real thing on every test run.
+
+Two details the grammar settles, both of which are easy to get wrong by hand:
+
+- **`modelID` may contain slashes.** `openrouter/anthropic/claude-sonnet-4-5`
+  is a valid reference. Its provider is `openrouter` and its model is
+  `anthropic/claude-sonnet-4-5`; splitting on `/` and taking the second segment
+  loses the namespace the catalogue keys it under. Where such refs come from is
+  documented at the top of `src/model-groups.ts`.
+- **A bare id is not a reference.** `claude-sonnet-4-6` names a model with no
+  provider, which the host's grammar has no production for. Nexus accepts one
+  where a user may type one — in `nexus.model.costs` and in the model picker —
+  and keeps it in an explicit `No provider (bare model id)` bucket rather than
+  inventing a provider for it.
+
+A reference the grammar rejects — a bare id in a spawn, `/leading-slash`,
+`trailing/`, an empty variant (`p/m#`), or a second `#` (`p/m#a#b`) — is **rejected
+loudly at spawn**, naming the accepted forms. It is not quietly repaired: a
+reference that reaches the host as a model id matching no catalogue entry runs
+on the default model while the record still claims what you asked for.
+
+A **variant** selects a variant of the model — in practice a reasoning-effort
+level such as `low` or `xhigh`, which changes how much the model thinks, not
+what it costs per token. You can name one explicitly anywhere a model is
+accepted, and it is carried through the spawn, the agent record, and the cost
+and performance keys. Because a variant carries no price of its own,
+`nexus.model.costs` prices `p/m#high` exactly as it prices `p/m`; the effort
+shows up as tokens, which is what the measured path already bills.
+
+Nexus can also **choose one for you**, from how hard it judges the task to be.
+That is off by default and is configured in the `effort` block — see
+[Effort-Aware Model Selection](#effort-aware-model-selection). An effort you
+name explicitly always wins over the automatic choice.
 
 ### Web Dashboard
 

@@ -92,7 +92,7 @@ function newOrchestrator() {
   return new NexusOrchestrator({
     // Keep the scheduler loop fast; `executeDAG` sleeps one interval per pass.
     schedulerInterval: 1,
-    budget: { maxTotalCost: 10.00, maxCostPerTask: 1.00, maxCostPerAgent: 2.00, alertThreshold: 0.2, hardLimit: false }
+    budget: { maxTotalCost: 10.00, maxCostPerTask: 1.00, alertThreshold: 0.2, hardLimit: false }
   })
 }
 

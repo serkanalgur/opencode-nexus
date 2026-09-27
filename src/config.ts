@@ -1,7 +1,8 @@
 // Configuration management for Nexus
 // Supports project-level and global configuration with precedence
 
-import type { NexusConfig } from "./types"
+import type { BudgetConstraint, NexusConfig } from "./types"
+import { MODEL_EFFORT_LADDER, isModelEffort, type ModelEffort } from "./model-ref"
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, dirname, resolve } from "node:path"
@@ -118,6 +119,126 @@ export interface NexusGitFlowConfig {
 }
 
 /**
+ * Whether the orchestrator picks a reasoning effort for each task from the
+ * difficulty it already measured.
+ *
+ * REQUEST SHAPING, NOT PRICING, and the distinction is load-bearing rather than
+ * a disclaimer. `ModelVariant` is `{ id, settings?, headers?, body? }` and
+ * carries NO `cost` — `cost` lives on `Model.Info` — so a variant changes what
+ * the model is asked to do, never what a token costs. Higher effort means MORE
+ * reasoning tokens at the SAME per-token rate, and this repository already bills
+ * reasoning tokens separately from output (`priceTokens`, which charges
+ * `usage.output + usage.reasoning` against the output rate). There is
+ * deliberately no variant axis on `ModelPricingTiers`, whose only axis is
+ * context size: adding one would be a category error, because a rate is not a
+ * function of how hard the model was asked to think.
+ *
+ * OFF BY DEFAULT. Not because the feature is doubtful but because it changes
+ * which request a spawn makes, and a change nobody asked for should not arrive
+ * in a release. With `enabled: false` no selection outcome differs in any way —
+ * `test/effort-selection.test.ts` proves that differentially rather than
+ * asserting it.
+ *
+ * FILE-SETTABLE, and merged field by field for the same reason `gitFlow` is: a
+ * level that sets only `enabled` must not blank out the two numbers resolved
+ * beneath it.
+ *
+ * EVERY KEY HERE IS READ, and each is read at the ONE gate in
+ * `selectBestModel` — `enabled` decides whether the automatic choice is made at
+ * all, `maxEffort` clamps it, `minDifficulty` skips tasks too easy to be worth
+ * the tokens. Nothing else in `src/` reads this block.
+ */
+export interface NexusEffortConfig {
+  /**
+   * Whether an effort is chosen automatically.
+   *
+   * The bottom of the gate, and the only key that turns the feature on. `false`
+   * is a TRUE no-op rather than a default that happens to match today's
+   * behaviour: a model reference the user wrote with an explicit `#variant`
+   * keeps it, and a variant-free one gets no suffix, exactly as before.
+   */
+  enabled: boolean
+  /**
+   * The highest effort any task may be asked for — a CEILING over the ladder
+   * in `src/model-ref.ts`, and the cost policy of the whole feature.
+   *
+   * Defaults to `high`, which is the deliberate claim: the two hardest buckets
+   * (`xhigh`, `max`) exist in the mapping and are NOT reachable at the default,
+   * because an estimate of how hard a task is does not justify spending
+   * several times the reasoning budget to answer it. Raising this is how a user
+   * says their tasks are better judged than that; lowering it is how a user
+   * says the opposite.
+   *
+   * A ceiling can only LOWER the mapping. Setting it above the level the
+   * mapping reaches for a given task changes nothing, and that is what a
+   * ceiling means — not a dead knob, but a one-directional one.
+   *
+   * A name off the ladder (`"enormous"`) is rejected, not clamped: see
+   * `validateEffortConfig`.
+   */
+  maxEffort: ModelEffort
+  /**
+   * The `overall` difficulty below which no effort is chosen at all, on
+   * `0-100`. Default `0`, which means "every task, however easy".
+   *
+   * Defaults to 0 DELIBERATELY. The mapping already sends the easiest tasks to
+   * `none` and the next to `minimal`, so a nonzero default would be a second,
+   * overlapping policy rather than an additional control — and two knobs that
+   * both answer "how much effort is too much for a small task" is one too
+   * many. This one exists for the case the score cannot express: a user who
+   * wants the selection left completely alone on routine work and effort spent
+   * only where it can matter.
+   *
+   * Out-of-range and non-finite values are CLAMPED to `0-100` rather than
+   * rejected, because a threshold outside the score's own range is a harmless
+   * over-reach that still has one honest reading ("always" / "never"), and
+   * failing a config load over it would be the harsher mistake.
+   */
+  minDifficulty: number
+}
+
+/**
+ * Resolve `maxEffort` down the merge levels, warning about each bad spelling.
+ *
+ * Walks the same precedence `getConfig()` does and takes the first level that
+ * names a real rung, so an invalid project value falls THROUGH to the global
+ * one rather than to the default — which is the honest reading, since the
+ * level that said something is the level that said something wrong, and the
+ * level beneath it is the user's actual preference.
+ *
+ * The fallback is `DEFAULT_CONFIG.effort.maxEffort` rather than a throw,
+ * because a `nexus.jsonc` is hand-written JSONC and `"maxEffort": "highh"` is a
+ * typo, not an attack. Failing the config load over one misspelled key would be
+ * the harsher mistake, and silently disabling the feature would be worse than
+ * either — so a misspelling degrades to the documented default and SAYS SO.
+ * Every bad spelling is reported, not just the first, so fixing it is one pass.
+ */
+function resolveMaxEffort(...levels: readonly (ModelEffort | undefined)[]): ModelEffort {
+  for (const level of levels) {
+    if (level === undefined) continue
+    if (isModelEffort(level)) return level
+    console.warn(
+      `[nexus] effort.maxEffort ${JSON.stringify(level)} is not a reasoning effort level; skipping it. ` +
+      `Valid levels: ${MODEL_EFFORT_LADDER.join(', ')}.`
+    )
+  }
+  return DEFAULT_CONFIG.effort.maxEffort
+}
+
+/**
+ * Clamp a configured `minDifficulty` into the `0-100` range `overall` lives in.
+ *
+ * A NON-FINITE value becomes `0` ("no minimum") rather than propagating: `NaN`
+ * in a `>=` comparison is always false, so a `NaN` threshold would silently
+ * mean "skip EVERY task" — effort selection would do nothing and the reason
+ * would be invisible. `0` fails toward doing the thing the user enabled.
+ */
+function clampDifficulty(value: number): number {
+  if (!Number.isFinite(value)) return 0
+  return Math.min(100, Math.max(0, value))
+}
+
+/**
  * One entry of the `customRoles` block, as authored in `nexus.jsonc`.
  *
  * This is the SHAPE A WELL-FORMED ENTRY HAS, not a promise that the file
@@ -150,17 +271,48 @@ export interface NexusFullConfig {
   budget: {
     maxTotalCost: number
     maxCostPerTask: number
-    maxCostPerAgent: number
     alertThreshold: number
   }
+  /**
+   * `retryDelay` is here, and in `NexusConfig.selfHealing`, and was in NEITHER
+   * sense optional before. The escalation policy is built from
+   * `selfHealing.retryDelay` in the orchestrator's constructor
+   * (`retryDelay: this.config.selfHealing.retryDelay`), so a user editing
+   * `selfHealing` in `nexus.jsonc` had a live setting they could not express
+   * and no way to learn it existed — the file shape listed three fields and the
+   * behaviour depended on a fourth.
+   *
+   * It is listed here so the two shapes agree. `getSaveableConfig()` writes
+   * this block out in full (see the note there), so a user's `retryDelay`
+   * survives a TUI model save rather than being replaced by the default.
+   */
   selfHealing: {
     enabled: boolean
     maxRetries: number
+    retryDelay: number
     contextTransfer: boolean
   }
   dashboard: NexusDashboardConfig
   notifications: NexusNotificationsConfig
   gitFlow: NexusGitFlowConfig
+  /**
+   * Effort selection, the eighth block.
+   *
+   * Listed here and in `getSaveableConfig()` for the same reason as the other
+   * seven, and the omission is the same loss: `saveProjectConfig` writes
+   * `getSaveableConfig()`'s return value as the ENTIRE file body, so a block
+   * missing from it is a block deleted from the user's `nexus.jsonc` the first
+   * time they change a model in the TUI.
+   *
+   * DELIBERATELY ABSENT from `updateStorageConfig()`'s literal, unlike
+   * `selfHealing`. That method REPLACES three blocks with fresh literals, and
+   * `getConfig()` merges storage LAST, so a key written there shadows the
+   * project and global files even when the value written is the default — the
+   * `retryDelay` bug. `storageConfig` is a `Partial`, so omitting the block is
+   * the correct fix rather than a type workaround, and the omission is what
+   * makes a call that set only `models` harmless.
+   */
+  effort: NexusEffortConfig
   customRoles: NexusCustomRoleConfig[]
 }
 
@@ -304,6 +456,7 @@ function readJsoncFile(filePath: string): JsoncReadResult {
       console.warn(`[nexus] Ignoring config from ${filePath}: expected a JSON object, got ${Array.isArray(parsed) ? 'array' : typeof parsed}`)
       return { config: null, existed: true }
     }
+    reportUndeclaredKeys(parsed as Record<string, unknown>, filePath)
     return { config: parsed as Partial<NexusFullConfig>, existed: true }
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code
@@ -318,6 +471,72 @@ function readJsoncFile(filePath: string): JsoncReadResult {
     }
     return { config: null, existed: !absent }
   }
+}
+
+/**
+ * Name every key in a parsed config file that `NexusFullConfig` does not
+ * declare, once per file, on one line.
+ *
+ * ── WHY THIS IS NEEDED AT ALL ──
+ *
+ * `getConfig()` builds each closed block FIELD BY FIELD, so a key the schema
+ * dropped does not survive the merge: `{ "budget": { "maxCostPerAgent": 2 } }`
+ * contributes nothing. That is the correct behaviour — a key no code reads
+ * should not be a value Nexus carries — but it is silent, and the consequence
+ * lands later and elsewhere: `getSaveableConfig()` writes `getConfig()` as the
+ * user's WHOLE file, so the next TUI save deletes the key from their
+ * `nexus.jsonc` with nothing said at any point.
+ *
+ * A setting that vanishes on save is the same defect class as a setting that
+ * was never read, approached from the other side, and the fix for both is to
+ * say so. The config panel cannot do it: by the time a panel exists the key is
+ * already gone from the merged object, so there is no row to disable and no row
+ * to explain. Reporting at the LOAD is the only point where the key is still
+ * visible and still attributable to a file.
+ *
+ * ── WHY IT IS A WARNING AND NOT AN ERROR ──
+ *
+ * Same reasoning as `resolveMaxEffort`: a `nexus.jsonc` is hand-written JSONC
+ * and an unknown key is a leftover from an older Nexus, not an attack. Refusing
+ * to load the file over it would be the harsher mistake, and the file's other
+ * keys are perfectly good. Every undeclared key is named, not just the first, so
+ * upgrading is one pass.
+ *
+ * ── WHAT IS NOT REPORTED ──
+ *
+ * `models` and `customRoles`, because their key sets are the user's to invent (a
+ * role name, a custom role) — see `OPEN_KEYED_BLOCKS`. An unknown key INSIDE one
+ * of those is not reported either, for the same reason: inside a `customRoles`
+ * entry, `displayName` is declared but a user's own extra field is theirs, and
+ * Nexus passes entries through rather than filtering them.
+ */
+function reportUndeclaredKeys(parsed: Record<string, unknown>, filePath: string): void {
+  const declared = declaredConfigLeaves()
+  const undeclared: string[] = []
+
+  for (const [block, value] of Object.entries(parsed)) {
+    const keys = declared.get(block)
+    // `null` is an open block — nothing to check against, and nothing to report.
+    if (keys === null) continue
+    // `undefined` is a block Nexus has no idea about, reported by name rather
+    // than key by key: the fix is to delete the block, and naming its four
+    // contents separately would read as four separate problems.
+    if (keys === undefined) {
+      undeclared.push(`${block} (whole block)`)
+      continue
+    }
+    if (!isPlainRecord(value)) continue
+    for (const key of Object.keys(value)) {
+      if (!keys.includes(key)) undeclared.push(`${block}.${key}`)
+    }
+  }
+
+  if (undeclared.length === 0) return
+  console.warn(
+    `[nexus] ${redactHome(filePath)} has ${undeclared.length} key(s) Nexus does not read: ` +
+    `${undeclared.join(', ')}. They are ignored, and the next save from the config panel will ` +
+    'remove them from the file.'
+  )
 }
 
 /** Absolute path of the project-level config: `{basePath}/.opencode/nexus.jsonc`. */
@@ -383,12 +602,12 @@ const DEFAULT_CONFIG: NexusFullConfig = {
   budget: {
     maxTotalCost: 10.00,
     maxCostPerTask: 1.00,
-    maxCostPerAgent: 2.00,
     alertThreshold: 0.2
   },
   selfHealing: {
     enabled: true,
     maxRetries: 3,
+    retryDelay: 1000,
     contextTransfer: true
   },
   // Kept identical to the orchestrator's own `NexusConfig.dashboard` defaults so
@@ -415,10 +634,72 @@ const DEFAULT_CONFIG: NexusFullConfig = {
     requireBranch: true,
     prBeforeMerge: true
   },
+  // Off by default, which is the DEFAULT worth having: the block changes the
+  // request a spawn makes, and `maxEffort: 'high'` is already a considered
+  // ceiling rather than the top of the ladder. See `NexusEffortConfig`.
+  effort: {
+    enabled: false,
+    maxEffort: 'high',
+    minDifficulty: 0
+  },
   // Empty rather than absent: a user with no custom roles is the default, and
   // an empty list is what every merge level falls through to, so "no
   // `customRoles` block anywhere" and "an empty one" resolve the same way.
   customRoles: []
+}
+
+/**
+ * The keys each CLOSED config block declares, as `Object.keys` of the
+ * corresponding `DEFAULT_CONFIG` block.
+ *
+ * ── WHY `DEFAULT_CONFIG` IS THE AUTHORITY ──
+ *
+ * It is declared `const DEFAULT_CONFIG: NexusFullConfig`, so TypeScript
+ * requires it to state every required key of every block: it cannot silently
+ * omit `retryDelay`, and it cannot carry a key `NexusFullConfig` does not
+ * declare. That makes it the one place in this repository where "the keys the
+ * TYPE names" is available at RUNTIME, which is what a config panel needs and
+ * what a type cannot give it. `test/config-knobs.test.ts` guards the mapping
+ * against the interfaces themselves, so the two cannot drift.
+ *
+ * ── WHY A MAP AND NOT A SET ──
+ *
+ * `PanelRow.label` is not unique and a key name is not an address — five blocks
+ * each have an `enabled`. The map is keyed by BLOCK for that reason, and the
+ * caller walks a row's path segment by segment rather than matching a flat set.
+ *
+ * ── THE `null` BLOCKS ──
+ *
+ * `models` and `customRoles` are OPEN by design: a role is a key a user invents
+ * and a custom role is an entry a user invents, so there is no closed key set
+ * to intersect against and `null` says "no filtering applies here". Treating them
+ * as closed would make every real value in them look stale, which is the failure
+ * this function exists to prevent, pointed the other way.
+ */
+export function declaredConfigLeaves(): ReadonlyMap<string, readonly string[] | null> {
+  const leaves = new Map<string, readonly string[] | null>()
+  for (const [block, value] of Object.entries(DEFAULT_CONFIG)) {
+    if (OPEN_KEYED_BLOCKS.has(block) || !isPlainRecord(value)) {
+      leaves.set(block, null)
+      continue
+    }
+    leaves.set(block, Object.keys(value).sort())
+  }
+  return leaves
+}
+
+/**
+ * Blocks whose key set is the user's to invent, so no closed set applies.
+ *
+ * Listed rather than inferred from the value, because inference cannot tell an
+ * open map from a closed one: `models` is a plain object whose keys are role
+ * names, and structurally identical to a block with a fixed key list.
+ */
+const OPEN_KEYED_BLOCKS: ReadonlySet<string> = new Set(['models', 'customRoles'])
+
+/** A non-null, non-array object — the only shape whose keys are a key set. */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 export class NexusConfigManager {
@@ -462,6 +743,13 @@ export class NexusConfigManager {
    */
   private gitFlowBase: NexusGitFlowConfig
   /**
+   * Programmatic starting point for the `effort` block, beneath the file
+   * levels and above `DEFAULT_CONFIG`. Same single-consumer rationale as
+   * `gitFlowBase`: the orchestrator seeds it from its own constructor config and
+   * every consumer reads the merged result.
+   */
+  private effortBase: NexusEffortConfig
+  /**
    * Programmatic starting point for the `customRoles` block, beneath the file
    * levels and above `DEFAULT_CONFIG`. Same single-consumer rationale as
    * `dashboardBase`.
@@ -472,12 +760,40 @@ export class NexusConfigManager {
    * config load resolves.
    */
   private customRolesBase: NexusCustomRoleConfig[]
+  /**
+   * Programmatic starting point for the `budget` block, beneath the file levels
+   * and above `DEFAULT_CONFIG`. Same single-consumer rationale as
+   * `dashboardBase`.
+   *
+   * `Partial<BudgetConstraint>` rather than `NexusFullConfig['budget']` because
+   * the two shapes are deliberately not the same: `hardLimit` is on
+   * `BudgetConstraint` and is NOT on `NexusFullConfig.budget`. Accepting the
+   * wider type lets an embedder seed a hard limit without the manager pretending
+   * the FILE can express one — `getConfig()` returns the three-key shape, so a
+   * `hardLimit` in `nexus.jsonc` remains unreachable. See the note on
+   * `NexusFullConfig.budget` for why the file does not grow the key.
+   *
+   * Stored as the three-key shape rather than as the `Partial` it arrives as, so
+   * every `??` chain that bottoms out here is total. A `Partial` field would
+   * force a trailing `?? DEFAULT_CONFIG` onto all three keys, and reaching for
+   * that default is exactly what the chains above exist to avoid.
+   */
+  private budgetBase: NexusFullConfig['budget']
+  /**
+   * Programmatic starting point for the `selfHealing` block, beneath the file
+   * levels and above `DEFAULT_CONFIG`. Same single-consumer rationale as
+   * `dashboardBase`.
+   */
+  private selfHealingBase: NexusFullConfig['selfHealing']
 
   constructor(
     dashboardBase?: Partial<NexusDashboardConfig>,
     notificationsBase?: Partial<NexusNotificationsConfig>,
     customRolesBase?: readonly NexusCustomRoleConfig[],
-    gitFlowBase?: Partial<NexusGitFlowConfig>
+    gitFlowBase?: Partial<NexusGitFlowConfig>,
+    effortBase?: Partial<NexusEffortConfig>,
+    budgetBase?: Partial<BudgetConstraint>,
+    selfHealingBase?: Partial<NexusFullConfig['selfHealing']>
   ) {
     // Config files are loaded later via loadFromPath(basePath)
     this.projectConfig = null
@@ -486,6 +802,34 @@ export class NexusConfigManager {
     this.notificationsBase = { ...DEFAULT_CONFIG.notifications, ...notificationsBase }
     this.customRolesBase = customRolesBase ? customRolesBase.map(role => ({ ...role })) : []
     this.gitFlowBase = { ...DEFAULT_CONFIG.gitFlow, ...gitFlowBase }
+    // `maxEffort` goes through the same rung check a file value does, so a
+    // programmatic seed cannot install a ceiling the ladder has no rung for —
+    // the constructor is a config level, and this one is a public parameter.
+    this.effortBase = {
+      ...DEFAULT_CONFIG.effort,
+      ...effortBase,
+      maxEffort: resolveMaxEffort(effortBase?.maxEffort, DEFAULT_CONFIG.effort.maxEffort)
+    }
+    // The last two, and the last two to be added, which is why they are worth a
+    // sentence. `getConfig()` merged `DEFAULT_CONFIG` straight into these two
+    // blocks with no level in between, so a constructor-supplied budget or
+    // self-healing block had nowhere to live: it was not a level, and every
+    // consumer read the merged result. Adding a base is what makes the
+    // precedence `storage > project > global > constructor > defaults` for all
+    // seven object blocks instead of six of them plus a special case.
+    // `hardLimit` is dropped HERE, deliberately and by name. The parameter is a
+    // `Partial<BudgetConstraint>` so an embedder can seed one, but the stored
+    // field is the three-key file shape: it is a constructor-only enforcement
+    // switch, and letting it into this object would put a key the file schema
+    // does not offer into `getConfig()`'s result, and from there into
+    // `getSaveableConfig()`'s `{ ...current.budget }` — which is written as the
+    // user's WHOLE `nexus.jsonc` on the next TUI save.
+    this.budgetBase = {
+      maxTotalCost: budgetBase?.maxTotalCost ?? DEFAULT_CONFIG.budget.maxTotalCost,
+      maxCostPerTask: budgetBase?.maxCostPerTask ?? DEFAULT_CONFIG.budget.maxCostPerTask,
+      alertThreshold: budgetBase?.alertThreshold ?? DEFAULT_CONFIG.budget.alertThreshold
+    }
+    this.selfHealingBase = { ...DEFAULT_CONFIG.selfHealing, ...selfHealingBase }
   }
 
   /**
@@ -587,17 +931,43 @@ export class NexusConfigManager {
         ...this.projectConfig?.models,
         ...this.storageConfig?.models
       },
+      // FIELD BY FIELD, not spread, and the reason is `hardLimit`. `budgetBase`
+      // is a `Partial<BudgetConstraint>` — the wider type, so an embedder can
+      // seed a hard limit — but the RETURNED shape is the three-key file shape.
+      // A spread would put `hardLimit` into that object at runtime, and
+      // `getSaveableConfig()` writes `{ ...current.budget }` as the whole file
+      // body: a `spread` here would start writing a `hardLimit` key into every
+      // user's `nexus.jsonc` that a config schema does not offer. Dropping the
+      // key explicitly also makes the answer to "is `hardLimit` file-settable?"
+      // `false` rather than "true but ignored".
+      //
+      // The base is the constructor seed, the same level `dashboardBase` and
+      // `effortBase` occupy for their blocks. It is there so the file is not the
+      // ONLY thing that can set this block, which is what let
+      // `new NexusOrchestrator({ budget: … })` be silently discarded at the
+      // first `initialize()`.
       budget: {
-        ...DEFAULT_CONFIG.budget,
-        ...this.globalConfig?.budget,
-        ...this.projectConfig?.budget,
-        ...this.storageConfig?.budget
+        maxTotalCost: this.storageConfig?.budget?.maxTotalCost ?? this.projectConfig?.budget?.maxTotalCost
+          ?? this.globalConfig?.budget?.maxTotalCost ?? this.budgetBase.maxTotalCost ?? DEFAULT_CONFIG.budget.maxTotalCost,
+        maxCostPerTask: this.storageConfig?.budget?.maxCostPerTask ?? this.projectConfig?.budget?.maxCostPerTask
+          ?? this.globalConfig?.budget?.maxCostPerTask ?? this.budgetBase.maxCostPerTask ?? DEFAULT_CONFIG.budget.maxCostPerTask,
+        alertThreshold: this.storageConfig?.budget?.alertThreshold ?? this.projectConfig?.budget?.alertThreshold
+          ?? this.globalConfig?.budget?.alertThreshold ?? this.budgetBase.alertThreshold ?? DEFAULT_CONFIG.budget.alertThreshold
       },
+      // Field by field, for the same reason `dashboard` and `gitFlow` above are:
+      // a level that sets only `retryDelay` must not blank out its siblings back
+      // to the level beneath it. (A spread does not do that — `getConfig()`'s
+      // other blocks were spreads until the partial-level case was found — but
+      // the rule is the rule, and `selfHealing` is the block where the bug was.)
       selfHealing: {
-        ...DEFAULT_CONFIG.selfHealing,
-        ...this.globalConfig?.selfHealing,
-        ...this.projectConfig?.selfHealing,
-        ...this.storageConfig?.selfHealing
+        enabled: this.storageConfig?.selfHealing?.enabled ?? this.projectConfig?.selfHealing?.enabled
+          ?? this.globalConfig?.selfHealing?.enabled ?? this.selfHealingBase.enabled,
+        maxRetries: this.storageConfig?.selfHealing?.maxRetries ?? this.projectConfig?.selfHealing?.maxRetries
+          ?? this.globalConfig?.selfHealing?.maxRetries ?? this.selfHealingBase.maxRetries,
+        retryDelay: this.storageConfig?.selfHealing?.retryDelay ?? this.projectConfig?.selfHealing?.retryDelay
+          ?? this.globalConfig?.selfHealing?.retryDelay ?? this.selfHealingBase.retryDelay,
+        contextTransfer: this.storageConfig?.selfHealing?.contextTransfer ?? this.projectConfig?.selfHealing?.contextTransfer
+          ?? this.globalConfig?.selfHealing?.contextTransfer ?? this.selfHealingBase.contextTransfer
       },
       // Same precedence as every other block — storage (session override) >
       // project > global > the constructor seed — and spelled field by field
@@ -631,6 +1001,40 @@ export class NexusConfigManager {
           ?? this.globalConfig?.gitFlow?.requireBranch ?? this.gitFlowBase.requireBranch,
         prBeforeMerge: this.storageConfig?.gitFlow?.prBeforeMerge ?? this.projectConfig?.gitFlow?.prBeforeMerge
           ?? this.globalConfig?.gitFlow?.prBeforeMerge ?? this.gitFlowBase.prBeforeMerge
+      },
+      // Field by field, for the same reason as `gitFlow` above.
+      //
+      // `maxEffort` is the one key that is not a plain `??` chain, and the
+      // difference is the point: a `??` chain cannot tell "absent" from "present
+      // and not a real rung", so a hand-typed `"highh"` would resolve to
+      // `"highh"` and then be handed to the ladder as a ceiling nothing can be
+      // at or below — every task would silently get no variant, and the
+      // feature would look broken rather than misconfigured. `resolveMaxEffort`
+      // walks the SAME precedence and skips an unusable level instead, warning
+      // about it, so the level beneath it — the user's actual preference — is
+      // what takes effect.
+      effort: {
+        enabled: this.storageConfig?.effort?.enabled ?? this.projectConfig?.effort?.enabled
+          ?? this.globalConfig?.effort?.enabled ?? this.effortBase.enabled,
+        maxEffort: resolveMaxEffort(
+          this.storageConfig?.effort?.maxEffort,
+          this.projectConfig?.effort?.maxEffort,
+          this.globalConfig?.effort?.maxEffort,
+          this.effortBase.maxEffort
+        ),
+        // Clamped, not validated, and the asymmetry with `maxEffort` is
+        // deliberate: a ceiling outside the ladder has no meaning (so it is
+        // rejected), while a difficulty threshold outside `0-100` still has one
+        // honest reading — "always" below 0, "never" above 100 — and the
+        // mapping's own input is already clamped to that range. Non-finite
+        // becomes 0, i.e. "no minimum", rather than `NaN` propagating into a
+        // comparison that is then always false.
+        minDifficulty: clampDifficulty(
+          this.storageConfig?.effort?.minDifficulty
+          ?? this.projectConfig?.effort?.minDifficulty
+          ?? this.globalConfig?.effort?.minDifficulty
+          ?? this.effortBase.minDifficulty
+        )
       },
       // NOT field by field, because an array has no fields to merge. The
       // highest-precedence level that DEFINES the block wins wholesale, which
@@ -680,16 +1084,85 @@ export class NexusConfigManager {
         ...this.storageConfig?.models,
         ...update.models
       },
+      // `budget` walks the SAME precedence `selfHealing` below does, and for
+      // the SAME reason. This method REPLACES the block with a fresh literal and
+      // `getConfig()` merges the levels with `...storageConfig?.budget` LAST, so
+      // a key written here is an explicit value that SHADOWS the project and
+      // global files — including when the value written is only a default. A
+      // call that set nothing but `models` therefore used to pin all three
+      // budget keys to `DEFAULT_CONFIG` and make the user's `nexus.jsonc` budget
+      // invisible, which is the same "the file is ignored" failure the
+      // `selfHealing` list below was written to prevent. `budgetBase` — not
+      // `DEFAULT_CONFIG` — is the last term, so a programmatic ceiling is not
+      // lost either. `test/config-knobs.test.ts` drives this through a real file.
       budget: {
-        maxTotalCost: update.budget?.maxTotalCost ?? this.storageConfig?.budget?.maxTotalCost ?? DEFAULT_CONFIG.budget.maxTotalCost,
-        maxCostPerTask: update.budget?.maxCostPerTask ?? this.storageConfig?.budget?.maxCostPerTask ?? DEFAULT_CONFIG.budget.maxCostPerTask,
-        maxCostPerAgent: update.budget?.maxCostPerAgent ?? this.storageConfig?.budget?.maxCostPerAgent ?? DEFAULT_CONFIG.budget.maxCostPerAgent,
-        alertThreshold: update.budget?.alertThreshold ?? this.storageConfig?.budget?.alertThreshold ?? DEFAULT_CONFIG.budget.alertThreshold
+        maxTotalCost: update.budget?.maxTotalCost
+          ?? this.storageConfig?.budget?.maxTotalCost
+          ?? this.projectConfig?.budget?.maxTotalCost
+          ?? this.globalConfig?.budget?.maxTotalCost
+          ?? this.budgetBase.maxTotalCost,
+        maxCostPerTask: update.budget?.maxCostPerTask
+          ?? this.storageConfig?.budget?.maxCostPerTask
+          ?? this.projectConfig?.budget?.maxCostPerTask
+          ?? this.globalConfig?.budget?.maxCostPerTask
+          ?? this.budgetBase.maxCostPerTask,
+        alertThreshold: update.budget?.alertThreshold
+          ?? this.storageConfig?.budget?.alertThreshold
+          ?? this.projectConfig?.budget?.alertThreshold
+          ?? this.globalConfig?.budget?.alertThreshold
+          ?? this.budgetBase.alertThreshold
       },
+      // `retryDelay` is walked field by field rather than spread from
+      // `DEFAULT_CONFIG`, and that is load-bearing rather than an oversight.
+      //
+      // This method REPLACES `storageConfig.selfHealing` with a fresh literal,
+      // and `getConfig()` merges the levels with `...storageConfig?.selfHealing`
+      // LAST. So a key this list writes is an explicit value that SHADOWS the
+      // project and global files — including when the value written is only the
+      // default. Falling straight through to `DEFAULT_CONFIG` here therefore
+      // made a call that set nothing but `models` pin the backoff base at 1000
+      // and overwrite whatever the user's `nexus.jsonc` said, which is the exact
+      // "the file is ignored" failure the spread in `getConfig()` exists to
+      // prevent.
+      //
+      // The key cannot simply be left OUT of the literal either: `NexusFullConfig`
+      // makes `retryDelay` a required member, so a three-key literal is a type
+      // error — and that is the type doing its job, because a silently-dropped
+      // key is how this shape went wrong in the first place. So the resolution
+      // walks the SAME precedence `getConfig()` does, and writes the value the
+      // level below would have supplied rather than the default.
+      //
+      // ALL FOUR fields, and that is the part this comment used to get wrong:
+      // `retryDelay` was walked while `enabled`, `maxRetries` and
+      // `contextTransfer` still fell through to `DEFAULT_CONFIG`, so a
+      // models-only save pinned those three to their defaults and turned off a
+      // project file's `selfHealing` block just as thoroughly. A test that
+      // asserted only `retryDelay` passed throughout that. A partial fix is
+      // indistinguishable from no fix at the next key, so the whole block is
+      // written the same way. `test/config-knobs.test.ts` drives this through a
+      // real file and asserts the block with `toEqual`, which fails on a
+      // pinned sibling.
       selfHealing: {
-        enabled: update.selfHealing?.enabled ?? this.storageConfig?.selfHealing?.enabled ?? DEFAULT_CONFIG.selfHealing.enabled,
-        maxRetries: update.selfHealing?.maxRetries ?? this.storageConfig?.selfHealing?.maxRetries ?? DEFAULT_CONFIG.selfHealing.maxRetries,
-        contextTransfer: update.selfHealing?.contextTransfer ?? this.storageConfig?.selfHealing?.contextTransfer ?? DEFAULT_CONFIG.selfHealing.contextTransfer
+        enabled: update.selfHealing?.enabled
+          ?? this.storageConfig?.selfHealing?.enabled
+          ?? this.projectConfig?.selfHealing?.enabled
+          ?? this.globalConfig?.selfHealing?.enabled
+          ?? this.selfHealingBase.enabled,
+        maxRetries: update.selfHealing?.maxRetries
+          ?? this.storageConfig?.selfHealing?.maxRetries
+          ?? this.projectConfig?.selfHealing?.maxRetries
+          ?? this.globalConfig?.selfHealing?.maxRetries
+          ?? this.selfHealingBase.maxRetries,
+        retryDelay: update.selfHealing?.retryDelay
+          ?? this.storageConfig?.selfHealing?.retryDelay
+          ?? this.projectConfig?.selfHealing?.retryDelay
+          ?? this.globalConfig?.selfHealing?.retryDelay
+          ?? this.selfHealingBase.retryDelay,
+        contextTransfer: update.selfHealing?.contextTransfer
+          ?? this.storageConfig?.selfHealing?.contextTransfer
+          ?? this.projectConfig?.selfHealing?.contextTransfer
+          ?? this.globalConfig?.selfHealing?.contextTransfer
+          ?? this.selfHealingBase.contextTransfer
       }
     }
   }
@@ -845,7 +1318,14 @@ export class NexusConfigManager {
     // Budget — include all fields
     result.budget = { ...current.budget }
 
-    // Self-healing — include all fields
+    // Self-healing — include all fields.
+    //
+    // The whole block, by the same reasoning as the four below: `saveProjectConfig`
+    // writes this return value as the ENTIRE file body, so a field left out is a
+    // field reset to its default the first time the user changes a model in the
+    // TUI. That is exactly what would have happened to `retryDelay` — the spread
+    // picks up whatever the merge resolved, so a user's file-set backoff base
+    // round-trips through a model save unchanged.
     result.selfHealing = { ...current.selfHealing }
 
     // Dashboard — include all fields.
@@ -867,6 +1347,15 @@ export class NexusConfigManager {
     // ENTIRELY is the worse case, and it is what an omission here produces:
     // `saveProjectConfig()` writes the RETURNED object as the whole file.
     result.gitFlow = { ...current.gitFlow }
+
+    // Effort — same reason, all three fields. `enabled: false` is the value a
+    // user is most likely to have chosen deliberately, and `maxEffort` is a
+    // ceiling they may have lowered; a block written out partially would let
+    // the next `saveProjectConfig` restore an effort policy they had turned
+    // down. Omitting the block ENTIRELY is the worse case, and is what an
+    // omission here produces: `saveProjectConfig()` writes the RETURNED object
+    // as the whole file.
+    result.effort = { ...current.effort }
 
     // Custom roles — same reason. This one is the whole block: a
     // `customRoles` array omitted here is every role the user wrote deleted
@@ -934,12 +1423,20 @@ export class NexusConfigManager {
     lines.push('')
     lines.push('💰 Budget:')
     lines.push(`  Max Total: $${config.budget.maxTotalCost}`)
-    lines.push(`  Max Per Task: $${config.budget.maxCostPerTask}`)
+    // Labelled "advisory" rather than "max", because that is what it is: a turn
+    // that is already running cannot be interrupted, so this raises a
+    // notification when one task's running total crosses it and stops nothing.
+    // The same relationship `Max Total` has to `hardLimit`.
+    lines.push(`  Per Task (advisory): $${config.budget.maxCostPerTask}`)
     lines.push(`  Alert Threshold: ${config.budget.alertThreshold * 100}%`)
     lines.push('')
     lines.push('🛡️ Self-Healing:')
     lines.push(`  Enabled: ${config.selfHealing.enabled ? '✅' : '❌'}`)
     lines.push(`  Max Retries: ${config.selfHealing.maxRetries}`)
+    // The BASE of the 1s/2s/4s backoff. Listed because it is settable in
+    // `nexus.jsonc` now, and a setting nobody can see is the half of this
+    // defect the file shape used to be.
+    lines.push(`  Retry Delay: ${config.selfHealing.retryDelay}ms`)
     lines.push(`  Context Transfer: ${config.selfHealing.contextTransfer ? '✅' : '❌'}`)
 
     return lines.join('\n')
@@ -969,12 +1466,12 @@ export const PRESETS: Record<string, NexusPreset> = {
       budget: {
         maxTotalCost: 1.00,
         maxCostPerTask: 0.10,
-        maxCostPerAgent: 0.50,
         alertThreshold: 0.5,
       },
       selfHealing: {
         enabled: false,
         maxRetries: 1,
+        retryDelay: 1000,
         contextTransfer: false,
       },
     }
@@ -994,12 +1491,12 @@ export const PRESETS: Record<string, NexusPreset> = {
       budget: {
         maxTotalCost: 10.00,
         maxCostPerTask: 1.00,
-        maxCostPerAgent: 2.00,
         alertThreshold: 0.2,
       },
       selfHealing: {
         enabled: true,
         maxRetries: 3,
+        retryDelay: 1000,
         contextTransfer: true,
       },
     }
@@ -1019,12 +1516,12 @@ export const PRESETS: Record<string, NexusPreset> = {
       budget: {
         maxTotalCost: 50.00,
         maxCostPerTask: 5.00,
-        maxCostPerAgent: 10.00,
         alertThreshold: 0.1,
       },
       selfHealing: {
         enabled: true,
         maxRetries: 5,
+        retryDelay: 1000,
         contextTransfer: true,
       },
     }
@@ -1044,12 +1541,12 @@ export const PRESETS: Record<string, NexusPreset> = {
       budget: {
         maxTotalCost: 3.00,
         maxCostPerTask: 0.30,
-        maxCostPerAgent: 1.00,
         alertThreshold: 0.3,
       },
       selfHealing: {
         enabled: true,
         maxRetries: 2,
+        retryDelay: 1000,
         contextTransfer: false,
       },
     }

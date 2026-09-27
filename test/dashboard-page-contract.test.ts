@@ -131,8 +131,15 @@ describe('the page renders only what the server reports', () => {
       'sessions', 'owned', 'agentId', 'lastKnownTokens', 'observedUncollected',
       'spawnedAt', 'sessionID', 'totalTokens', 'averageResponseTime', 'errorRate',
       'dependencies', 'assignedAgent', 'priority', 'result', 'cost', 'tokensUsed',
-      'config', 'models', 'maxTotalCost', 'alertThreshold', 'hardLimit',
-      'selfHealing', 'enabled', 'maxRetries', 'retryDelay', 'backoffMultiplier', 'contextTransfer',
+      'config', 'models', 'maxTotalCost', 'maxCostPerTask', 'alertThreshold', 'hardLimit',
+      // `backoffMultiplier` was on this line and is gone from the page, the
+      // server type and the config panel together — it was rendered as "× 3.50"
+      // while `handleFailure` hardcoded the 2 in `Math.pow(2, retryCount)`.
+      // `maxCostPerTask` is on it for the same reason `maxTotalCost` is: it is a
+      // key of `BudgetConstraint` the panel draws, so coverage has to follow it
+      // wherever it goes. `maxCostPerAgent` is NOT here for the same reason
+      // `backoffMultiplier` is not — it is off both the type and the page.
+      'selfHealing', 'enabled', 'maxRetries', 'retryDelay', 'contextTransfer',
     ]
     const missing = required.filter((field) => !new RegExp(`\\.${field}\\b`).test(code()))
     expect(missing).toEqual([])
