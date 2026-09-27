@@ -61,6 +61,34 @@ export interface NexusNotificationsConfig {
   enabled: boolean
 }
 
+/**
+ * One entry of the `customRoles` block, as authored in `nexus.jsonc`.
+ *
+ * This is the SHAPE A WELL-FORMED ENTRY HAS, not a promise that the file
+ * contains well-formed entries: the value arrives from `JSON.parse`, so it is
+ * validated where it is used (`CustomRoleManager.loadFromConfig`) and a
+ * malformed entry is reported and skipped rather than registered.
+ *
+ * `name` and `prompt` are the two required fields and are both load-bearing —
+ * the name is the lookup key a spawn resolves, and the prompt is the system
+ * prompt `buildRolePrompt` hands the agent (an empty one would fall through to
+ * a generic "You are a <role>" sentence, so a promptless role is a role that
+ * looks configured and behaves as if it were not). `displayName` and `emoji`
+ * are presentation and default to the name and to `🤖`.
+ *
+ * `model` is the role's default model. It is NOT what a spawn runs: model
+ * selection is the ranker's, and this is the first CANDIDATE for the role
+ * (see `getModelForRole`). Writing the same string under `models` instead has
+ * exactly the same effect and is the older, equivalent spelling.
+ */
+export interface NexusCustomRoleConfig {
+  name: string
+  prompt: string
+  displayName?: string
+  emoji?: string
+  model?: string
+}
+
 export interface NexusFullConfig {
   models: NexusModelConfig
   budget: {
@@ -76,6 +104,7 @@ export interface NexusFullConfig {
   }
   dashboard: NexusDashboardConfig
   notifications: NexusNotificationsConfig
+  customRoles: NexusCustomRoleConfig[]
 }
 
 /**
@@ -317,7 +346,11 @@ const DEFAULT_CONFIG: NexusFullConfig = {
   // says otherwise.
   notifications: {
     enabled: true
-  }
+  },
+  // Empty rather than absent: a user with no custom roles is the default, and
+  // an empty list is what every merge level falls through to, so "no
+  // `customRoles` block anywhere" and "an empty one" resolve the same way.
+  customRoles: []
 }
 
 export class NexusConfigManager {
@@ -352,16 +385,29 @@ export class NexusConfigManager {
    * `dashboardBase`.
    */
   private notificationsBase: NexusNotificationsConfig
+  /**
+   * Programmatic starting point for the `customRoles` block, beneath the file
+   * levels and above `DEFAULT_CONFIG`. Same single-consumer rationale as
+   * `dashboardBase`.
+   *
+   * Copied rather than held by reference: the orchestrator passes the array
+   * straight out of its own merged constructor config, and a caller mutating
+   * that array afterwards would otherwise retroactively change what a later
+   * config load resolves.
+   */
+  private customRolesBase: NexusCustomRoleConfig[]
 
   constructor(
     dashboardBase?: Partial<NexusDashboardConfig>,
-    notificationsBase?: Partial<NexusNotificationsConfig>
+    notificationsBase?: Partial<NexusNotificationsConfig>,
+    customRolesBase?: readonly NexusCustomRoleConfig[]
   ) {
     // Config files are loaded later via loadFromPath(basePath)
     this.projectConfig = null
     this.globalConfig = null
     this.dashboardBase = { ...DEFAULT_CONFIG.dashboard, ...dashboardBase }
     this.notificationsBase = { ...DEFAULT_CONFIG.notifications, ...notificationsBase }
+    this.customRolesBase = customRolesBase ? customRolesBase.map(role => ({ ...role })) : []
   }
 
   /**
@@ -492,15 +538,39 @@ export class NexusConfigManager {
       notifications: {
         enabled: this.storageConfig?.notifications?.enabled ?? this.projectConfig?.notifications?.enabled
           ?? this.globalConfig?.notifications?.enabled ?? this.notificationsBase.enabled
-      }
+      },
+      // NOT field by field, because an array has no fields to merge. The
+      // highest-precedence level that DEFINES the block wins wholesale, which
+      // is the same rule the object blocks follow once you name the fields: a
+      // level that sets only `notifications` says nothing about `customRoles`
+      // and cannot blank it, and a project list is not silently appended to a
+      // global one. Wholesale replacement rather than concatenation because
+      // concatenation would leave two entries able to claim one name, with the
+      // winner decided by list order rather than by the documented precedence.
+      //
+      // Copied, because the result is handed to `CustomRoleManager`, which
+      // keeps the entries it registers.
+      customRoles: (this.storageConfig?.customRoles
+        ?? this.projectConfig?.customRoles
+        ?? this.globalConfig?.customRoles
+        ?? this.customRolesBase).map(role => ({ ...role }))
     }
   }
 
   // Get model for a specific role
   // Returns "providerID/modelID" format. Falls back to coder role, then defaults.
+  //
+  // A custom role's own `model` sits between the `models` block and the `coder`
+  // fallback, so the two spellings of the same intent agree: `models: { "qa":
+  // "x" }` and a `customRoles` entry named `qa` with `model: "x"` both resolve
+  // to `x`, and when both are present the `models` block wins — it is the block
+  // that exists to be overridden per role, while `model` on an entry is one
+  // field of one role. `customRoles.find` is linear, but this is called once per
+  // spawn for a handful of roles, not per token or per candidate.
   getModelForRole(role: string): string {
     const config = this.getConfig()
-    const model = config.models[role] || config.models.coder || DEFAULT_CONFIG.models.coder!
+    const customRoleModel = config.customRoles.find(entry => entry.name === role)?.model
+    const model = config.models[role] || customRoleModel || config.models.coder || DEFAULT_CONFIG.models.coder!
     // Safety: ensure model has provider/model format
     if (!model.includes('/')) {
       console.warn(`[nexus] Model "${model}" for role "${role}" is missing provider prefix. Expected "providerID/modelID" format.`)
@@ -533,7 +603,12 @@ export class NexusConfigManager {
 
   // Update single model in storage
   setModel(role: string, model: string): void {
-    this.storageConfig = this.storageConfig || { ...DEFAULT_CONFIG }
+    // Seeded with `models` alone, NOT with a `DEFAULT_CONFIG` spread. A full
+    // spread would put a default value in every other block at the
+    // highest-precedence level, and `customRoles` would then win over the
+    // user's file with an empty list — the dashboard block's lost-config bug,
+    // reached by a different route.
+    this.storageConfig = this.storageConfig || { models: {} }
     this.storageConfig.models = this.storageConfig.models || {}
     this.storageConfig.models[role] = model
   }
@@ -692,6 +767,12 @@ export class NexusConfigManager {
     // Notifications — same reason, and with `enabled: false` this is the
     // setting a user is most likely to have deliberately turned off.
     result.notifications = { ...current.notifications }
+
+    // Custom roles — same reason. This one is the whole block: a
+    // `customRoles` array omitted here is every role the user wrote deleted
+    // from their `nexus.jsonc` the first time they change a model in the TUI,
+    // with nothing to restore them from.
+    result.customRoles = current.customRoles.map(role => ({ ...role }))
 
     return result
   }

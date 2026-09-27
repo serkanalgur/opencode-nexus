@@ -927,7 +927,7 @@ export class NexusOrchestrator {
   constructor(config?: Partial<NexusConfig>, messageStoreConfig?: Partial<MessageStoreConfig>, memoryStoreConfig?: Partial<MemoryStoreConfig>) {
     this.config = this.mergeConfig(config)
     this.budget = this.config.budget
-    this.configManager = new NexusConfigManager(this.config.dashboard, this.config.notifications)
+    this.configManager = new NexusConfigManager(this.config.dashboard, this.config.notifications, this.config.customRoles)
     this.moduleRegistry = new ModuleRegistry()
     this.messageStore = new MessageStore(messageStoreConfig)
     this.memoryStore = new PersistentMemoryStore(memoryStoreConfig)
@@ -978,6 +978,14 @@ export class NexusOrchestrator {
     // Use plugin location directory, not process.cwd() which may be wrong
     const projectDir = ctx.location.directory
     this.configManager.loadFromPath(projectDir)
+
+    // Register the roles from the just-loaded config, before anything can ask
+    // for one. It has to be here rather than at the end of initialize(): a
+    // module's `setupAll` and the first spawn both resolve role prompts, and
+    // both would otherwise see an empty registry and hand a custom role the
+    // generic "You are a <role>" prompt — the role would exist in the file and
+    // in `roles.list` while behaving as if it had never been written.
+    this.syncCustomRoles()
 
     // Load real model pricing from OpenCode
     await this.loadModelCosts()
@@ -1623,6 +1631,14 @@ export class NexusOrchestrator {
     const projectDir = this.ctx?.location.directory
     if (projectDir) {
       this.configManager.loadFromPath(projectDir, trigger)
+      // Re-read the roles too, and from the same merged config every other
+      // consumer reads, so there is one answer to "which roles are in effect".
+      // Unlike `notifications` — which is snapshotted into a manager at
+      // initialize and stays whatever the file said then — the role registry
+      // has to shrink as well as grow: a role deleted from `nexus.jsonc` is
+      // gone, and `loadFromConfig` replaces rather than adds so it stops
+      // resolving. A user editing this file should not need a restart.
+      this.syncCustomRoles()
     }
     const info = this.configManager.getLoadInfo()
     if (info) {
@@ -2705,6 +2721,24 @@ export class NexusOrchestrator {
       // that ledger's own `cost:delta`.
       await this.settleTimeoutDelta(ledger, 'shutdown').catch(() => {})
     }
+  }
+
+  /**
+   * Re-register the custom roles from the merged config, discarding whatever
+   * the registry held.
+   *
+   * The single place roles enter the registry from configuration, so a
+   * constructor seed and a file cannot both be applied and cannot be applied in
+   * an order that depends on who called first. Replaces rather than adds, so a
+   * role removed from the file stops resolving — see `reloadConfigFromDisk`.
+   *
+   * The report `loadFromConfig` returns is deliberately dropped: a session that
+   * defines no roles is not a fact worth a line of output, and a malformed
+   * entry is already reported by `loadFromConfig` itself, which is where the
+   * detail needed to fix it lives.
+   */
+  private syncCustomRoles(): void {
+    this.customRoles.loadFromConfig(this.configManager.getConfig())
   }
 
   /**

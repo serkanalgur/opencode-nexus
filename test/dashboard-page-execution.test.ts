@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll } from 'bun:test'
 import { BROADCAST_EVENTS } from '../src/broadcast'
 import {
+  blankNonCode,
   emitPayloads,
   extractInlineScript,
   interfaceFieldNames,
@@ -1675,6 +1676,29 @@ describe('the enumeration of unread fields is itself checked', () => {
     expect(() => topLevelDeclaredNames('format(value: number): string')).toThrow(
       /does not recognise/,
     )
+  })
+
+  it('blanks a file with an astral character in it, index for index', () => {
+    // `blankNonCode` built its output with `[...source]`, which iterates CODE
+    // POINTS while every offset it is used with is a UTF-16 CODE UNIT. One
+    // emoji — this codebase's role glyphs, in string literals AND in doc
+    // comments — made the blanked copy two characters shorter than its input
+    // and shifted every position after it, so a declaration below it was read
+    // out of the middle of a comment and the completeness check failed with a
+    // member no declaration has. The failure pointed at the dashboard page and
+    // at nothing in the file that had actually changed.
+    const source = [
+      '/** Role glyph: \u{1F916} */',
+      'export interface Demo {',
+      '  coder: string',
+      '}',
+      '',
+    ].join('\n')
+    const blanked = blankNonCode(source)
+    // Same length, so an index into the copy is an index into the original.
+    expect(blanked.length).toBe(source.length)
+    // And the declaration below the emoji still reads as itself.
+    expect(interfaceFieldNames(source, 'Demo')).toEqual(['coder'])
   })
 
   it('has a decision for every field the server sends', async () => {
