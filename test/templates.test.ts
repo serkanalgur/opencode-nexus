@@ -118,7 +118,7 @@ describe('instantiateTemplate', () => {
     for (const task of tasks) {
       expect(task.complexity).toBeDefined()
       expect(task.complexity.overall).toBe(50)
-      expect(task.complexity.factors.riskLevel).toBe('medium')
+      expect(task.complexity.factors.riskLevel).toBe('low')
     }
   })
 

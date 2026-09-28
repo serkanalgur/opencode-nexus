@@ -62,7 +62,7 @@ const DEFAULT_COMPLEXITY = {
     codeLines: 100,
     dependencyDepth: 1,
     domainKnowledge: 1,
-    riskLevel: 'medium' as const,
+    riskLevel: 'low' as const,
   }
 }
 
