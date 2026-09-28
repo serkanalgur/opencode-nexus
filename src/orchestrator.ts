@@ -1947,7 +1947,14 @@ export class NexusOrchestrator {
       })
     }
 
-    return [...views.values()]
+    // The published rows, and a guard rather than a projection. `id` is the key
+    // of every row and `state` is written by all three passes, so neither can be
+    // absent or null through those constructors — but `sessions[]` is the one
+    // collection a reader is entitled to treat as fully populated, and an empty
+    // key reaching it would be a row that names no session and claims no state.
+    // A row with no id is dropped here rather than published; a `running`/`settled`
+    // row with a real id is not a phantom and stays.
+    return [...views.values()].filter(view => view.id.length > 0)
   }
 
   /**
@@ -1968,6 +1975,13 @@ export class NexusOrchestrator {
       observedUncollected: number
     }
   ): void {
+    // A record with no session id is not a session. `sessionViews()` pass 1
+    // already skips an agent with no session for the same reason — there is
+    // nothing to key a row by, and a row with an empty `id` is a phantom in a
+    // list a user is meant to trust. Passes 2 and 3 did not have this check,
+    // which is the one place a session-keyed row could be built with a
+    // non-session key.
+    if (!record.sessionID) return
     const existing = views.get(record.sessionID)
     // `record.agentId` is deliberately NOT used to fill a null `agentId` on an
     // existing orphan row, and is not used to decide `owned` either: both are
@@ -3885,6 +3899,50 @@ export class NexusOrchestrator {
     }
 
     return agent
+  }
+
+  /**
+   * Put a spawned agent into a TERMINAL status — and leave it in `this.agents`.
+   *
+   * WHY THIS EXISTS. `working` is written by the two spawn tools in `index.ts`
+   * (and by `executeTask`), and it was read back by nobody who could clear it:
+   * the only writer of a terminal status on the tool path was the tool body
+   * itself, at the end of its own success branch. Every path that reached the
+   * tool's OUTER `catch` — a `session.wait` that rejects rather than timing out,
+   * a read that throws, a `storage.set` that fails — returned "Failed to spawn
+   * agent" to the caller and left the agent sitting at `working` in
+   * `getState().agents` for the rest of the process. A finished agent that
+   * claims to still be working is worse than a missing one: the page's `Running`
+   * filter stays lit, and `sessionViews()` maps `working` to `running`, so the
+   * session row claims the session is spending too.
+   *
+   * WHY IT DOES NOT DELETE. The row has to survive, because the row is what
+   * makes the outcome readable: an agent removed from `this.agents` takes its
+   * session row with it (pass 1 of `sessionViews()` reads this map), and the
+   * only reason a session outlives its agent — the orphan that
+   * `SessionStateView` exists to make visible — is `terminateAgent` deleting a
+   * session that is STILL RUNNING. Settling is not that case, and pretending it
+   * were would put a fabricated `agentId: null` row on a session that has an
+   * owner. So: terminal status, row kept, and `cleanupStaleData()` still owns
+   * the removal — an hour of `lastActivity`, which this refreshes.
+   *
+   * First terminal outcome wins. `completed` and `failed` are two readings of
+   * the same task, not two stages of it, so a late `failed` must not overwrite a
+   * `completed`. `terminated` does outrank both: it is the escalation path, and
+   * it is what `terminateAgent` would have written.
+   */
+  settleAgent(agentId: string, status: 'completed' | 'failed'): void {
+    const agent = this.agents.get(agentId)
+    // Unknown agent: nothing to settle. Callers pass an id they were handed, but
+    // a terminated agent is legitimately gone by the time a spawn tool unwinds.
+    if (!agent) return
+    if (agent.status === 'terminated') return
+    if (agent.status === 'completed' || agent.status === 'failed') return
+    agent.status = status
+    // Without this the row is evicted a full hour after it was SPAWNED, which
+    // for a long run removes rows that only just finished.
+    agent.lastActivity = new Date()
+    this.notifyStateChange()
   }
 
   async terminateAgent(agentId: string): Promise<void> {

@@ -1917,8 +1917,18 @@ A design decision, in this shape:
         options: { codemode: true },
         execute: async (input: unknown, toolCtx: any) => {
           const { role, task, model, wait, timeout } = input as { role: string; task: string; model?: string; wait?: boolean; timeout?: number }
+          // Held OUTSIDE the try so the catch below can settle it. The agent is
+          // in `orchestrator.agents` from the moment `spawnAgent` returns, and
+          // this block marks it `working`; every exit that is not a deliberate
+          // settle — a `session.wait` that rejects, a throw from any read, a
+          // failing `storage.set` — used to leave it at `working` in
+          // `getState().agents` for the rest of the process. A finished agent
+          // that still claims to be working is a lie the page cannot see
+          // through, so the failure path settles it rather than leaking it.
+          let spawned: SpawnedAgent | null = null
           try {
             const agent = await spawnAndDeliver({ role, task, model }, toolCtx)
+            spawned = agent
 
             agent.status = 'working'
             orchestrator.notifyStateChange()
@@ -1927,15 +1937,34 @@ A design decision, in this shape:
             if (wait) {
               const waitTimeout = timeout || 120000
               const waitPromise = ctx.session.wait({ sessionID: agent.sessionID! })
-              const timeoutPromise = new Promise((_, reject) =>
-                setTimeout(() => reject(new Error(`Timed out after ${waitTimeout}ms`)), waitTimeout)
-              )
+              // A TIMEOUT and a REJECTED POLL arrive at the same `catch` and
+              // mean opposite things, so they are tagged apart here rather than
+              // conflated below. A timeout is our own deadline firing: the
+              // session was never told to stop and may still be generating. A
+              // rejection is `session.wait` itself dying — an aborted, evicted
+              // or unknown session — and a dead poll is not a running session,
+              // which is the distinction `executeTask` already draws when it
+              // wraps the same call in a guard that cannot reject.
+              const timeoutPromise = new Promise((_, reject) => {
+                const expiry = new Error(`Timed out after ${waitTimeout}ms`)
+                ;(expiry as Error & { nexusTimedOut?: boolean }).nexusTimedOut = true
+                setTimeout(() => reject(expiry), waitTimeout)
+              })
 
               try {
                 await Promise.race([waitPromise, timeoutPromise])
               } catch (waitError: any) {
-                // Timeout or cancellation — agent may still be running
-                agent.status = 'working'
+                // A TIMEOUT means the session may still be running, and
+                // `working` is the honest status for it — left alone on
+                // purpose. A REJECTED POLL means the wait itself died, and no
+                // status here can be trusted to survive: this agent is not
+                // working, and publishing it as though it were is the stuck-
+                // `working` row from issue #100. What it settled AS depends on
+                // whether the session produced anything, so the settle happens
+                // at each exit below rather than here — one settle per outcome,
+                // whichever is actually known.
+                const pollDied = !(waitError as Error & { nexusTimedOut?: boolean })?.nexusTimedOut
+                if (!pollDied) agent.status = 'working'
                 orchestrator.notifyStateChange()
 
                 // Try to get whatever results are available
@@ -1943,7 +1972,7 @@ A design decision, in this shape:
                   const messages = await ctx.session.context({ sessionID: agent.sessionID! })
                   const partialText = lastAssistantText(messages)
                   if (partialText) {
-                    agent.status = 'completed'
+                    if (pollDied) orchestrator.settleAgent(agent.id, 'completed')
                     await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(orchestrator.getState())))
                     const taskPreview = task.length > 80 ? task.substring(0, 77) + '...' : task
                     return {
@@ -1961,6 +1990,7 @@ A design decision, in this shape:
                   // Context read also failed
                 }
 
+                if (pollDied) orchestrator.settleAgent(agent.id, 'failed')
                 return {
                   content: [
                     `${agent.name}`,
@@ -1977,7 +2007,7 @@ A design decision, in this shape:
                 const messages = await ctx.session.context({ sessionID: agent.sessionID! })
                 const result = lastAssistantText(messages) || 'Task completed (no output captured)'
 
-                agent.status = 'completed'
+                orchestrator.settleAgent(agent.id, 'completed')
                 await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(orchestrator.getState())))
 
                 const taskPreview = task.length > 80 ? task.substring(0, 77) + '...' : task
@@ -1993,7 +2023,7 @@ A design decision, in this shape:
                 }
               } catch {
                 // Context read failed after successful wait
-                agent.status = 'completed'
+                orchestrator.settleAgent(agent.id, 'completed')
                 await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(orchestrator.getState())))
                 return {
                   content: [
@@ -2007,6 +2037,13 @@ A design decision, in this shape:
             }
 
             // Non-wait: return spawn info with complexity analysis
+            //
+            // `working` is left in place deliberately, and is the one case where
+            // that is honest rather than a leak: this tool has NOT been told the
+            // session finished, and a non-wait spawn has no waiter to hear it.
+            // The caller is pointed at `nexus.result()`, which is the surface
+            // that reports the outcome. Inventing a terminal status here would
+            // be a worse lie than a running row.
             const complexity = orchestrator.analyzeComplexity({
               id: `spawn-${Date.now()}`,
               name: task,
@@ -2034,6 +2071,11 @@ A design decision, in this shape:
             ].join('\n')
             return { content: output }
           } catch (error: any) {
+            // The spawn itself never reached `spawned` on a spawn failure, and
+            // there is then no agent in the map to settle. Once it HAS spawned,
+            // this is a task that is over — by failure rather than by completion
+            // — and leaving it at `working` is the bug this settles.
+            if (spawned) orchestrator.settleAgent(spawned.id, 'failed')
             return { content: `Failed to spawn agent: ${error.message}` }
           }
         }
@@ -2056,8 +2098,16 @@ A design decision, in this shape:
         options: { codemode: true },
         execute: async (input: unknown, toolCtx: any) => {
           const { role, task, model, timeout } = input as { role: string; task: string; model?: string; timeout?: number }
+          // See the `spawn` tool's own note: the agent is in the map and marked
+          // `working` before anything below can throw, and this catch is the
+          // exit that used to leave it there. `session.wait` REJECTING is the
+          // ordinary way in here — an aborted or gone session rejects rather
+          // than timing out — and that is not a session still working, so it
+          // must not keep reporting one.
+          let spawned: SpawnedAgent | null = null
           try {
             const agent = await spawnAndDeliver({ role, task, model }, toolCtx)
+            spawned = agent
 
             agent.status = 'working'
             orchestrator.notifyStateChange()
@@ -2075,7 +2125,11 @@ A design decision, in this shape:
               const messages = await ctx.session.context({ sessionID: agent.sessionID! })
               const resultContent = lastAssistantText(messages) || (outcome === 'timeout' ? 'Timed out — agent may still be running' : 'Completed with no output')
 
-              agent.status = outcome === 'timeout' ? 'working' : 'completed'
+              // `timeout` leaves the agent `working` and it is right to: the
+              // session was never told to stop and is still spending. Only a
+              // completed wait is an outcome, and it settles like every other.
+              if (outcome === 'completed') orchestrator.settleAgent(agent.id, 'completed')
+              else agent.status = 'working'
               orchestrator.notifyStateChange()
               await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(orchestrator.getState())))
 
@@ -2091,7 +2145,8 @@ A design decision, in this shape:
                 ].join('\n')
               }
             } catch {
-              agent.status = outcome === 'timeout' ? 'working' : 'completed'
+              if (outcome === 'completed') orchestrator.settleAgent(agent.id, 'completed')
+              else agent.status = 'working'
               orchestrator.notifyStateChange()
               return {
                 content: [
@@ -2103,6 +2158,9 @@ A design decision, in this shape:
               }
             }
           } catch (error: any) {
+            // See the `spawn` tool's catch. A rejected `session.wait` lands here
+            // and the agent is not working any more.
+            if (spawned) orchestrator.settleAgent(spawned.id, 'failed')
             return { content: `Delegate failed: ${error.message}` }
           }
         }

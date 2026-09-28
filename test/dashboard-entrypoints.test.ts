@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, mock } from 'bun:test'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import * as realOs from 'node:os'
@@ -924,6 +924,56 @@ describe('dashboard entry points', () => {
       for (const input of [undefined, '', '  ', '4748', '4748 0.0.0.0', 'abc', '0', '70000', '4747abc', '-1', '4748.5']) {
         expect(parseWebDashboardTarget(input, fallback)).toEqual(parseDashboardTarget(input, fallback))
       }
+    })
+  })
+
+  // The parser test above keeps the two functions in agreement. It cannot
+  // keep them in separate BUNDLES, which is the constraint that made them two
+  // functions in the first place: `src/dashboard.ts:11` inlines
+  // `dashboard/index.html` with a text import, so importing that module from
+  // `src/tui.tsx` would pull ~170 KB of page markup into `dist/tui.js`, which
+  // serves no dashboard and reads none of it. The comments at both sites say
+  // so, and a comment is not a test — the next reader who sees the duplication
+  // merges them, and the cost lands at build time where nothing fails.
+  describe('the built bundles keep the dashboard markup in one of them', () => {
+    // Strings taken from `dashboard/index.html`. Short and specific enough that
+    // a coincidence in application code is not the reason a bundle matches,
+    // and from the head of the file so a later edit to the body cannot quietly
+    // make this pass for the wrong reason.
+    const MARKUP = ['--surface-hover', '0d1117', '161b22', '30363d'] as const
+
+    const dist = (file: string): string | null => {
+      const path = join(import.meta.dir, '..', 'dist', file)
+      return existsSync(path) ? readFileSync(path, 'utf-8') : null
+    }
+
+    it('inlines the dashboard page into the server bundle, which serves it', () => {
+      const server = dist('index.js')
+      if (server === null) return // a source checkout with no build; see below
+      for (const mark of MARKUP) expect(server).toContain(mark)
+    })
+
+    it('keeps every byte of that markup out of the TUI bundle', () => {
+      const tui = dist('tui.js')
+      if (tui === null) return
+      for (const mark of MARKUP) {
+        expect(tui).not.toContain(mark)
+      }
+    })
+
+    it('and the TUI bundle is nowhere near large enough to be carrying it', () => {
+      // The size claim is what makes the two tests above a real assertion
+      // rather than a coincidence about four strings. `dist/tui.js` is ~72 KB
+      // and the page is ~170 KB, so a bundle that had inlined the markup
+      // would be roughly 240 KB. The bar is set at the sum, not below it, so
+      // the current bundle keeps a wide margin and a regression is not one
+      // that has to be timed to notice.
+      const tui = dist('tui.js')
+      if (tui === null) return
+      const page = join(import.meta.dir, '..', 'dashboard', 'index.html')
+      const pageBytes = existsSync(page) ? statSync(page).size : 0
+      expect(pageBytes).toBeGreaterThan(0)
+      expect(Buffer.byteLength(tui)).toBeLessThan(pageBytes)
     })
   })
 
