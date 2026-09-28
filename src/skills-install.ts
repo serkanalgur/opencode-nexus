@@ -95,6 +95,20 @@ export function nexusSkillsTargetDir(homeDir: string): string {
 /**
  * The warning for the one destructive thing this installer does.
  *
+ * REPORTED BY THE CALLER, not printed here. This file had two `console.warn`
+ * call sites' worth of reporting in one and none in the other: the `unavailable`
+ * case is reported by `src/index.ts` from the returned results, and the
+ * overwrite was reported here. Two homes for one feature's output means the
+ * prefix, the tone and the decision of what is worth saying are all maintained
+ * twice, and a test that captures `console.warn` around the installer cannot
+ * see the half that moved. Both are now sibling arms of the same loop over the
+ * same `SkillInstallResult[]`, so `unavailable` and `updated` are reported by
+ * the same code, with the same `[nexus] ` prefix, from the same place.
+ *
+ * The installer's own return value is unchanged, and the DECISION is unchanged
+ * — `updated` was already a first-class result, which is all the caller needs.
+ * What moved is only the printing.
+ *
  * Fires only on `updated` — a file that existed and whose bytes differed from
  * what this version ships. Two neighbouring outcomes are deliberately silent:
  *
@@ -117,17 +131,8 @@ export function nexusSkillsTargetDir(homeDir: string): string {
  * release that legitimately rewrote all three. The varying part (the path) is
  * placed immediately after the prefix so the three are distinguishable at a
  * glance rather than reading as one warning pasted three times.
- *
- * ## Why this lives here rather than at the call site
- *
- * The `unavailable` case is reported by `src/index.ts` from the returned
- * results, which is the right split when the condition is a packaging failure
- * the core merely records. An overwrite is different: the core is the only
- * place that knows a user's edit was just discarded, and the condition is
- * already a first-class return value (`updated`). So the warn sits with the
- * decision rather than with a caller that has to re-derive it.
  */
-function overwriteWarning(name: NexusSkillName, path: string): string {
+export function overwriteWarning(name: NexusSkillName, path: string): string {
   return (
     `[nexus] Overwrote ${path}: it is managed by this plugin and will be replaced ` +
     `again on upgrade, so local edits made there will not survive. To customise this ` +
@@ -175,13 +180,10 @@ export function installNexusSkills(
     mkdirSync(dir, { recursive: true })
     writeFileSync(target, shipped, 'utf-8')
     results.push({ name, path: target, action: isNew ? 'created' : 'updated' })
-
-    // A warning, not an error: the write above is the specified policy and it
-    // succeeded. What is being reported is that an edit may have just been lost,
-    // which the user is entitled to know about and cannot act on retroactively.
-    if (!isNew) {
-      console.warn(overwriteWarning(name, target))
-    }
+    // Reported by the caller, from `action: 'updated'` — see `overwriteWarning`.
+    // The write above is still the specified policy and it still succeeded; the
+    // difference is only who says so, which is now the same code that reports a
+    // skill that did not ship.
   }
 
   return results

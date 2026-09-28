@@ -225,23 +225,39 @@ describe('designer: the model it runs on', () => {
   })
 
   it('the unset fallback is the default, not the coder model', () => {
-    // `getModelForRole` ends at `|| config.models.coder`, so a `designer` key
-    // missing from DEFAULT_CONFIG would put every designer on the coder's model.
-    // Asserted on the RESOLVED value with no config file anywhere, which is the
-    // state a fresh install is in.
+    // A `designer` key missing from DEFAULT_CONFIG would put every design
+    // director on whatever the coder resolves to, so the key has to be there and
+    // the resolved value has to be the designer's own. Asserted on the RESOLVED
+    // value with no config file anywhere, which is the state a fresh install is
+    // in.
     const manager = new NexusConfigManager()
     const config = manager.getConfig()
     expect(config.models.designer).toBeString()
     const resolved = manager.getModelForRole('designer')
     expect(resolved).toContain('/')
     // And the fallthrough is genuinely unreachable: clearing every level's
-    // designer key still lands on the default rather than on coder's.
-    manager.updateStorageConfig({ models: { designer: '' } })
+    // designer key still lands on the designer's own default.
+    //
+    // The coder is given a DIFFERENT model first, because the designer's default
+    // and the coder's default are the same string — so asserting against the
+    // coder's resolved value here would pass whether the chain restored the
+    // designer's default or handed over the coder's, and the assertion would be
+    // true of the old behaviour too. Naming a different coder model is what
+    // makes the two outcomes distinguishable.
+    // The designer's own default, read from a manager with nothing set — so the
+    // expected side of this comparison cannot come from the manager under test.
+    // The runtime check narrows the index signature's `string | undefined` for
+    // the assertion below, and it is also the assertion that the key is really
+    // there: without it, `designerDefault` would be `undefined` and the
+    // comparison below would be `toBe(undefined)`, which `getModelForRole` can
+    // never return — a permanently green line.
+    const designerDefault = new NexusConfigManager().getConfig().models.designer
+    if (designerDefault === undefined) throw new Error('the designer role has no default')
+
+    manager.updateStorageConfig({ models: { designer: '', coder: 'opencode/some-other-coder' } })
     const cleared = manager.getModelForRole('designer')
-    expect(cleared).toBe(manager.getModelForRole('coder'))
-    // Which is the honest statement of the cost: a user who explicitly blanks
-    // the designer gets the coder's model, and nothing warns them. Asserted so
-    // the behaviour is on the record rather than discovered later.
+    expect(cleared).toBe(designerDefault)
+    expect(cleared).not.toBe('opencode/some-other-coder')
   })
 
   it('a designer model set by the user is not overwritten by the default', () => {

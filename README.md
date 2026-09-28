@@ -122,7 +122,16 @@ Use nexus.goal.set with description="Build complete auth system"
 /nexus status       # Show the config summary
 /nexus model coder  # Pick the model for a role
 /nexus reset        # Reset configuration to defaults
+/nexus agents       # List spawned agents  (answered by the server)
+/nexus costs        # Cost report         (answered by the server)
+/nexus pause        # Pause the orchestrator      (answered by the server)
+/nexus resume       # Resume the orchestrator     (answered by the server)
 ```
+
+Anything the TUI does not handle itself is submitted to the OpenCode server
+verbatim and answered there, so a subcommand added to the server works from the
+TUI without a TUI change. `/nexus agents reviewer` forwards its filter. See
+[TUI Commands](#tui-commands).
 
 ---
 
@@ -150,9 +159,10 @@ Example (the model ids below are illustrative — use whatever your provider off
 
 Every role is configurable this way, `designer` included — it is a full role in the
 role picker, not a fixed one. When you call `nexus.spawn(role="coder")`, the coder
-model from config is used automatically. Leave a role unset and it falls back the
-way `getModelForRole` documents; a bundled default means that is only reachable if
-you write an empty string yourself.
+model from config is used automatically. Every role also has a bundled default, so
+leaving a role out of the file does not leave it unconfigured — it runs on that
+role's default rather than on the coder's. Emptying an entry asks for the same
+thing, which is what the picker's **Use default** row does.
 
 Which model a preset gives each role is a judgement, not a constant. The `minimal`
 preset puts the designer on a flash model because its thesis is cheap models against
@@ -940,6 +950,18 @@ gives it no way to — so it replaces the command text with the command's result
 rather than leaving the model holding a bare `/nexus dashboard` next to an
 answer it has no reason to read. The table above is the TUI palette.
 
+**Those subcommands are reachable from the TUI too, not only from the
+composer.** A subcommand the TUI does not handle itself is submitted to the
+server verbatim and answered there, so `/nexus agents [filter]`, `/nexus costs`,
+`/nexus pause` and `/nexus resume` all work when typed in the TUI. `agents`
+reads an optional filter as the second word, and the whole line is forwarded, so
+`/nexus agents reviewer` filters server-side. `status` and `dashboard` are the
+two the TUI answers itself — a config summary, and a browser-opening flow the
+server cannot perform — so they are not forwarded even though the server also
+implements them. Anything the server does not recognise comes back as its own
+`Unknown command. Available: …` reply, which is the one list of what it accepts
+and cannot go stale.
+
 `dashboard` and `web` are intercepted one step earlier, by the TUI, which uses
 that hook to start a server and open a browser only against a confirmed listen.
 The two subcommands are passed straight through to the same hook rather than
@@ -1087,9 +1109,27 @@ different rate applies, rather than rendering blank or as free. A model that
 published no price at all shows no price, which is deliberately not `$0`: no
 published price is not the same as a price of zero.
 
-**Use default** resets the role to its default model. It carries an empty
-value, and that empty string is what performs the reset — it is not a model
-reference.
+**Use default** clears the role's entry. It carries an empty value, and that
+empty string is what it writes — it is not a model reference. An empty value
+resolves to **that role's own default**, so the row's description is literal:
+picking it for `reviewer` puts the reviewer back on `openai/gpt-5-mini`, not on
+whatever the coder is using.
+
+Resolution in full: `models[role]` → the custom role's own `model` → *if the
+role's entry was emptied*, that role's bundled default → the **coder role's**
+model → the built-in coder default. The coder's model is still in the chain and
+still does its original job — a role the config says nothing about at all
+follows the coder, which is what "I configured one model, use it everywhere"
+means. It is not what an *emptied* entry means: emptying an entry is a
+statement about one role, and the right reading of it is that role's default
+rather than a different role's. Two ways to say "no opinion" and they now
+resolve differently, which is the point — a hand-written `reviewer: ""` gets
+the same answer as the row labelled "Use default", and so does removing the key.
+
+If you would rather a role track the coder, set the coder's model to a
+`providerID/modelID` value and leave the other roles out of `models`
+altogether; if you would rather a role have its own, set it explicitly, or empty
+the entry to get the bundled default.
 
 The resolved map is read at spawn time, so an edit to `nexus.jsonc` applies to
 the next spawn without a restart.

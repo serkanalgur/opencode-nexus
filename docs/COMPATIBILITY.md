@@ -38,6 +38,18 @@ The TUI plugin registers these slash commands in OpenCode's command palette:
 | `/nexus model <role>`, `/nexus-model` | Select the model for a role |
 | `/nexus reset`, `/nexus-reset` | Reset configuration to defaults |
 
+**Any other subcommand is submitted to the server verbatim and answered there.**
+`/nexus agents [filter]`, `/nexus costs`, `/nexus pause` and `/nexus resume` are
+implemented by `handleCommand` in the server process (see the second `/nexus`
+below) and are reachable from the TUI: the TUI forwards whatever it does not
+handle itself, so a subcommand added to the server works from the TUI with no
+TUI change, and the server's own `Unknown command. Available: …` reply is the
+one list of what it accepts. `agents` takes an optional filter, read as
+`parts[2]`, and it is forwarded with the rest of the line. `status` and
+`dashboard` are answered by the TUI on purpose — the first as a config summary,
+the second as a browser-opening flow the server cannot perform — so they are not
+forwarded even though the server also implements them.
+
 **The TUI process cannot start the dashboard, but it can reach the process that
 can.** The dashboard server runs in the OpenCode *server* process, beside the
 orchestrator whose state it serves; the TUI plugin runs in the *TUI* process and
