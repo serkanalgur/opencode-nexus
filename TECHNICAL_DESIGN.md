@@ -20,9 +20,7 @@
 7. [Data Models](#data-models)
 8. [API Reference](#api-reference)
 9. [Configuration](#configuration)
-10. [Implementation Roadmap](#implementation-roadmap)
-11. [Benchmarks & Comparisons](#benchmarks)
-12. [Security Considerations](#security)
+10. [Security Considerations](#security)
 
 ---
 
@@ -1159,94 +1157,7 @@ Nexus registers the following tools for agents:
 
 ---
 
-## 10. Implementation Roadmap
-
-### Phase 1: Foundation (Weeks 1-2)
-
-- [ ] Project setup (package.json, tsconfig, build system)
-- [ ] Core orchestrator class
-- [ ] DAG executor with basic parallelism
-- [ ] Agent lifecycle management (spawn, monitor, terminate)
-- [ ] Basic cost tracking
-
-**Deliverable:** Working orchestrator that can run 2-3 agents in parallel
-
-### Phase 2: Communication (Weeks 3-4)
-
-- [ ] Pub/Sub message broker
-- [ ] Direct agent messaging
-- [ ] Fan-out and broadcast patterns
-- [ ] Message persistence
-
-**Deliverable:** Agents can communicate in real-time
-
-### Phase 3: Intelligence (Weeks 5-6)
-
-- [ ] Adaptive agent spawning based on complexity
-- [ ] Cost-aware model routing
-- [ ] Budget enforcement and alerts
-- [ ] Shared memory store
-
-**Deliverable:** Smart routing and memory sharing
-
-### Phase 4: Reliability (Weeks 7-8)
-
-- [ ] Self-healing with auto-retry
-- [ ] Context transfer on respawn
-- [ ] Escalation policies
-- [ ] Pattern learning from failures
-
-**Deliverable:** Fault-tolerant orchestration
-
-### Phase 5: Dashboard & Polish (Weeks 9-10)
-
-- [ ] Real-time web dashboard
-- [ ] WebSocket state broadcasting
-- [ ] Security scanning integration
-- [ ] Git worktree support
-
-**Deliverable:** Production-ready plugin with monitoring
-
-### Phase 6: Ecosystem (Weeks 11-12)
-
-- [ ] Plugin marketplace integration
-- [ ] Documentation and examples
-- [ ] Performance optimization
-- [ ] Beta testing and bug fixes
-
-**Deliverable:** Public release
-
----
-
-## 11. Benchmarks
-
-### Execution Time Comparison
-
-| Scenario | Sequential | Swarm | Ensemble | Nexus |
-|----------|-----------|-------|----------|-------|
-| 3 independent tasks | 300s | 120s | 100s | **60s** |
-| Dependent chain (3) | 300s | 150s | 150s | **120s** |
-| Mixed (2 parallel + 1 dependent) | 300s | 130s | 110s | **70s** |
-
-### Cost Comparison
-
-| Scenario | Fixed Model | Swarm | Nexus (Cost-Aware) |
-|----------|------------|-------|---------------------|
-| Simple task (3 files) | $0.50 | $0.50 | **$0.15** |
-| Complex task (20+ files) | $2.00 | $2.00 | **$1.50** |
-| Mixed session (10 tasks) | $10.00 | $10.00 | **$4.00** |
-
-### Token Efficiency
-
-| Metric | Swarm | Nexus |
-|--------|-------|-------|
-| Tokens per task (avg) | 15,000 | **8,000** |
-| Context duplication | High | **Low** (shared memory) |
-| Agent overhead | 19 agents | **Dynamic** (2-5 typical) |
-
----
-
-## 12. Security Considerations
+## 10. Security Considerations
 
 ### Agent Isolation
 
@@ -1289,44 +1200,6 @@ Nexus registers the following tools for agents:
 
 ---
 
-## Appendix B: Comparison with Existing Solutions
-
-### vs. opencode-swarm
-
-| Aspect | Swarm | Nexus |
-|--------|-------|-------|
-| Agent count | Fixed (19) | Dynamic (2-10) |
-| Execution | Sequential pipeline | True parallel DAG |
-| Communication | None | Real pub/sub |
-| Cost tracking | None | Real-time budget |
-| Self-healing | Basic timeout | Context transfer |
-| Memory | Isolated | Shared store |
-| Learning | Evidence files | Pattern database |
-
-### vs. opencode-ensemble
-
-| Aspect | Ensemble | Nexus |
-|--------|----------|-------|
-| Communication | Basic messaging | Full pub/sub |
-| Task board | Lead-managed | Distributed |
-| Cost awareness | None | Full budget system |
-| Self-healing | Timeout only | Auto-respawn |
-| Memory | None | Shared store |
-| Dashboard | Basic | Advanced real-time |
-
-### vs. opencode-mission-control
-
-| Aspect | Mission Control | Nexus |
-|--------|----------------|-------|
-| Isolation | tmux sessions | Git worktrees |
-| Execution | Sequential | Parallel DAG |
-| Communication | None | Pub/sub |
-| PR creation | Built-in | Plugin-based |
-| Cost tracking | None | Full budget system |
-| Complexity | Simple | Advanced |
-
----
-
-**Document Version:** 1.0  
-**Last Updated:** 2026-09-21  
-**Status:** Design Phase
+**Document Version:** 2.13.1  
+**Status:** Shipped  
+**Note:** Sections 10 (Roadmap) and 11 (Benchmarks) were removed — their contents no longer describe the code. See the git history for the original text.
