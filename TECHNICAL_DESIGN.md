@@ -218,63 +218,91 @@ interface DAG {
   
   // Analysis
   getParallelGroups(): DAGNode[][] // Groups that can run in parallel
-  estimateTotalCost(): CostEstimate
+  isComplete(): boolean            // No node remains pending or running
 }
 ```
+
+The scheduler loop in `NexusOrchestrator.execute()` walks the DAG by calling
+`getReadyNodes()` until `isComplete()` is true; cycle detection lives in
+`detectCycles(nodes: DAGNode[]): string[][]` (`src/dag.ts`).
 
 ### 4.2 Adaptive Agent Spawning
 
 Agents are spawned based on task complexity, not predetermined roles.
 
+Complexity analysis and spawning are methods on `NexusOrchestrator`, not
+separate collaborators. The shape below is the actual signature and factor
+arithmetic from `src/orchestrator.ts`.
+
 ```typescript
-interface ComplexityAnalyzer {
-  analyze(task: Task): ComplexityScore
-  
-  // Factors considered
+// src/orchestrator.ts
+analyzeComplexity(task: Task): ComplexityScore
+
+spawnAgent(config: SpawnConfig, options?: SpawnOptions): Promise<SpawnedAgent>
+terminateAgent(agentId: string): Promise<void>
+```
+
+`analyzeComplexity` derives every factor from the task itself rather than
+taking them as input:
+
+```typescript
+interface ComplexityScore {
+  overall: number        // 0-100
   factors: {
-    fileCount: number        // How many files are touched
-    codeLines: number        // Estimated lines of change
-    dependencyDepth: number  // How many dependencies involved
-    domainKnowledge: string  // Required domain expertise
-    riskLevel: 'low' | 'medium' | 'high'
+    fileCount: number              // task.files.include.length
+    codeLines: number              // fileCount * 50 (synthetic estimate)
+    dependencyDepth: number        // task.dependencies.length
+    domainKnowledge: number        // 0-100, keyword hits in the description
+    riskLevel: 'low' | 'high'      // note: only these two ends are produced
   }
 }
-
-interface AgentSpawner {
-  // Spawn based on complexity
-  spawnForTask(task: Task): Agent[]
-  
-  // Dynamic role assignment
-  assignRoles(task: Task, complexity: ComplexityScore): AgentRole[]
-  
-  // Model selection per role
-  selectModel(role: AgentRole, budget: Budget): Model
-}
 ```
+
+`riskLevel` is `low` or `high` — the implementation never assigns `medium`, so
+a third value has no producer even though `ComplexityScore` in `src/types.ts`
+still types it as `'low' | 'medium' | 'high'`.
 
 ### 4.3 Real Pub/Sub Communication
 
 Agents communicate through a message broker, not direct calls.
 
+There is no `MessageBroker` type in the codebase. Agent-to-agent messaging is
+three cooperating pieces, each in its own file:
+
 ```typescript
-interface MessageBroker {
-  // Topic-based pub/sub
-  publish(topic: string, message: AgentMessage): void
-  subscribe(topic: string, handler: MessageHandler): Unsubscribe
-  
-  // Direct messaging
-  send(agentId: string, message: AgentMessage): void
-  
-  // Fan-out patterns
-  fanOut(
-    message: AgentMessage, 
-    recipients: string[]
-  ): void
-  
-  // Broadcast
-  broadcast(message: AgentMessage): void
+// src/fanout.ts — topic routing
+class MessageRouter {
+  subscribe(subscriberId: string, topic: string, handler: (msg: AgentMessage) => void): void
+  unsubscribe(subscriberId: string): void
+  route(message: AgentMessage): string[]   // returns the subscriber IDs delivered to
 }
 
+// src/message-store.ts — durable JSONL message log
+class MessageStore {
+  add(message: AgentMessage): void
+}
+
+// src/broadcast.ts — orchestrator event → WebSocket clients
+class StateBroadcaster {
+  addClient(ws: WebSocketLike): void
+  removeClient(ws: WebSocketLike): void
+}
+```
+
+The orchestrator exposes the publish/subscribe surface directly, delegating to
+the router:
+
+```typescript
+// src/orchestrator.ts
+publish(topic: string, message: Omit<AgentMessage, 'id' | 'timestamp'>): void
+subscribe(topic: string, handler: (msg: AgentMessage) => void): () => void
+```
+
+`StateBroadcaster` subscribes to every event named in `BROADCAST_EVENTS` and
+forwards each to connected dashboard clients, throttling full `orchestrator:state`
+snapshots to at most once per second.
+
+```typescript
 interface AgentMessage {
   id: string
   from: string
@@ -283,11 +311,13 @@ interface AgentMessage {
   type: MessageType
   payload: unknown
   timestamp: Date
-  metadata: {
-    priority: 'low' | 'normal' | 'high' | 'critical'
-    requiresResponse: boolean
-    ttl?: number // Time to live in ms
-  }
+  metadata: MessageMetadata
+}
+
+interface MessageMetadata {
+  priority: 'low' | 'normal' | 'high' | 'critical'
+  requiresResponse: boolean
+  ttl?: number // Time to live in ms
 }
 
 type MessageType = 
@@ -307,40 +337,48 @@ type MessageType =
 
 Every model selection considers cost vs quality tradeoffs.
 
-```typescript
-interface CostRouter {
-  // Select model based on budget and requirements
-  selectModel(params: {
-    role: AgentRole
-    taskComplexity: ComplexityScore
-    budget: BudgetConstraint
-    preferredProviders?: string[]
-  }): ModelSelection
-  
-  // Track costs in real-time
-  trackCost(agentId: string, usage: TokenUsage): void
-  
-  // Get current spend
-  getCurrentSpend(): CostReport
-  
-  // Budget enforcement
-  enforceBudget(): BudgetEnforcement
-}
+There is no `CostRouter` interface. Selection lives on the orchestrator and
+pricing lives in a dedicated forecaster:
 
+```typescript
+// src/orchestrator.ts — candidate selection and cost attribution
+selectModel(role: AgentRole, complexity: ComplexityScore): ModelSelection
+selectBestModel(role: string, complexity: ComplexityScore): ModelSelection
+scoreModel(ref, role, complexity, estimates): number
+trackCost(agentId: string, model: string, cost: number, tokens: number, provenance: CostProvenance): void
+getModelCost(model: string, provider?: string): NexusModelCost | undefined
+isBudgetExceeded(): boolean
+
+// src/forecast.ts — price estimation
+class CostForecaster {
+  tiersFor(model: string, provider?: string): { pricing: ModelPricingTiers; source: PricingSource }
+  estimateCost(complexity: ComplexityScore, model: string, provider?: string): number
+}
+```
+
+`selectBestModel` builds its candidate list from the role's configured model
+plus a small set of known alternatives, prices each once, filters out anything
+whose per-task estimate exceeds the remaining total budget, and ranks the
+survivors. `ModelPricingTiers` (also `src/forecast.ts`) carries input, output
+and cache rates; `PricingSource` records whether a price came from
+`model-costs`, the built-in `FALLBACK_PRICING_PER_1K` table, or the
+`unknown-model` placeholder.
+
+```typescript
 interface BudgetConstraint {
   maxTotalCost: number
-  maxCostPerTask: number
-  maxCostPerAgent: number
-  alertThreshold: number // % of budget remaining
-  hardLimit: boolean     // Stop or warn
+  maxCostPerTask: number   // per-task advisory ceiling (see note below)
+  alertThreshold: number   // fraction of budget remaining that triggers an alert
+  hardLimit: boolean       // whether exceeding the total is terminal
 }
 
 interface ModelSelection {
   provider: string
-  model: string
+  model: string            // bare model id, without provider or variant
+  variant?: string         // the `#variant` half, without the `#`
   estimatedCost: number
   estimatedQuality: number // 0-1
-  reasoning: string       // Why this model was selected
+  reasoning: string        // Why this model was selected
 }
 ```
 
@@ -348,39 +386,40 @@ interface ModelSelection {
 
 Agents automatically recover from failures.
 
+There is no `SelfHealingManager` interface. Failure recovery is a private
+orchestrator method and health sampling is a standalone monitor:
+
 ```typescript
-interface SelfHealingManager {
-  // Monitor agent health
-  monitor(agent: Agent): HealthStatus
-  
-  // Handle failures
-  handleFailure(agent: Agent, error: Error): RecoveryAction
-  
-  // Transfer context on respawn
-  transferContext(
-    oldAgent: Agent, 
-    newAgent: Agent
-  ): Promise<void>
-  
-  // Escalation policy
-  escalate(failure: FailureRecord): EscalationAction
-}
+// src/orchestrator.ts
+private handleFailure(agent: Agent, node: DAGNode, error: Error): Promise<void>
+collectContext(agent: Agent): ContextTransferData   // feeds the respawn prompt
 
-interface RecoveryAction {
-  type: 'retry' | 'respawn' | 'fallback' | 'escalate'
-  delay?: number
-  newModel?: string
-  contextTransfer?: boolean
-  maxRetries?: number
+// src/health.ts
+class HealthMonitor {
+  start(getAgents: () => Agent[]): void
+  stop(): void
+  checkAgent(agent: Agent): HealthCheck
+  getHealth(agentId: string): HealthCheck | null
+  getHistory(agentId: string): HealthCheck[]
+  getUnhealthyAgents(): string[]
 }
+```
 
-interface HealthStatus {
+Recovery is driven by the `selfHealing` config block (`maxRetries`, `retryDelay`,
+`contextTransfer`) and an internal `EscalationPolicy` built from it in the
+orchestrator constructor; per-node retry counts live in `nodeRetryCounts`. When
+a retry respawns, the previous agent's partial results are prepended to the next
+agent's prompt as context transfer.
+
+```typescript
+interface HealthCheck {
   agentId: string
-  status: 'healthy' | 'degraded' | 'unhealthy' | 'dead'
-  lastActivity: Date
-  errorCount: number
+  timestamp: Date
   responseTime: number
+  errorRate: number
   tokensPerSecond: number
+  memoryUsage: number
+  status: 'healthy' | 'degraded' | 'unhealthy'
 }
 ```
 
@@ -388,34 +427,51 @@ interface HealthStatus {
 
 Agents share context through a structured memory store.
 
+The store is `PersistentMemoryStore` (`src/memory-store.ts`), not a
+`SharedMemoryStore`. Writes append a new version rather than replacing, which is
+why the read side is split into "latest" and "all versions" queries.
+
 ```typescript
-interface SharedMemoryStore {
-  // Scoped memory
-  project: ScopedMemory    // Project-wide decisions
-  session: ScopedMemory    // Current session context
-  learning: ScopedMemory   // Learned patterns
-  
-  // Operations
-  get<T>(scope: MemoryScope, key: string): T | undefined
-  set<T>(scope: MemoryScope, key: string, value: T): void
-  delete(scope: MemoryScope, key: string): void
-  
-  // Search
+// src/memory-store.ts
+class PersistentMemoryStore {
+  set(entry: Omit<MemoryEntry, 'id' | 'timestamp'>): MemoryEntry
+  get(key: string, scope?: MemoryScope): MemoryEntry | null
+  getByKey(key: string, scope?: MemoryScope): MemoryEntry[]   // all versions
+  getByScope(scope: MemoryScope): MemoryEntry[]
   search(query: string, scope?: MemoryScope): MemoryEntry[]
-  
-  // Observability
-  onChange(handler: MemoryChangeHandler): Unsubscribe
+  getRecent(count: number): MemoryEntry[]
+  getByAuthor(author: string): MemoryEntry[]
+  delete(key: string, scope?: MemoryScope): boolean
+  clear(scope?: MemoryScope): number
+  getStats(): { total: number; byScope: Record<string, number>; expired: number; evicted: Record<string, number> }
+  close(): void
 }
 
+// src/orchestrator.ts — the surface agents actually reach
+setMemory(scope: MemoryScope, key: string, value: unknown, author: string): void
+getMemory(scope: MemoryScope, key: string): MemoryEntry | undefined
+versionsOfMemory(scope, key): { entries: MemoryEntry[]; count: number }
+searchMemory(query: string, scopes: readonly MemoryScope[]): MemoryEntry[]
+listMemory(scope: MemoryScope, limit: number): { entries: MemoryEntry[]; versionsSuperseded: number }
+recallForTask(request: RecallRequest): RecallOutcome
+```
+
+`recallForTask` is what injects notes into a task's prompt, and it is capped;
+`getLastRecall()` reports how many notes were rendered and how many characters
+they took, so the retrieval cost is a number rather than an inference. Only a
+key of the form `file:<path>` is auto-injected into tasks touching that file.
+
+```typescript
 interface MemoryEntry {
+  id: string
   key: string
   value: unknown
   scope: MemoryScope
-  author: string // Agent ID
+  author: string        // self-reported by the writer
   timestamp: Date
-  ttl?: number
+  confidence: number | null  // null when unstated — NOT a low value
   tags: string[]
-  confidence: number // 0-1, how confident we are in this memory
+  ttl?: number
 }
 
 type MemoryScope = 'project' | 'session' | 'learning' | 'temp'
@@ -429,60 +485,125 @@ type MemoryScope = 'project' | 'session' | 'learning' | 'temp'
 
 Nexus uses a composable architecture where features are optional modules.
 
+There is no fluent `.use(...)` builder and no `NexusOrchestrator.preset()`
+static. The orchestrator is constructed directly and modules are registered
+against its `ModuleRegistry` (`src/modules.ts`):
+
 ```typescript
 import { NexusOrchestrator } from '@serkanalgur/opencode-nexus'
 
-const orchestrator = new NexusOrchestrator()
-  .use(ParallelExecution({ maxConcurrency: 5 }))
-  .use(CostAwareRouting({ budget: { maxTotalCost: 10 } }))
-  .use(AgentCommunication({ mode: 'pubsub' }))
-  .use(SelfHealing({ maxRetries: 3 }))
-  .use(MemorySharing({ storage: 'sqlite' }))
-  .use(Dashboard({ port: 4747 }))
-  .use(SecurityScanning({ sast: true, secrets: true }))
-  .use(Learning({ enabled: true }))
+const orchestrator = new NexusOrchestrator(config?, messageStoreConfig?, memoryStoreConfig?)
 
-// Or with presets
-const orchestrator = NexusOrchestrator.preset('balanced')
-// Options: 'minimal' | 'balanced' | 'enterprise' | 'cost-optimized'
+orchestrator.moduleRegistry.register({
+  name: 'my-module',
+  description: 'What it does',
+  version: '1.0.0',
+  setup: async (ctx) => { /* ctx.orchestrator, ctx.config, ctx.emit, ctx.on */ },
+  teardown: async () => {},
+  tools: [{ name, description, execute }],
+  hooks: [{ event, handler }],
+})
+
+// Modules are set up during initialize(), and torn down on shutdown()
+await orchestrator.moduleRegistry.setupAll(moduleCtx)
+await orchestrator.moduleRegistry.teardownAll()
 ```
+
+Registering a name twice throws. A module whose `setup` throws is logged and
+skipped — `setupAll` does not fail the orchestrator over one bad module.
+
+**Presets** are a configuration feature, not an orchestrator constructor. They
+are applied through the config manager (`src/config.ts`):
+
+```typescript
+configManager.applyPreset(name: string): void   // merges PRESETS[name].config
+configManager.listPresets(): string[]
+```
+
+The `PRESETS` table defines `minimal`, `balanced` and `enterprise`. Separately,
+the `preset` **tool** (registered in `src/index.ts`) applies a session-scoped
+preset that shadows `nexus.jsonc` until cleared — a different mechanism from
+`applyPreset`, which writes the merged config.
 
 ### 5.2 Module Interface
 
 ```typescript
+// src/modules.ts
 interface NexusModule {
   name: string
+  description: string
   version: string
-  
+
   // Lifecycle
-  setup(orchestrator: NexusOrchestrator): Promise<void>
-  teardown(): Promise<void>
-  
-  // Hooks
-  hooks?: {
-    beforeSpawn?: (agent: Agent) => Promise<Agent>
-    afterSpawn?: (agent: Agent) => Promise<void>
-    beforeExecute?: (task: Task) => Promise<Task>
-    afterExecute?: (task: Task, result: Result) => Promise<Result>
-    onError?: (error: Error) => Promise<RecoveryAction>
-  }
+  setup?: (ctx: ModuleContext) => Promise<void>
+  teardown?: () => Promise<void>
+
+  // Optional: tools exposed to agents, and event hooks
+  tools?: ModuleTool[]
+  hooks?: ModuleHook[]
+}
+
+interface ModuleContext {
+  orchestrator: any
+  config: any
+  emit: (event: string, data: any) => void
+  on: (event: string, handler: (data: any) => void) => void
+}
+
+interface ModuleTool {
+  name: string
+  description: string
+  execute: (input: any) => Promise<{ content: string }>
+}
+
+interface ModuleHook {
+  event: string
+  handler: (data: any) => void | Promise<void>
 }
 ```
 
+Note that `setup` receives a `ModuleContext`, not the orchestrator directly, and
+hooks are declared as `{ event, handler }` pairs rather than the named
+`beforeSpawn`/`afterExecute` callbacks shown in earlier drafts.
+
 ### 5.3 Built-in Modules
 
-| Module | Description | Required |
-|--------|-------------|----------|
-| `parallel-execution` | DAG-based parallel task execution | ✅ Yes |
-| `cost-routing` | Cost-aware model selection | Optional |
-| `pubsub-communication` | Agent-to-agent messaging | Optional |
-| `self-healing` | Auto-recovery from failures | Optional |
-| `shared-memory` | Cross-agent memory store | Optional |
-| `dashboard` | Real-time web monitoring UI | Optional |
-| `security-scanning` | SAST/secrets scanning per task | Optional |
-| `learning` | Pattern learning from failures | Optional |
-| `git-worktree` | Isolated git worktrees per agent | Optional |
-| `notification` | OS notifications on events | Optional |
+Most subsystems are constructed directly by the orchestrator rather than
+registered in the `ModuleRegistry`, and the ones that are component classes do
+not carry kebab-case module names. The table below lists the real units, keyed
+by the class that implements them.
+
+| Subsystem | Implementation | Lifecycle |
+|-----------|----------------|-----------|
+| Parallel DAG execution | `NexusOrchestrator.execute()` + `detectCycles()` (`src/dag.ts`) | Built in, always on |
+| Cost-aware model selection | `selectBestModel()` / `scoreModel()` + `CostForecaster` (`src/forecast.ts`) | Built in, always on |
+| Pub/sub messaging | `MessageRouter` (`src/fanout.ts`), `MessageStore` (`src/message-store.ts`) | Constructed in the orchestrator constructor |
+| Real-time state broadcast | `StateBroadcaster` (`src/broadcast.ts`) | Created by `initBroadcaster()` |
+| Self-healing | `handleFailure()` + `EscalationPolicy` (orchestrator-internal) | Driven by the `selfHealing` config block |
+| Health monitoring | `HealthMonitor` (`src/health.ts`) | `start()`ed in `initialize()` |
+| Shared memory | `PersistentMemoryStore` (`src/memory-store.ts`), `recallForTask()` | Constructed in the constructor |
+| Dashboard | `DashboardModule` (`src/dashboard.ts`) | Created by `startDashboard()` |
+| Security scanning | `SecurityScanner` (`src/security.ts`) | Constructed in the constructor |
+| Learning | `LearningModule` (`src/learning.ts`) | Constructed in the constructor |
+| Git worktrees | `WorktreeManager` (`src/worktree.ts`) | Created by `enableWorktrees()`; `null` until then |
+| Notifications | `NotificationManager` (`src/notifications.ts`) | Created in `initialize()`, gated on config |
+| Performance scoring | `PerformanceTracker` (`src/performance.ts`) | Constructed in the constructor |
+| Execution history | `ExecutionHistory` (`src/history.ts`) | Constructed in the constructor |
+| Custom roles | `CustomRoleManager` (`src/custom-roles.ts`) | Constructed in the constructor |
+| Templates | `instantiateTemplate()` / `listTemplates()` (`src/templates.ts`) | Stateless helpers |
+| Teams | `TeamManager` (`src/team.ts`) | Created per tool invocation in `src/index.ts` |
+| Goals | `GoalManager` (`src/goal.ts`) | Created per session in `src/index.ts` |
+| Todos | `TodoEnforcer` (`src/todo.ts`) | An orchestrator field, `new TodoEnforcer()` |
+| ast-grep | `AstGrep` (`src/astgrep.ts`) | Created per tool invocation in `src/index.ts` |
+| git-flow | `detectGitState()` / `resolveGitFlow()` / `checkGitFlow()` (`src/git-flow.ts`) | Stateless helpers |
+| Model groups & refs | `src/model-groups.ts`, `src/model-ref.ts` | Stateless helpers |
+| Config loading & hot-reload | `NexusConfigManager` (`src/config.ts`), `reloadConfigFromDisk()` | Reloaded on file change |
+| Skills install | `installNexusSkills()` (`src/skills-install.ts`) | On-demand |
+| TUI commands | `src/tui.tsx` — `LOCAL_COMMANDS` routing | Separate TUI process; forwards unknown subcommands to the server |
+
+`ModuleRegistry` exists as the extension point for third-party modules, but no
+built-in subsystem registers through it — `setupAll()` is called during
+`initialize()` over an empty registry in the shipped configuration.
 
 ---
 
@@ -492,393 +613,250 @@ interface NexusModule {
 
 **Purpose:** Execute independent tasks concurrently using a dynamic DAG.
 
+There is no `ParallelExecutionModule` class and no `PriorityQueue<DAGNode>` in
+the source tree. Scheduling is the orchestrator's own `executeDAG()` loop, and
+concurrency is bounded by counting live agents rather than a ready queue.
+
 ```typescript
-interface ParallelExecutionConfig {
-  maxConcurrency: number      // Max parallel agents (default: 5)
-  schedulerInterval: number   // DAG check interval in ms (default: 1000)
-  deadlockDetection: boolean  // Detect circular dependencies
-  priorityQueuing: boolean    // Priority-based scheduling
+// src/orchestrator.ts
+async execute(request: ExecutionRequest): Promise<ExecutionResult> {
+  // 1. Build the DAG from the task list
+  this.dag = this.buildDAG(request.tasks)
+
+  // 2. Refuse a cyclic graph before spawning anything
+  const cycles = detectCycles(Array.from(this.dag.nodes.values()))
+  if (cycles.length > 0) {
+    throw new Error(`Circular dependency detected: ${cycles.map(c => c.join(' → ')).join(', ')}`)
+  }
+
+  // 3. Apply a per-request budget override, if one was supplied
+  if (request.budget) { this.budgetOverride = request.budget; this.budget = request.budget }
+
+  // 4. Run the scheduler, then collect
+  await this.executeDAG()
+  return { success: true, tasks: this.collectResults(), totalCost: this.totalSpent, ...this.spendSplit(), totalDuration, agentsUsed: this.agents.size }
 }
 
-class ParallelExecutionModule implements NexusModule {
-  name = 'parallel-execution'
-  
-  private dag: DAG
-  private runningAgents: Map<string, Agent>
-  private readyQueue: PriorityQueue<DAGNode>
-  
-  async execute(tasks: Task[]): Promise<TaskResult[]> {
-    // 1. Build DAG from tasks
-    this.dag = this.buildDAG(tasks)
-    
-    // 2. Start scheduler loop
-    return this.scheduleLoop()
-  }
-  
-  private async scheduleLoop(): Promise<TaskResult[]> {
-    while (!this.dag.isComplete()) {
-      // Get nodes ready to execute
-      const ready = this.dag.getReadyNodes()
-      
-      // Spawn agents for ready nodes (respecting concurrency limit)
-      for (const node of ready) {
-        if (this.runningAgents.size < this.config.maxConcurrency) {
-          await this.spawnAndExecute(node)
-        }
+private async executeDAG(): Promise<void> {
+  while (!this.dag!.isComplete() && !this.paused) {
+    const spawnPromises: Promise<void>[] = []
+    for (const node of this.dag!.getReadyNodes()) {
+      if (this.agents.size < this.config.maxConcurrency) {
+        // Per-node catch: one spawn failure must not reject the whole
+        // Promise.all and discard every sibling's result.
+        spawnPromises.push(this.spawnAndExecute(node).catch(/* mark node failed, emit task:failed */))
       }
-      
-      // Wait for next scheduler tick
-      await sleep(this.config.schedulerInterval)
     }
-    
-    return this.collectResults()
-  }
-  
-  private async spawnAndExecute(node: DAGNode): Promise<void> {
-    const agent = await this.orchestrator.spawnAgent({
-      role: node.task.requiredRole,
-      task: node.task,
-      worktree: this.config.isolatedWorktrees
-    })
-    
-    this.runningAgents.set(node.id, agent)
-    node.spawnedAgent = agent
-    
-    // Monitor completion
-    agent.onComplete(async (result) => {
-      this.dag.markComplete(node.id, result)
-      this.runningAgents.delete(node.id)
-    })
-    
-    agent.onError(async (error) => {
-      this.dag.markFailed(node.id, error)
-      this.runningAgents.delete(node.id)
-      
-      // Self-healing will handle respawn
-      if (this.orchestrator.hasModule('self-healing')) {
-        await this.orchestrator.selfHealing.handleFailure(agent, error)
-      }
-    })
+    await Promise.all(spawnPromises)
+    await this.sleep(this.config.schedulerInterval)
   }
 }
 ```
+
+Relevant config keys are `maxConcurrency` and `schedulerInterval`. There is no
+`deadlockDetection` toggle — cycle detection is unconditional — and no
+priority-queue scheduling; `Task.priority` is carried on the task but the ready
+set is `getReadyNodes()`.
 
 ### 6.2 Cost-Aware Routing Module
 
 **Purpose:** Select optimal models based on cost, quality, and budget constraints.
 
+There is no `CostRoutingModule` class and no `costOptimization` mode setting.
+Selection is three orchestrator methods over a `CostForecaster` that reads
+prices from the `model.costs` tool's data, with a built-in fallback table
+behind it.
+
 ```typescript
-interface CostRoutingConfig {
-  budget: BudgetConstraint
-  modelPricing: Map<string, ModelPricing>
-  qualityThreshold: number    // Minimum quality score (0-1)
-  costOptimization: 'aggressive' | 'balanced' | 'quality-first'
+// src/orchestrator.ts
+selectBestModel(role: string, complexity: ComplexityScore): ModelSelection {
+  const candidates = dedupe([
+    this.configManager.getModelForRole(role),
+    'anthropic/claude-sonnet-4-6',
+    'anthropic/claude-haiku-4-5',
+    'openai/gpt-5-mini',
+    'google/gemini-2.5-flash',
+    'opencode/minimax-m2.5-free',
+  ])
+
+  // Price each candidate ONCE, so the budget filter and the ranker agree
+  const estimates = new Map(candidates.map(ref => [ref, this.forecaster.estimateCost(complexity, model, provider)]))
+
+  // Filter by remaining total budget. A genuinely free model stays selectable
+  // however little budget is left, hence the `=== 0` escape hatch.
+  const budgetRemaining = this.budget.maxTotalCost - this.totalSpent
+  const affordable = scored.filter(({ ref }) => (estimates.get(ref) ?? 0) <= budgetRemaining || estimates.get(ref) === 0)
+
+  // ...rank by overallScore and return the winner
 }
 
-class CostRoutingModule implements NexusModule {
-  name = 'cost-routing'
-  
-  private spending: Map<string, number> // agentId -> cost
-  private budgetRemaining: number
-  
-  async selectModel(params: {
-    role: AgentRole
-    complexity: ComplexityScore
-    preferred?: string[]
-  }): Promise<ModelSelection> {
-    const { role, complexity, preferred } = params
-    
-    // Get available models for this role
-    const candidates = this.getCandidateModels(role)
-    
-    // Filter by budget
-    const affordable = candidates.filter(m => 
-      m.estimatedCost <= this.budgetRemaining
-    )
-    
-    // Score each model
-    const scored = affordable.map(m => ({
-      model: m,
-      score: this.scoreModel(m, complexity)
-    }))
-    
-    // Sort by score (cost-adjusted quality)
-    scored.sort((a, b) => b.score - a.score)
-    
-    // Return best option
-    return {
-      ...scored[0].model,
-      reasoning: this.explainSelection(scored[0])
-    }
-  }
-  
-  private scoreModel(model: CandidateModel, complexity: ComplexityScore): number {
-    const qualityScore = model.quality * (complexity.riskLevel === 'high' ? 1.5 : 1)
-    const costScore = 1 - (model.estimatedCost / this.budgetRemaining)
-    const speedScore = model.tokensPerSecond / 100
-    
-    // Weighted scoring
-    return (
-      qualityScore * 0.5 +
-      costScore * 0.3 +
-      speedScore * 0.2
-    )
-  }
+scoreModel(modelId, role, complexity, estimates?): ModelScore {
+  const costScore = maxEstimate === 0 ? 1 : 1 - (estimate / maxEstimate)
+  const quality = this.estimateModelQuality(model)
+
+  // Complexity shifts the quality/cost trade-off
+  const qualityWeight = complexity.overall > 70 ? 0.6 : complexity.overall > 40 ? 0.4 : 0.2
+  const costWeight = 1 - qualityWeight
+
+  return { model, provider, ...(variant ? { variant } : {}), costScore, qualityScore: quality, speedScore, overallScore: quality * qualityWeight + costScore * costWeight, reasoning }
 }
 ```
+
+`speedScore` is reported but is **not** a term in `overallScore`, so it never
+affects selection. There is no `qualityThreshold` setting: quality enters only
+through the complexity-driven weight above.
 
 ### 6.3 Pub/Sub Communication Module
 
 **Purpose:** Enable real-time agent-to-agent communication.
 
+There is no `PubSubModule` class, and no `maxQueueSize` / `messageTTL` /
+`deliveryGuarantee` settings. Publishing is one orchestrator method that feeds
+three sinks, and delivery is at-most-once to in-process handlers.
+
 ```typescript
-interface PubSubConfig {
-  maxQueueSize: number        // Max messages per topic
-  messageTTL: number          // Default TTL in ms
-  deliveryGuarantee: 'at-most-once' | 'at-least-once'
-  persistence: boolean        // Persist messages to disk
+// src/orchestrator.ts
+publish(topic: string, message: Omit<AgentMessage, 'id' | 'timestamp'>): void {
+  const fullMessage: AgentMessage = {
+    ...message,
+    topic: message.topic ?? topic,
+    id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+    timestamp: new Date()
+  }
+
+  this.messageQueue.push(fullMessage)   // 1. in-process ring buffer
+  this.messageStore.add(fullMessage)   // 2. JSONL on disk (always)
+
+  // 3. legacy per-topic handlers registered via subscribe()
+  const handlers = this.subscribers.get(topic) || []
+  handlers.forEach(handler => handler(fullMessage))
+
+  // 4. fan-out: exact-topic subscribers plus '*' wildcard subscribers
+  this.messageRouter.route(fullMessage)
 }
 
-class PubSubModule implements NexusModule {
-  name = 'pubsub-communication'
-  
-  private topics: Map<string, Topic>
-  private agents: Map<string, Agent>
-  private messageQueue: MessageQueue
-  
-  async setup(orchestrator: NexusOrchestrator): Promise<void> {
-    // Subscribe to orchestrator events
-    orchestrator.on('agent:spawned', (agent) => {
-      this.registerAgent(agent)
-    })
-    
-    orchestrator.on('agent:terminated', (agent) => {
-      this.unregisterAgent(agent)
-    })
-  }
-  
-  publish(topic: string, message: AgentMessage): void {
-    const topicInstance = this.getOrCreateTopic(topic)
-    topicInstance.publish(message)
-    
-    // Persist if enabled
-    if (this.config.persistence) {
-      this.persistMessage(message)
-    }
-  }
-  
-  subscribe(topic: string, handler: MessageHandler): Unsubscribe {
-    const topicInstance = this.getOrCreateTopic(topic)
-    return topicInstance.subscribe(handler)
-  }
-  
-  send(agentId: string, message: AgentMessage): void {
-    const agent = this.agents.get(agentId)
-    if (!agent) {
-      throw new Error(`Agent ${agentId} not found`)
-    }
-    
-    agent.receiveMessage(message)
-  }
-  
-  fanOut(message: AgentMessage, recipients: string[]): void {
-    for (const recipient of recipients) {
-      this.send(recipient, { ...message, to: recipient })
-    }
-  }
-  
-  broadcast(message: AgentMessage): void {
-    for (const [agentId, agent] of this.agents) {
-      if (agentId !== message.from) {
-        agent.receiveMessage({ ...message, to: agentId })
-      }
-    }
-  }
+subscribe(topic: string, handler: (msg: AgentMessage) => void): () => void {
+  // returns an unsubscribe closure
 }
 ```
+
+Note what is absent from the real API: there is no `send(agentId, message)`
+direct-delivery method, no `fanOut(message, recipients)` and no
+`broadcast(message)`. Those were never implemented. Routing to a specific agent
+is done by publishing on a topic that agent subscribes to; `MessageRouter`
+supports a `'*'` wildcard topic for "all messages".
 
 ### 6.4 Self-Healing Module
 
 **Purpose:** Automatically recover from agent failures.
 
+There is no `SelfHealingModule` class and no `RecoveryAction` type — recovery
+does not return a decision object, it performs the action inline. The policy is
+a plain data object and the escalation ladder is a four-step method.
+
 ```typescript
-interface SelfHealingConfig {
+// src/orchestrator.ts
+export interface EscalationPolicy {
   maxRetries: number
-  retryDelay: number          // Base delay in ms
-  backoffMultiplier: number   // Exponential backoff
-  contextTransferEnabled: boolean
-  escalationThreshold: number // Failures before escalation
+  retryDelay: number
+  enableRespawn: boolean
+  fallbackModels: string[]
+  alertOnFailure: boolean
 }
 
-class SelfHealingModule implements NexusModule {
-  name = 'self-healing'
-  
-  private failureCounts: Map<string, number>
-  private healthStatus: Map<string, HealthStatus>
-  
-  async handleFailure(agent: Agent, error: Error): Promise<RecoveryAction> {
-    const failureCount = this.failureCounts.get(agent.id) ?? 0
-    this.failureCounts.set(agent.id, failureCount + 1)
-    
-    // Determine recovery action
-    if (failureCount < this.config.maxRetries) {
-      // Retry with same or different model
-      const delay = this.config.retryDelay * 
-        Math.pow(this.config.backoffMultiplier, failureCount)
-      
-      return {
-        type: 'retry',
-        delay,
-        newModel: failureCount > 1 ? this.selectFallbackModel(agent) : undefined,
-        contextTransfer: this.config.contextTransferEnabled
-      }
-    }
-    
-    if (failureCount < this.config.escalationThreshold) {
-      // Respawn with fresh context
-      return {
-        type: 'respawn',
-        contextTransfer: true,
-        newModel: this.selectFallbackModel(agent)
-      }
-    }
-    
-    // Escalate to user
-    return {
-      type: 'escalate'
-    }
+private async handleFailure(agent: Agent, node: DAGNode, error: Error): Promise<void> {
+  const retryCount = this.nodeRetryCounts.get(node.id) || 0
+
+  // Every failure is recorded for pattern learning first
+  this.learning.recordFailure(pattern, solution, context, [node.task.requiredRole])
+
+  // Step 1: Retry with exponential backoff — delay is retryDelay * 2^retryCount
+  if (retryCount < policy.maxRetries) { ...; await this.spawnAndExecute(node); return }
+
+  // Step 2: Respawn with context transfer
+  if (policy.enableRespawn && this.config.selfHealing.contextTransfer) {
+    const context = this.collectContext(agent)
+    this.setMemory('session', `context:${agent.id}`, context, agent.id)
+    await this.terminateAgent(agent.id)
+    await this.spawnAndExecute(node, { transferContext: context })
+    return
   }
-  
-  async transferContext(
-    oldAgent: Agent, 
-    newAgent: Agent
-  ): Promise<void> {
-    // Transfer partial results
-    const partialResults = await oldAgent.getPartialResults()
-    await newAgent.setContext('partialResults', partialResults)
-    
-    // Transfer decisions made
-    const decisions = await oldAgent.getDecisions()
-    await newAgent.setContext('decisions', decisions)
-    
-    // Transfer shared memory changes
-    const memoryChanges = await oldAgent.getMemoryChanges()
-    for (const change of memoryChanges) {
-      await newAgent.applyMemoryChange(change)
-    }
-  }
+
+  // Step 3: Fall back to a different model — verified to actually differ from
+  //         the model that just failed, compared as a qualified reference
+  // Step 4: Escalate to the user
 }
 ```
+
+Config keys are `selfHealing.maxRetries`, `selfHealing.retryDelay` and
+`selfHealing.contextTransfer`; `fallbackModels` and `alertOnFailure` come from
+`DEFAULT_ESCALATION` rather than from user config. There is no
+`backoffMultiplier` setting — the backoff factor is hard-coded to 2 — and no
+`escalationThreshold`; the ladder is positional rather than threshold-based.
 
 ### 6.5 Shared Memory Module
 
 **Purpose:** Enable cross-agent memory sharing.
 
-```typescript
-interface SharedMemoryConfig {
-  storage: 'sqlite' | 'memory'
-  persistencePath?: string
-  syncInterval: number        // Sync interval in ms
-  maxEntriesPerScope: number
-}
+There is no `SharedMemoryModule` and no `storage: 'sqlite' | 'memory'` choice —
+the store is always the persistent SQLite-backed one. The agent-facing surface
+is three tools registered in `src/index.ts` as `memory.set`, `memory.search` and
+`memory.list` (not `memory_get` / `memory_set` / `memory_search`).
 
-class SharedMemoryModule implements NexusModule {
-  name = 'shared-memory'
-  
-  private store: MemoryStore
-  private subscribers: Map<string, MemoryChangeHandler[]>
-  
-  async setup(orchestrator: NexusOrchestrator): Promise<void> {
-    // Initialize storage
-    this.store = await this.createStore()
-    
-    // Register memory tools for agents
-    orchestrator.registerTool({
-      name: 'memory_get',
-      description: 'Get a value from shared memory',
-      execute: async (input, context) => {
-        return this.store.get(input.scope, input.key)
-      }
-    })
-    
-    orchestrator.registerTool({
-      name: 'memory_set',
-      description: 'Set a value in shared memory',
-      execute: async (input, context) => {
-        this.store.set(input.scope, input.key, input.value, {
-          author: context.agentId,
-          tags: input.tags
-        })
-      }
-    })
-    
-    orchestrator.registerTool({
-      name: 'memory_search',
-      description: 'Search shared memory',
-      execute: async (input, context) => {
-        return this.store.search(input.query, input.scope)
-      }
-    })
-  }
-  
-  // Reactive memory changes
-  onChange(handler: MemoryChangeHandler): Unsubscribe {
-    this.subscribers.get('*')?.push(handler)
-    return () => {
-      const handlers = this.subscribers.get('*') ?? []
-      this.subscribers.set('*', handlers.filter(h => h !== handler))
-    }
-  }
-}
+```typescript
+// src/memory-store.ts — constructed with the orchestrator, configured by MessageStoreConfig-style opts
+class PersistentMemoryStore { /* see §4.6 */ }
+
+// src/index.ts — the tools agents actually call
+memory.set      { key, value, scope?, author, confidence?, tags?, ttl? }
+memory.search   { query, includeSession? }
+memory.list     { scope?, limit? }
 ```
+
+Behaviour worth knowing when reading the tool schemas:
+
+- Writes are **append-only**. Correcting a note writes a new version; it does
+  not replace the old one. `memory.list` reports `versionsSuperseded` for this.
+- Only `project` and `temp` are writable. `session` and `learning` are not.
+- `author` is required and **self-reported** — nothing verifies it.
+- `confidence` is optional and nullable. Omitting it is correct when unsure; an
+  invented number hides that uncertainty from later readers.
+- Automatic injection into a task prompt happens for `file:<path>` keys only,
+  and only in `project` scope. `memory.search` is otherwise the only way in.
 
 ### 6.6 Dashboard Module
 
 **Purpose:** Real-time web UI for monitoring orchestrator state.
 
 ```typescript
-interface DashboardConfig {
-  port: number
-  host: string
-  auth?: {
-    type: 'basic' | 'token'
-    credentials: string
-  }
-  refreshInterval: number
+// src/dashboard.ts
+class DashboardModule {
+  constructor(orchestrator: NexusOrchestrator)
+  start(port: number, host: string): void
+  stop(): void
+  getAddress(): DashboardAddress | null
+  getClientCount(): number
+  isRunning(): boolean
 }
 
-class DashboardModule implements NexusModule {
-  name = 'dashboard'
-  
-  private server: Server
-  private wsServer: WebSocketServer
-  private state: DashboardState
-  
-  async setup(orchestrator: NexusOrchestrator): Promise<void> {
-    // Create HTTP server
-    this.server = createServer()
-    
-    // Create WebSocket server for real-time updates
-    this.wsServer = new WebSocketServer({ server: this.server })
-    
-    // Subscribe to orchestrator events
-    orchestrator.on('*', (event) => {
-      this.state.update(event)
-      this.broadcastState()
-    })
-    
-    // Start server
-    this.server.listen(this.config.port, this.config.host)
-  }
-  
-  private broadcastState(): void {
-    const state = this.state.serialize()
-    this.wsServer.clients.forEach(client => {
-      client.send(JSON.stringify(state))
-    })
-  }
-}
+// src/orchestrator.ts
+startDashboard(port?: number, host?: string): void
+stopDashboard(): void
+initBroadcaster(opts?: { throttleMs?: number }): void
 ```
+
+Port and host default to `dashboard.port` / `dashboard.host` from the config
+(4747 / 127.0.0.1), and `startDashboard()` throws outright if
+`dashboard.enabled` is `false` rather than silently no-opping. The module is
+built inside `startDashboard()` and only assigned to `this.dashboard` after the
+bind succeeds, so a failed bind leaves no phantom module for `stopDashboard()` to
+act on.
+
+There is no `auth` block and no `refreshInterval`. The dashboard binds to
+loopback by default and has no authentication of its own — see the security
+section on what that means for the bind address. Real-time updates arrive over
+WebSocket, pushed by `StateBroadcaster`; state snapshots are throttled to at
+most one per second.
 
 ---
 
@@ -993,59 +971,199 @@ interface CostReport {
 
 ```typescript
 class NexusOrchestrator {
-  // Configuration
-  static preset(name: 'minimal' | 'balanced' | 'enterprise' | 'cost-optimized'): NexusOrchestrator
-  use(module: NexusModule): this
-  
-  // Core operations
+  constructor(config?: Partial<NexusConfig>, messageStoreConfig?: Partial<MessageStoreConfig>, memoryStoreConfig?: Partial<MemoryStoreConfig>)
+  async initialize(ctx: NexusPluginContext, onStateChange?: () => void): Promise<void>
+  async shutdown(): Promise<void>
+
+  // Execution
   async execute(request: ExecutionRequest): Promise<ExecutionResult>
-  async spawnAgent(config: SpawnConfig): Promise<Agent>
+  async spawnAgent(config: SpawnConfig, options?: SpawnOptions): Promise<SpawnedAgent>
   async terminateAgent(agentId: string): Promise<void>
-  
-  // Query
-  getAgents(): Agent[]
-  getAgent(agentId: string): Agent | undefined
-  getDAG(): DAG
-  getCostReport(): CostReport
-  getMemory(scope: MemoryScope): MemoryEntry[]
-  
+
+  // Selection
+  analyzeComplexity(task: Task): ComplexityScore
+  selectModel(role: AgentRole, complexity: ComplexityScore): ModelSelection
+  selectBestModel(role: string, complexity: ComplexityScore): ModelSelection
+
+  // Cost
+  getCostReport(): string
+  isBudgetExceeded(): boolean
+  resetBudgetExceeded(): void
+  getModelCost(model: string, provider?: string): NexusModelCost | undefined
+
+  // Messaging and memory
+  publish(topic: string, message: Omit<AgentMessage, 'id' | 'timestamp'>): void
+  subscribe(topic: string, handler: (msg: AgentMessage) => void): () => void
+  setMemory(scope, key, value, author): void
+  getMemory(scope, key): MemoryEntry | undefined
+  searchMemory(query: string, scopes: readonly MemoryScope[]): MemoryEntry[]
+
+  // Dashboard, worktrees, git
+  startDashboard(port?: number, host?: string): void
+  stopDashboard(): void
+  enableWorktrees(repoRoot?: string): void
+  getGitState(cwd?: string): GitState
+  resolveGitFlow(cwd?: string): ResolvedGitFlow
+  checkGitFlow(cwd?: string): GitCheckReport
+  recordGitFlowDecision(decision, cwd?): GitFlowDecision
+
+  // Config
+  reloadConfigFromDisk(trigger?: NexusConfigReloadTrigger): NexusConfigLoadInfo | null
+  getConfigInfo(): NexusConfigLoadInfo | null
+
+  // Modules
+  moduleRegistry: ModuleRegistry   // register(), setupAll(), teardownAll()
+
   // Events
-  on(event: string, handler: EventHandler): Unsubscribe
-  emit(event: string, data: unknown): void
+  on(event: string, handler: Function): () => void   // returns unsubscribe
+
+  // Commands
+  handleCommand(text: string): string
 }
 ```
 
+There is no `NexusOrchestrator.preset()` static and no `use()`. Presets live in
+`configManager.applyPreset(name)`; see §5.1. There is also no `getAgents()`,
+`getAgent()`, `getDAG()` or `getCostReport(): CostReport` — agent and cost
+queries are reached through the `agents` and `costs` tools, whose handlers call
+`listAgents(filter?)` and `getCostReport(): string`. Note that both return
+formatted strings, not objects. `on()` returns the unsubscribe closure.
+
 ### 8.2 Tool Registration
 
-Nexus registers the following tools for agents:
+Nexus registers 48 tools. They are registered **without a `nexus_` prefix** —
+the plugin lives in the `nexus` namespace, so a tool named `status` is
+addressed as `nexus_status` by *clients* that require a namespace prefix, but the
+registered name is `status`. The names below are the literal `name` values passed
+to `editor.add()` in `src/index.ts`.
+
+There is no `tasks` tool, no `send`/`broadcast` tool and no `request_review`
+tool.
+
+**Orchestration and state**
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
-| `nexus_status` | Get orchestrator status | `{ detailed?: boolean }` |
-| `nexus_agents` | List all agents | `{ filter?: AgentFilter }` |
-| `nexus_tasks` | List all tasks | `{ filter?: TaskFilter }` |
-| `nexus_costs` | Get cost report | `{ period?: TimePeriod }` |
-| `nexus_memory_get` | Get shared memory | `{ scope: MemoryScope, key: string }` |
-| `nexus_memory_set` | Set shared memory | `{ scope: MemoryScope, key: string, value: unknown }` |
-| `nexus_memory_search` | Search memory | `{ query: string, scope?: MemoryScope }` |
-| `nexus_send` | Send message to agent | `{ to: string, message: AgentMessage }` |
-| `nexus_broadcast` | Broadcast message | `{ message: AgentMessage }` |
-| `nexus_request_review` | Request code review | `{ file: string, focus?: string }` |
+| `status` | Orchestrator status, metrics, and the config files in effect | `{ detailed?: boolean }` |
+| `agents` | List all active agents | `{ filter?: string }` (by status) |
+| `costs` | Cost report and budget status | — |
+| `dashboard` | Full orchestrator state for dashboard display | — |
+| `queue` | Current task queue with priorities | — |
+| `notifications.test` | Send a test OS notification | — |
+| `performance.scores` | Agent performance scores by model and role | — |
+| `performance.best` | Best model for a specific role | `{ role: string }` |
+| `security.scan` | Scan content for security issues | `{ content: string, filename?: string }` |
+| `history.list` | List execution history | `{ count?: number }` |
+| `history.stats` | Execution statistics | — |
+| `sessions` | List active Nexus agent sessions | — |
+| `background` | Move running agents to background (detach) | — |
+| `result` | Result of a completed agent session | `{ sessionID: string }` |
+| `clarify` | Ask a clarifying question on an ambiguous task | `{ question, options?, assumption? }` |
+
+**Spawning and delegation**
+
+| Tool | Description | Parameters |
+|------|-------------|------------|
+| `spawn` | Spawn a sub-agent; `wait=true` blocks for the result | `{ role, task, model?, wait?, timeout? }` |
+| `delegate` | Spawn and wait in one call (wrapper over spawn+wait) | `{ role, task, model?, timeout? }` |
+| `template` | List or instantiate task templates | `{ name, baseDir? }` (`name: 'list'` to list) |
+| `forecast` | Estimate cost before executing | `{ tasks: string }` (JSON array) |
+
+**Memory**
+
+| Tool | Description | Parameters |
+|------|-------------|------------|
+| `memory.set` | Write a durable note (append-only, self-reported author) | `{ key, value, scope?, author, confidence?, tags?, ttl? }` |
+| `memory.search` | Substring search over keys and values, unranked | `{ query, includeSession? }` |
+| `memory.list` | List notes in a scope, newest version of each key first | `{ scope?, limit? }` |
+
+**Configuration**
+
+| Tool | Description | Parameters |
+|------|-------------|------------|
+| `config.save` | Save Nexus config to disk | `{ level: 'project' \| 'global', basePath? }` |
+| `config.init` | Initialize default config files | `{ level: 'project' \| 'global' \| 'both', basePath? }` |
+| `preset` | Apply or clear a **session** preset shadowing `nexus.jsonc` | `{ mode: 'apply' \| 'clear', name? }` |
+| `model.costs` | Show real model pricing, or set custom per-1K rates | `{ model?, setInput?, setOutput? }` |
+| `roles.list` | List custom agent roles | — |
+| `roles.add` | Add a custom agent role | `{ name, displayName, emoji?, prompt, model? }` |
+
+**Dashboard and git/worktrees**
+
+| Tool | Description | Parameters |
+|------|-------------|------------|
+| `dashboard.start` | Start the web dashboard server | `{ port?, host? }` |
+| `dashboard.stop` | Stop the dashboard server | — |
+| `worktree.enable` | Enable git worktree isolation for agents | `{ repoRoot? }` |
+| `worktree.disable` | Disable isolation and clean up | — |
+| `worktree.list` | List active agent worktrees | — |
+| `git.check` | Report this repo's git convention (read-only) | `{ cwd?, decision? }` |
+
+**Goals, todos and teams**
+
+| Tool | Description | Parameters |
+|------|-------------|------------|
+| `todo.add` | Add a tracked todo | `{ description, assignedTo? }` |
+| `todo.list` | List todo items | — |
+| `todo.complete` | Mark a todo complete | `{ id: string }` |
+| `todo.stats` | Todo statistics | — |
+| `goal.set` | Set a persistent objective | `{ description, autoContinue? }` |
+| `goal.status` | Current active goal status | — |
+| `goal.complete` | Mark the active goal complete | — |
+| `goal.list` | List all goals | — |
+| `team.create` | Create a team with a lead role | `{ name, leadRole }` |
+| `team.addMember` | Add a member to a team | `{ teamId, role }` |
+| `team.status` | Show team status | `{ teamId? }` |
+| `team.activate` | Activate a team to start execution | `{ teamId }` |
+
+**Search**
+
+| Tool | Description | Parameters |
+|------|-------------|------------|
+| `astgrep.search` | Search for AST patterns in the codebase | `{ pattern, language, directory }` |
+| `astgrep.status` | Check whether ast-grep is installed | — |
 
 ### 8.3 Slash Commands
 
+There are two layers, and they accept different subcommands.
+
+**Server-side**, handled by `NexusOrchestrator.handleCommand()` in the process
+that owns the orchestrator (`src/orchestrator.ts`):
+
 | Command | Description |
 |---------|-------------|
-| `/nexus status` | Show orchestrator status |
-| `/nexus agents` | List active agents |
-| `/nexus costs` | Show cost breakdown |
+| `/nexus status` | Orchestrator status (`getStatus(true)`) |
+| `/nexus agents [filter]` | List agents, optionally filtered |
+| `/nexus costs` | Cost breakdown |
 | `/nexus pause` | Pause execution |
 | `/nexus resume` | Resume execution |
-| `/nexus cancel` | Cancel all tasks |
-| `/nexus retry` | Retry failed tasks |
-| `/nexus dashboard` | Open web dashboard |
-| `/nexus memory` | Show shared memory |
-| `/nexus help` | Show help |
+| `/nexus dashboard [port] [host]` | Start the dashboard server |
+| `/nexus dashboard stop` | Stop the dashboard server |
+| `/nexus dashboard state` | Print the orchestrator state as JSON |
+
+An unrecognised subcommand gets exactly one line back: *"Unknown command.
+Available: status, agents, costs, pause, resume, dashboard [port] [host],
+dashboard stop, dashboard state"*. There is no `/nexus cancel`, no
+`/nexus retry`, no `/nexus memory` and no `/nexus help` — none of those have
+ever been implemented.
+
+**TUI-side**, handled locally in the OpenCode TUI process (`src/tui.tsx`,
+`LOCAL_COMMANDS`). The TUI has no orchestrator, so these are answered from
+config and the OpenCode client rather than by the server:
+
+| Command | Description |
+|---------|-------------|
+| `/nexus config` | Configure models and budget |
+| `/nexus status` | Config summary (answered here, not forwarded) |
+| `/nexus dashboard [port] [host]` | Start the dashboard and open a browser |
+| `/nexus web [port] [host]` | Alias of `dashboard` |
+| `/nexus overview` | Config/budget/dashboard-status overview; starts nothing |
+| `/nexus model <role>` | Select the model for a role |
+| `/nexus reset` | Reset configuration to defaults |
+
+Anything the TUI does not claim locally is forwarded verbatim to the server, so
+a subcommand added to `handleCommand()` becomes reachable from the TUI with no
+TUI change. The two lists are documented in `docs/COMPATIBILITY.md`.
 
 ---
 
