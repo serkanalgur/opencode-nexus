@@ -344,13 +344,12 @@ describe('effortForDifficulty maps the whole 0-100 range', () => {
     expect(effortForDifficulty(Number.NEGATIVE_INFINITY)).toBe('low')
   })
 
-  it('never reads riskLevel, so the unreachable "medium" risk cannot move it', () => {
-    // `analyzeComplexity` tests for `riskLevel === 'medium'` and nothing ever
-    // assigns it, while `src/templates.ts` emits `'medium'` and `types.ts`
-    // admits it. The mapping takes `overall` alone, so the risk level cannot
-    // reach it — asserted end-to-end: a task whose description triggers EVERY
-    // high-risk keyword is mapped by `overall`, and the same `overall` maps
-    // identically whatever the caller believes the risk to be.
+  it('never reads riskLevel, so the risk level cannot move it', () => {
+    // `analyzeComplexity` only ever assigns 'low' or 'high', and since #89 the
+    // type says the same. The mapping takes `overall` alone, so the risk level
+    // cannot reach it — asserted end-to-end: a task whose description triggers
+    // EVERY high-risk keyword is mapped by `overall`, and the same `overall`
+    // maps identically whatever the caller believes the risk to be.
     const risky = new NexusOrchestrator().analyzeComplexity({
       ...makeTask(0),
       // "migration", "production", "security", "payment" — the full high-risk
@@ -360,17 +359,17 @@ describe('effortForDifficulty maps the whole 0-100 range', () => {
     expect(risky.factors.riskLevel).toBe('high')
     // The claim under test: the mapping is a function of `overall` and of
     // nothing else, so the risk level is not an input and the same score maps
-    // the same way when the risk level is a value the heuristic cannot produce.
+    // the same way at either end of the range the heuristic can produce.
     const score = risky.overall
-    for (const riskLevel of ['low', 'medium', 'high'] as const) {
+    for (const riskLevel of ['low', 'high'] as const) {
       const withRisk: ComplexityScore = { ...risky, factors: { ...risky.factors, riskLevel } }
       expect(effortForDifficulty(withRisk.overall)).toBe(effortForDifficulty(score))
     }
-    // And a MEDIUM-risk score is not special-cased, which is the whole point:
+    // A high-risk score is not special-cased either, which is the whole point:
     // it takes the same path as a low-risk one at the same `overall`.
-    const mediumRisk: ComplexityScore = { overall: 50, factors: { fileCount: 0, codeLines: 0, dependencyDepth: 0, domainKnowledge: 0, riskLevel: 'medium' } }
+    const highRisk: ComplexityScore = { overall: 50, factors: { fileCount: 0, codeLines: 0, dependencyDepth: 0, domainKnowledge: 0, riskLevel: 'high' } }
     const lowRisk: ComplexityScore = { overall: 50, factors: { fileCount: 0, codeLines: 0, dependencyDepth: 0, domainKnowledge: 0, riskLevel: 'low' } }
-    expect(effortForDifficulty(mediumRisk.overall)).toBe(effortForDifficulty(lowRisk.overall))
+    expect(effortForDifficulty(highRisk.overall)).toBe(effortForDifficulty(lowRisk.overall))
   })
 })
 

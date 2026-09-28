@@ -100,7 +100,7 @@ export interface ComplexityScore {
     codeLines: number
     dependencyDepth: number
     domainKnowledge: number
-    riskLevel: 'low' | 'medium' | 'high'
+    riskLevel: 'low' | 'high'
   }
 }
 
