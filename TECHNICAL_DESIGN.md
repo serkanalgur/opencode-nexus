@@ -1051,109 +1051,239 @@ Nexus registers the following tools for agents:
 
 ## 9. Configuration
 
-### 9.1 Global Configuration
+Configuration lives in two places, and the difference between them is the
+single most important thing to know about this section.
+
+**A config file** — `.opencode/nexus.jsonc` (project) and
+`~/.config/opencode/nexus.jsonc` (global), both JSONC, both read at load and
+re-read on reload, with precedence **session override > project > global >
+defaults**. The file schema is `NexusFullConfig` (`src/config.ts:299`), and it
+is deliberately *narrower* than the `NexusConfig` type: it carries eight blocks.
+
+**The `NexusConfig` constructor argument** — the full shape in `src/types.ts:465`.
+It adds `agents`, `learning` and `cost`, which have no file equivalent at all, and
+it carries `budget.hardLimit`, which the file does not. Those are set by code
+embedding Nexus, never by a user editing JSON.
+
+The two shapes disagreeing is not an accident of history; it is the design, and
+`§9.3` lists exactly which keys are in which.
+
+### 9.1 Config File Schema
+
+This is the complete set of keys accepted in `nexus.jsonc`. Anything not listed
+here is not read.
 
 ```jsonc
-// ~/.config/opencode/nexus.jsonc
+// .opencode/nexus.jsonc (project) or ~/.config/opencode/nexus.jsonc (global)
 {
   "$schema": "https://serkanalgur.com/opencode-nexus/schema.json",
-  
-  // Core settings
-  "maxConcurrency": 5,
-  "schedulerInterval": 1000,
-  "defaultTimeout": 300000, // 5 minutes
-  
-  // Budget
+
+  // Model per role. Every key optional; an absent key falls back to the
+  // built-in default for that role (see DEFAULT_CONFIG in src/config.ts).
+  "models": {
+    "architect": "anthropic/claude-sonnet-4-6",
+    "coder": "anthropic/claude-sonnet-4-6",
+    "reviewer": "anthropic/claude-sonnet-4-6",
+    "tester": "anthropic/claude-sonnet-4-6",
+    "explorer": "anthropic/claude-sonnet-4-6",
+    "documenter": "anthropic/claude-sonnet-4-6",
+    "designer": "anthropic/claude-sonnet-4-6"
+  },
+
+  // Budget. ADVISORY ceilings: cost of a turn is only known once the turn
+  // returns, so these report an overspend after the fact and refuse nothing.
+  // That is what makes hardLimit, which this file does NOT carry, worth having.
   "budget": {
     "maxTotalCost": 10.00,
     "maxCostPerTask": 1.00,
-    "maxCostPerAgent": 2.00,
-    "alertThreshold": 0.2, // Alert at 20% remaining
-    "hardLimit": false
+    "alertThreshold": 0.2 // notify at 20% of the budget remaining
   },
-  
-  // Agent defaults
-  "agents": {
-    "defaultRole": "coder",
-    "spawnDelay": 100,
-    "healthCheckInterval": 30000
-  },
-  
-  // Self-healing
+
+  // Self-healing. retryDelay is the BASE of the backoff: attempt n waits
+  // retryDelay * 2 ** n, with the 2 written into the expression.
   "selfHealing": {
     "enabled": true,
     "maxRetries": 3,
     "retryDelay": 1000,
-    "backoffMultiplier": 2,
     "contextTransfer": true
   },
-  
-  // Communication
-  "communication": {
-    "mode": "pubsub",
-    "maxQueueSize": 100,
-    "messageTTL": 60000,
-    "persistence": true
-  },
-  
-  // Memory
-  "memory": {
-    "enabled": true,
-    "storage": "sqlite",
-    "maxEntriesPerScope": 1000,
-    "syncInterval": 5000
-  },
-  
-  // Dashboard
+
+  // Dashboard. `enabled: false` is enforced, not decorative: startDashboard()
+  // refuses and names the key. port/host are the defaults for startDashboard();
+  // an explicit argument to that method still wins.
   "dashboard": {
     "enabled": true,
     "port": 4747,
     "host": "127.0.0.1"
   },
-  
-  // Security
-  "security": {
-    "sastEnabled": true,
-    "secretsScanning": true,
-    "scopeEnforcement": true
+
+  // OS notifications. One gate (sendNotification) covers task complete/failed
+  // and the budget alerts alike.
+  "notifications": {
+    "enabled": true
   },
-  
-  // Learning
-  "learning": {
+
+  // The git convention layer. VALIDATING, not blocking — nothing in src/ writes
+  // to git on the strength of this block. A per-repo "ask once" off-switch in
+  // the most specific repository beats a true here.
+  "gitFlow": {
     "enabled": true,
-    "patternStorage": "sqlite",
-    "minConfidence": 0.7
-  }
+    "conventionalCommits": true,
+    "requireBranch": true,
+    "prBeforeMerge": true
+  },
+
+  // Effort selection. Off by default. maxEffort is a CEILING, not a target:
+  // it can only lower the difficulty→effort mapping, never raise it. A task is
+  // asked for nothing when its difficulty is below minDifficulty.
+  "effort": {
+    "enabled": false,
+    "maxEffort": "high",
+    "minDifficulty": 0
+  },
+
+  // Custom agent roles. An ARRAY, not a keyed object. `model` is this role's
+  // first candidate model — model selection is still the ranker's, and the
+  // equivalent older spelling is an entry under `models`.
+  "customRoles": [
+    {
+      "name": "security-reviewer",
+      "displayName": "Security Reviewer",
+      "emoji": "🔐",
+      "prompt": "Review for injection, secret leakage and unsafe shell construction.",
+      "model": "anthropic/claude-sonnet-4-6"
+    }
+  ]
 }
 ```
+
+Named presets — `minimal`, `balanced`, `enterprise`, `cost-optimized`
+(`PRESETS`, `src/config.ts:1571`) — are applied in code through
+`configManager.applyPreset(name)`, not by writing a key into the file. A
+`presets` or `preset` key in `nexus.jsonc` is not part of this schema.
+
+#### Blocks that do not exist
+
+There is no `memory`, `security` or `communication` block in this schema, and
+there is no such block on the `NexusConfig` type either. They were **deleted**,
+not left unread, and the reasoning is recorded on the type itself
+(`src/types.ts:465+`):
+
+- **`memory`** — `{ enabled, storage, maxEntriesPerScope, syncInterval }` was
+  read by nothing. `maxEntriesPerScope` was written into the defaults literal
+  and consumed by no reader. It was removed rather than wired because with no
+  automatic writing an expiry deletes a note permanently: nothing revalidates or
+  rewrites, so a TTL here is data loss with a delay.
+- **`security`** — `{ sastEnabled, secretsScanning, scopeEnforcement }` shares
+  **not one field name** with the real, live `SecurityConfig` in
+  `src/security.ts` (`enabled`, `scanSecrets`, `scanPatterns`,
+  `customPatterns`, `excludeFiles`). It was scaffolding in a vocabulary the
+  module never adopted, not a connection that was lost. `SecurityScanner` is
+  configured through its own module today, and is exposed to agents as
+  `nexus.security.scan`.
+- **`communication`** — `{ mode, maxQueueSize, messageTTL, persistence }` had no
+  reader. `mode: 'pubsub'` described a dispatch policy nothing dispatches on;
+  `maxQueueSize: 100` bounded no queue, because `MessageStore`'s own bound is
+  10,000. `MessageStore` takes its limits through its constructor, not through
+  `nexus.jsonc`.
+
+A config key that nothing reads is worse than no key at all: a user who sets
+`memory.enabled: false` concludes they disabled something, and their only
+evidence is that it did not work. None of the three are accepted in either
+place, and `saveProjectConfig` cannot drop what is not there.
+
+#### What is preserved on save
+
+`saveProjectConfig()` and `saveGlobalConfig()` write all eight blocks —
+`models`, `budget`, `selfHealing`, `dashboard`, `notifications`, `gitFlow`,
+`effort`, `customRoles` — unconditionally, as the **entire file body**
+(`getSaveableConfig()`, `src/config.ts:1429`). So a block omitted from a saved
+file is a block deleted from the user's config on the next save, and
+`effort: { enabled: false }` surviving a TUI model change depends on the whole
+block being written. `budget.hardLimit` and `budget.maxCostPerAgent` do not
+appear in a saved file either: they are not in `NexusFullConfig.budget`, and
+`getConfig()` builds each block field by field (`src/config.ts:865`), so a key
+the schema dropped contributes nothing to the merge. The config loader names
+unknown keys in a warning at load time, since a key is still attributable to a
+file there and nowhere later.
 
 ### 9.2 Project Configuration
 
+A project file is the same schema as the global one, at project precedence. It
+overrides per block; it does not have a different shape.
+
 ```jsonc
-// .opencode/nexus.jsonc (project-level overrides)
+// .opencode/nexus.jsonc — same eight blocks, project precedence
 {
-  // Override budget for this project
+  // Lower the ceiling for this repository only
   "budget": {
-    "maxTotalCost": 5.00
+    "maxTotalCost": 5.00,
+    "maxCostPerTask": 0.50
   },
-  
-  // Custom agent roles
-  "agentRoles": {
-    "security-reviewer": {
-      "model": "anthropic/claude-sonnet-4-6",
-      "tools": ["read", "grep", "git"]
-    }
+
+  // A cheaper model for routine roles in this repository
+  "models": {
+    "explorer": "google/gemini-2.5-flash"
   },
-  
-  // Custom task templates
-  "taskTemplates": {
-    "feature": {
-      "pipeline": ["architect", "coder", "reviewer", "tester"],
-      "requiredGates": ["review", "tests-pass"]
+
+  // Add a role without disturbing the roles defined globally: customRoles is
+  // an array, so this repository's list is its own — merge levels do not
+  // concatenate lists of roles.
+  "customRoles": [
+    {
+      "name": "migration-auditor",
+      "prompt": "Check a change for ordering hazards, destructive DDL and irreversible writes."
     }
-  }
+  ]
 }
 ```
+
+Two things a project file does **not** do:
+
+- **Define task templates.** There is no `taskTemplates` key. The templates ship
+  in code as `TEMPLATES` in `src/templates.ts` — `feature`, `bugfix`,
+  `refactor`, `documentation`, `factors` — and are addressed by name at
+  dispatch, not configured.
+- **Define agent roles under a keyed object.** There is no `agentRoles` key.
+  Roles are the `customRoles` array above, and the seven built-in roles
+  (`architect`, `coder`, `reviewer`, `tester`, `explorer`, `documenter`,
+  `designer`) are fixed in code and additionally selectable per role under
+  `models`.
+
+### 9.3 Constructor-Only Settings
+
+These are real, live settings on `NexusConfig`, and they are **not** settable
+from `nexus.jsonc`. They are for a host application embedding Nexus.
+
+| Key | Why it is constructor-only |
+| --- | --- |
+| `agents.healthCheckInterval` | Drives `HealthMonitor` construction in `initialize()` and `cleanupStaleData`. There is no file block. |
+| `learning` (`enabled`, `patternStorage`, `minConfidence`) | `minConfidence` is read at `new LearningModule(...)`; the file has no `learning` block. |
+| `cost.timeoutDeltaGraceMs` | How long past a task's timeout to keep waiting for its session to settle before abandoning the remaining cost. Omit it for the derived default, roughly half the task budget clamped to [30s, 180s]. |
+| `budget.hardLimit` | `true` terminates on budget exhaustion. Absent from `NexusFullConfig.budget` by design, so a reload cannot silently start honouring it — and the constructor's value is carried across a reload explicitly (`syncFileConfig`, `src/orchestrator.ts:1222`). |
+| `maxConcurrency`, `schedulerInterval`, `defaultTimeout` | Read at orchestrator construction; the file schema does not offer them. |
+
+Two former members of these blocks were removed rather than left inert, and
+neither is accepted anywhere:
+
+- **`agents.defaultRole`** — every spawn takes its role from
+  `DAGNode.task.requiredRole` (`spawnAndExecute`), so a default would be
+  overridden by every task that names its own role, which is all of them.
+- **`agents.spawnDelay`** — read by nothing. `spawnAgent` has no delay of its
+  own; agents are dispatched by `maxConcurrency` and the scheduler interval, and
+  the concurrency limit *is* the throttle.
+
+And one from `selfHealing`:
+
+- **`selfHealing.backoffMultiplier`** — the backoff in `handleFailure` is
+  `retryDelay * 2 ** retryCount` with the base 2 written into the expression, so
+  the field could only restate a constant. `retryDelay` and `maxRetries` are
+  the two knobs that carry meaning, and both are read.
+
+`memory`, `security` and `communication` were removed from the constructor
+shape for the reasons in `§9.1`. They are BREAKING type changes for any external
+caller passing them in a `NexusConfig` literal — and none of them ever had an
+effect to lose.
 
 ---
 
