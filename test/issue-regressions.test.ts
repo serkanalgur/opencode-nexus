@@ -151,6 +151,50 @@ describe('#87 — every tool is registered exactly once', () => {
   })
 })
 
+/**
+ * The tool rows of TECHNICAL_DESIGN.md §8.2, as bare names.
+ *
+ * §8.2 documents the tools by their literal `editor.add()` `name` values, which
+ * are unprefixed — the plugin is in the `nexus` namespace, so the registered
+ * name is `status`, not `nexus_status`. Stripping the namespace off
+ * `registeredTools()` is therefore the comparison that matches what the table
+ * claims to be listing, rather than the fully-qualified form README uses.
+ *
+ * Scoped to the §8.2 heading so a tool named in §8 prose, or in a parameters
+ * table elsewhere in the document, is not counted as a row.
+ */
+function designDocToolNames(): string[] {
+  const doc = readFileSync(join(REPO, 'TECHNICAL_DESIGN.md'), 'utf-8')
+  const start = doc.indexOf('### 8.2 Tool Registration')
+  expect(start).toBeGreaterThan(-1)
+  const end = doc.indexOf('### 8.3', start)
+  const section = end === -1 ? doc.slice(start) : doc.slice(start, end)
+  return [...section.matchAll(/^\| `([A-Za-z0-9._]+)` \|/gm)].map(m => m[1]!)
+}
+
+describe('TECHNICAL_DESIGN.md §8.2 — the tool table tracks the registry', () => {
+  // The document was written before the tools existed and listed ten of them
+  // under `nexus_*` names, three of which were never implemented. README is
+  // already pinned to the registry by the test above; this closes the same
+  // drift on the second table, which is the one a reader following §8 lands on.
+  it('agrees with the registered tools 1:1, in both directions', () => {
+    const registered = registeredTools().map(n => n.replace(/^nexus\./, ''))
+    const documented = designDocToolNames()
+
+    expect(registered.length).toBeGreaterThan(20)
+    expect(registered.filter(n => !documented.includes(n)).sort()).toEqual([])
+    expect(documented.filter(n => !registered.includes(n)).sort()).toEqual([])
+    expect(documented.length).toBe(registered.length)
+  })
+
+  // The specific failure this document had: names under a `nexus_` prefix that
+  // the registry never used. A test on counts alone would pass on this.
+  it('documents unprefixed names, not the old `nexus_` spelling', () => {
+    const documented = designDocToolNames()
+    expect(documented.filter(n => n.startsWith('nexus_'))).toEqual([])
+  })
+})
+
 // ─────────────────────────────────────────────────────────────────────────────
 // #86 — the config block count, and the docs that state it
 // ─────────────────────────────────────────────────────────────────────────────
