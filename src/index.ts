@@ -2796,44 +2796,6 @@ A design decision, in this shape:
 
       editor.add({
         name: "goal.status",
-        description: "Show current goal status",
-        input: { type: "object", properties: {}, additionalProperties: false },
-        options: { codemode: true },
-        execute: async () => {
-          const goal = goalManager.getActive()
-          if (!goal) return { content: "No active goal. Use nexus.goal.set() to create one." }
-          return { content: `🎯 ${goal.description}\nStatus: ${goal.status}\nTasks: ${goal.tasks.length}` }
-        }
-      })
-
-      editor.add({
-        name: "goal.complete",
-        description: "Complete current goal",
-        input: { type: "object", properties: {}, additionalProperties: false },
-        options: { codemode: true },
-        execute: async () => {
-          const goal = goalManager.getActive()
-          if (!goal) return { content: "No active goal." }
-          goalManager.complete(goal.id)
-          return { content: `✅ Goal completed: ${goal.description}` }
-        }
-      })
-
-      editor.add({
-        name: "goal.list",
-        description: "List all goals",
-        input: { type: "object", properties: {}, additionalProperties: false },
-        options: { codemode: true },
-        execute: async () => {
-          const goals = goalManager.getAll()
-          if (goals.length === 0) return { content: "No goals yet." }
-          const lines = goals.map(g => `${g.status === 'active' ? '🎯' : '✅'} ${g.description}`)
-          return { content: lines.join('\n') }
-        }
-      })
-
-      editor.add({
-        name: "goal.status",
         description: "Show current active goal status",
         input: {
           type: "object",

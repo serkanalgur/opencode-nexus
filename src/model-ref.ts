@@ -461,22 +461,17 @@ const DIFFICULTY_BUCKETS: readonly { readonly atMost: number; readonly effort: M
  *     is a guess wearing a measurement's name. Inherited, not fixed here: the
  *     honest repair is to read the files, and a `ComplexityScore` built from
  *     real line counts is a different change with its own cost.
- *  3. `riskLevel` contributes 0, 15 or 30 — the `'medium'` arm is a real 15
- *     points in that score — but it is still unreachable, and NOT for the reason
- *     this comment used to give. It said the mapping "inherits NONE" of the
- *     `riskLevel` effect, which was the wrong reason for a right conclusion: the
- *     15-point `'medium'` arm is in the expression, so a reader who believed the
- *     comment would not see anything to change here and could reintroduce the
- *     path and the effect together. The arm is unreachable because nothing ever
- *     produces `'medium'`: `analyzeComplexity` assigns only `'low'` or `'high'`,
- *     and `src/templates.ts` DOES emit `'medium'` for template tasks — but
- *     `selectQualifiedModel` recomputes `analyzeComplexity(node.task)` rather
- *     than reading `task.complexity`, so the value on the template is discarded
- *     before it reaches a score. Two independent reasons it never lands here, and
- *     a third (`analyzeComplexity` only ever assigns the two ends) that would
- *     hold on its own. This function reads `overall` and nothing else, so
- *     difficulty here is `overall` alone, and a template task's declared risk
- *     level cannot change the effort it gets.
+ *  3. `riskLevel` contributes 0 or 30. It USED to offer a third 15-point
+ *     `'medium'` arm that was unreachable — `analyzeComplexity` assigned only
+ *     `'low'` or `'high'`, and `src/templates.ts` DOES emit `'medium'` for
+ *     template tasks, but `selectQualifiedModel` recomputes
+ *     `analyzeComplexity(node.task)` rather than reading `task.complexity`, so
+ *     the template's value was discarded before it reached a score. The arm and
+ *     the 15 points are both gone now, so the expression states the only
+ *     mapping that has a producer, and re-adding a third value needs a producer
+ *     first. This function reads `overall` and nothing else, so difficulty here
+ *     is `overall` alone, and a template task's declared risk level cannot
+ *     change the effort it gets.
  *
  * The input is CLAMPED rather than trusted: a negative or >100 `overall`
  * resolves to the bottom and top buckets instead of falling off the ladder,

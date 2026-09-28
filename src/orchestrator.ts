@@ -3917,7 +3917,9 @@ export class NexusOrchestrator {
     }
     domainKnowledge = Math.min(100, domainKnowledge)
 
-    let riskLevel: string = 'low'
+    // Only the two ends exist: nothing below ever assigns 'medium', and a third
+    // value would need a producer before it earns a name.
+    let riskLevel: 'low' | 'high' = 'low'
     const highRiskKeywords = ['migration', 'production', 'security', 'payment']
     for (const keyword of highRiskKeywords) {
       if (task.description.toLowerCase().includes(keyword)) {
@@ -3931,12 +3933,12 @@ export class NexusOrchestrator {
       (codeLines / 10) +
       (dependencyDepth * 15) +
       (domainKnowledge * 20) +
-      (riskLevel === 'high' ? 30 : riskLevel === 'medium' ? 15 : 0)
+      (riskLevel === 'high' ? 30 : 0)
     )
 
     return {
       overall,
-      factors: { fileCount, codeLines, dependencyDepth, domainKnowledge, riskLevel: riskLevel as 'low' | 'medium' | 'high' }
+      factors: { fileCount, codeLines, dependencyDepth, domainKnowledge, riskLevel }
     }
   }
 

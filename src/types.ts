@@ -70,7 +70,6 @@ export interface Task {
   files: FileScope
   priority: 'low' | 'normal' | 'high' | 'critical'
   timeout?: number
-  retryPolicy?: RetryPolicy
   status: TaskStatus
   result?: TaskResult
   assignedAgent?: string
@@ -108,12 +107,6 @@ export interface ComplexityScore {
 export interface FileScope {
   include: string[]
   exclude?: string[]
-}
-
-export interface RetryPolicy {
-  maxRetries: number
-  backoffMs: number
-  backoffMultiplier: number
 }
 
 export interface DAGNode {
