@@ -1093,19 +1093,89 @@ export class NexusConfigManager {
   }
 
   // Get model for a specific role
-  // Returns "providerID/modelID" format. Falls back to coder role, then defaults.
+  // Returns "providerID/modelID" format. Falls back to the role's own default,
+  // then the coder role, then the coder's default.
   //
-  // A custom role's own `model` sits between the `models` block and the `coder`
-  // fallback, so the two spellings of the same intent agree: `models: { "qa":
+  // A custom role's own `model` sits between the `models` block and the role's
+  // default, so the two spellings of the same intent agree: `models: { "qa":
   // "x" }` and a `customRoles` entry named `qa` with `model: "x"` both resolve
   // to `x`, and when both are present the `models` block wins — it is the block
   // that exists to be overridden per role, while `model` on an entry is one
   // field of one role. `customRoles.find` is linear, but this is called once per
   // spawn for a handful of roles, not per token or per candidate.
+  //
+  // ── WHY AN EMPTY VALUE IS THE ROLE'S OWN DEFAULT ──
+  //
+  // `""` is what the TUI writes for "Use default": the picker's reset row is
+  // `USE_DEFAULT_VALUE = ""` (`src/tui.tsx`), and `getSaveableConfig()` writes
+  // the `models` block verbatim as the whole file body, so choosing that row
+  // persists `"reviewer": ""` into the user's `nexus.jsonc` on purpose, every
+  // time. `""` is falsy, so under a plain `||` chain a row labelled "Use
+  // default" selected the CODER's model — `reviewer`'s default is
+  // `openai/gpt-5-mini` and clearing it produced `anthropic/claude-sonnet-4-6`.
+  // The product manufactured the state and then named the wrong model, so the
+  // empty value resolves to what the row says it is.
+  //
+  // GATED ON `=== ''` rather than added as a bare `DEFAULT_CONFIG.models[role]`
+  // level, and the gate is the substance rather than a precaution: an EMPTY
+  // entry and an ABSENT one are different user intents, and `||` conflates
+  // them. Empty is the user saying "use this role's default". Absent is the user
+  // saying nothing at all about this role, which is the case the coder's
+  // fallback exists for: a config that sets `coder` and omits the rest means
+  // "run everything on the model I configured", not "run everything on the
+  // built-in defaults". Substituting the default for an absent entry would
+  // silently ignore the coder key in exactly the configs that bother to set it.
+  //
+  // For the seven built-in roles the two coincide anyway, because `getConfig()`
+  // merges `DEFAULT_CONFIG.models` UNDERNEATH, so an absent entry never reaches
+  // this level at all. A role outside that block does: a custom role, or an
+  // embedder passing an explicit `undefined`. There the gate is the whole
+  // difference, and this is why the level is a conditional expression and not a
+  // plain term in the chain.
+  //
+  // A role with no entry in `DEFAULT_CONFIG.models` yields `undefined` here, and
+  // that is not a value: the chain falls through to the coder's model, which is
+  // its last resort and is what such a role resolved to before. A level that can
+  // come up empty has to be allowed to fall through, because
+  // `getModelForRole` returns `string` and a chain that ended here would hand a
+  // spawn `undefined`.
   getModelForRole(role: string): string {
     const config = this.getConfig()
     const customRoleModel = config.customRoles.find(entry => entry.name === role)?.model
-    const model = config.models[role] || customRoleModel || config.models.coder || DEFAULT_CONFIG.models.coder!
+    // `string | undefined` by the index signature, not by assertion: a role
+    // outside `DEFAULT_CONFIG.models` really does produce nothing here.
+    const roleDefault = config.models[role] === '' ? DEFAULT_CONFIG.models[role] : undefined
+    const model = config.models[role] || customRoleModel || roleDefault || config.models.coder || DEFAULT_CONFIG.models.coder!
+
+    // NO WARNING for an empty value, and the absence is the fix rather than an
+    // oversight. An empty entry used to resolve to the coder's model silently,
+    // which is a wrong model under a role name that says otherwise — worth
+    // saying out loud. The level above now makes it the role's own default, so
+    // the outcome is the one the picker's row promises, the one a hand-written
+    // `designer: ""` already gets, and the one removing the key gets. There is
+    // no longer a fault for a warning to have a subject, and the message could
+    // not have survived the fix in any case: it named the coder's model and
+    // advised removing the key "to use this role's default", which is advice
+    // this resolver now applies to the value as written.
+    //
+    // The narrowing that was available instead — warn only on values the picker
+    // did not produce — is not implementable, which is the reason this is removal
+    // rather than a condition. `""` reaches disk by three product paths (the
+    // picker's reset row, `setModel` from the model dialog, and clearing a `text`
+    // field in the config dialog, where `commitConfigText` takes the empty string
+    // as written), and a persisted config cannot say which one wrote it. A memo
+    // recording "the picker wrote this" would know for one process and then be
+    // wrong on the next start, at which point the user is warned for their own
+    // earlier click. Silence-by-memo is the behaviour being complained about.
+    //
+    // What is lost, stated plainly: a channel that noticed a config file
+    // CONTAINING an empty entry. That is a note about a spelling rather than a
+    // fault, and the channel that already exists for it is better — the load log
+    // prints the resolved `role=model` map on every load, and
+    // `getResolvedModels()` drops empty entries precisely so that map shows the
+    // model that will actually run. The value is still reported; only the
+    // complaint about how it was written is gone.
+    //
     // Safety: ensure model has provider/model format
     if (!model.includes('/')) {
       console.warn(`[nexus] Model "${model}" for role "${role}" is missing provider prefix. Expected "providerID/modelID" format.`)

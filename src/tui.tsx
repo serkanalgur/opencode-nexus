@@ -817,6 +817,103 @@ export async function openInBrowser(url: string): Promise<void> {
   }
 }
 
+// ── `/nexus` subcommand routing ─────────────────────────────────────
+
+/**
+ * What `/nexus <input>` resolves to.
+ *
+ * `local` is a subcommand the TUI answers itself and MUST NOT forward:
+ * `config` opens the config dialog, `status` shows a toast, `dashboard`/`web`
+ * run `handleWebDashboard`. `forward` is everything else, and the `text` is
+ * the exact command to submit.
+ */
+export type NexusLocalCommand =
+  | 'config' | 'status' | 'dashboard' | 'overview' | 'web' | 'model' | 'reset'
+
+export type NexusCommandRoute =
+  | { readonly kind: 'local'; readonly command: NexusLocalCommand }
+  | { readonly kind: 'forward'; readonly text: string }
+  | { readonly kind: 'unknown' }
+
+/**
+ * Which `/nexus` subcommand this is, and whether the TUI answers it.
+ *
+ * ## Why a fall-through rather than four more `case` arms
+ *
+ * `agents`, `costs`, `pause` and `resume` are implemented by the SERVER
+ * (`handleCommand`, `src/orchestrator.ts`) and were unreachable from the TUI:
+ * they hit the dispatcher's `default:` arm and showed the command list, which
+ * is a list that does not contain them. The obvious fix — four more arms
+ * mirroring the server's `switch` — fixes exactly those four and leaves the
+ * next subcommand the server gains broken the same way, silently, until
+ * someone notices. A TUI-side allowlist of server commands is a second copy of
+ * a list owned by another process, and the two can only ever agree by luck.
+ *
+ * So: anything the TUI does not claim is submitted verbatim, and the server
+ * decides whether it knows the word. A new server subcommand works from the
+ * TUI the day it is written, with no TUI edit.
+ *
+ * ## Why this is still SAFE, which is the part that needs the guard
+ *
+ * The cost of a fall-through is that "unrecognised" and "recognised by the
+ * server" become the same branch, so a TUI-local name that fell through would
+ * open a prompt instead of its dialog. They are kept apart by ORDER, not by a
+ * list: `LOCAL_COMMANDS` is checked FIRST and only a token that is in neither
+ * the local set nor its aliases is forwarded. `/nexus config` is claimed
+ * locally and never reaches the forward branch. That ordering is the whole
+ * invariant, and it is why `LOCAL_COMMANDS` below is a `Set` built from the
+ * same literals the dispatcher switches on rather than a second hand-written
+ * list that could drift.
+ *
+ * ## Why the forwarded text is rebuilt rather than passed through
+ *
+ * `text` is `/nexus ` + the user's argument, trimmed at the ends only. The
+ * server's `handleCommand` splits on `' '` and reads `parts[2]` for the
+ * `agents` filter, so `/nexus agents reviewer` must arrive with its argument
+ * intact — this is the same verbatim-forwarding rule `runDashboardSubcommand`
+ * follows, and for the same reason: the server's tokeniser decides what an
+ * argument means, not a second copy of it here.
+ */
+const LOCAL_COMMANDS = {
+  config: 'config', c: 'config',
+  status: 'status', s: 'status',
+  dashboard: 'dashboard', d: 'dashboard',
+  overview: 'overview',
+  web: 'web', w: 'web',
+  model: 'model', m: 'model',
+  reset: 'reset',
+} as const satisfies Record<string, NexusLocalCommand>
+
+/**
+ * Route a `/nexus` argument string.
+ *
+ * Exported and pure so the routing is testable without a TUI context: the
+ * dispatcher itself is a closure over `context`, and "did `/nexus agents`
+ * reach the server, with its filter" is a question about a string.
+ */
+export function routeNexusCommand(input: string | undefined): NexusCommandRoute {
+  const trimmed = (input ?? '').trim()
+  if (trimmed === '') return { kind: 'unknown' }
+
+  const token = trimmed.split(/\s+/)[0]
+  // `Object.hasOwn`, NOT `token in LOCAL_COMMANDS`. `in` walks the prototype
+  // chain, so `toString`, `constructor` and `valueOf` would all read as local
+  // commands and be answered by the TUI instead of reaching the server — a
+  // prototype key is not a command anyone implemented.
+  if (Object.hasOwn(LOCAL_COMMANDS, token)) {
+    // The guard is `hasOwn`; indexing it rather than keeping a parallel `Set`
+    // means a name can only be local by being a key here, so the table and the
+    // dispatcher's arms cannot drift apart.
+    return { kind: 'local', command: LOCAL_COMMANDS[token as keyof typeof LOCAL_COMMANDS] }
+  }
+
+  // Forwarded verbatim. An unknown word is NOT rejected here: the server
+  // answers `Unknown command. Available: status, agents, costs, …`, which is
+  // the one list that is correct by construction, and it arrives as this
+  // session's reply.
+  return { kind: 'forward', text: `/nexus ${trimmed}` }
+}
+
 // ── Model picker options ────────────────────────────────────────────
 // Free functions for the same reason as the sidebar section above: the TUI
 // entrypoint stays a thin adapter over the live context, and the option
@@ -833,8 +930,27 @@ export async function openInBrowser(url: string): Promise<void> {
 // fail `getModelForRole`'s prefix check and throw at spawn time.
 const DEFAULT_MODEL_CATEGORY = "Defaults"
 
-/** The `value` `setModel` reads back; falsy so a role can be reset to its default. */
-const USE_DEFAULT_VALUE = ""
+/**
+ * The `value` `setModel` reads back; falsy so a role can be reset to its default.
+ *
+ * EXPORTED so the tests that pin the reset row's value read it from here rather
+ * than restating `""`. A test that asserts the row carries `""` and a constant
+ * that happens to be `""` agree by coincidence, and the agreement is invisible
+ * until one of them moves: renaming the sentinel would leave the test asserting
+ * about a value the product no longer submits, still green.
+ *
+ * The value is a SENTINEL, not a model — which is why it is empty rather than
+ * something like `"default"`. `"default"` is a legal `providerID/modelID` shape
+ * to the host's fuzzy finder, so it would be a row a user could believe was a
+ * model, and a non-empty value would pass `getModelForRole`'s provider-prefix
+ * check and then fail to resolve to a real model at spawn time.
+ *
+ * What it MEANS is settled in `getModelForRole` (`src/config.ts`), and the two
+ * are one contract: this row writes `""`, and `""` resolves to the role's own
+ * default. Which is why the row is labelled "Use default" and can say so
+ * honestly — the value it submits is the value that selects the default.
+ */
+export const USE_DEFAULT_VALUE = ""
 
 /**
  * One row of the model picker.
@@ -895,7 +1011,9 @@ export interface ModelSelectOption {
  *
  * `Use default` is appended last, in its own category: it is a real selectable
  * row whose value stays `""` because `setModel` relies on that empty string to
- * reset a role, and a trailing row is where a user looks for "reset".
+ * reset a role, and a trailing row is where a user looks for "reset". That
+ * empty string resolves to the role's OWN default in `getModelForRole`, so the
+ * description below is a true statement about the result rather than a hope.
  */
 export function buildModelOptions(
   models: readonly GroupedModel[] | undefined,
@@ -1462,6 +1580,10 @@ export default Plugin.define({
                 if (input) {
                   const parts = input.split(' ')
                   const cmd = parts[0]
+                  // Resolved once, and consulted only in the `default:` arm, so
+                  // the local cases keep the literal `switch` above as the
+                  // single statement of what the TUI answers itself.
+                  const route = routeNexusCommand(input)
                   switch (cmd) {
                     case 'config':
                     case 'c':
@@ -1529,11 +1651,15 @@ export default Plugin.define({
                       }
                       break
                     default:
-                      context.ui.toast.show({
-                        title: "Nexus",
-                        message: "Commands: config, status, dashboard [port], web [port], overview, model <role>, reset",
-                        variant: "info"
-                      })
+                      if (route.kind !== 'forward') return
+                      // Not a TUI-local command, so it belongs to the server.
+                      // `agents`, `costs`, `pause` and `resume` were implemented
+                      // there and unreachable from here: they landed on this arm
+                      // and showed a list that did not contain them. See
+                      // `routeNexusCommand` for why this is a fall-through
+                      // rather than four more cases, and for the guarantee that
+                      // the local arms above still win.
+                      await submitServerCommand(route.text)
                   }
                 } else {
                   void runConfigFlow()

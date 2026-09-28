@@ -12,7 +12,7 @@ import { TEMPLATES, instantiateTemplate, listTemplates } from "./templates"
 import { GoalManager } from "./goal"
 import { TeamManager } from "./team"
 import { AstGrep } from "./astgrep"
-import { installNexusSkills, nexusSkillsDir } from "./skills-install"
+import { installNexusSkills, nexusSkillsDir, overwriteWarning } from "./skills-install"
 import { describeDashboardStart, startDashboardServer } from "./dashboard"
 import {
   formatModelPrice,
@@ -27,6 +27,49 @@ import { join, resolve, basename, dirname } from "node:path"
 import { homedir } from "node:os"
 import type { CostProvenance } from "./types"
 import type { PerformanceScore } from "./performance"
+import type { SkillInstallResult } from "./skills-install"
+
+/**
+ * Report what the skills installer did, one line per outcome worth naming.
+ *
+ * The reporting home for this feature, and the ONLY one. `installNexusSkills`
+ * used to print the overwrite warning itself while the `unavailable` case was
+ * reported here from the returned results, so one feature had two output
+ * sites: the prefix, the tone and the judgement about what is worth saying were
+ * each maintained twice, and a test capturing `console.warn` around the
+ * installer could not see half the feature. Both are now sibling arms of one
+ * loop over one array, so they share the `[nexus] ` prefix and the moment.
+ *
+ * EXTRACTED as a function rather than left inline in `plugin.setup` because
+ * that is what makes it testable at all. The loop is three lines inside a
+ * closure that boots an orchestrator, so an inline version could only be
+ * covered by booting the whole plugin; this way the message text, the
+ * per-file-not-summary shape and the silence on `created`/`unchanged` are all
+ * assertable directly against a real `SkillInstallResult[]`.
+ *
+ * Returns nothing and never throws: a failure to report a skill must not be a
+ * second way for the install to fail. `console.warn` is not worth a guard here
+ * — it does not throw — but the shape is the same best-effort one the
+ * surrounding load code uses.
+ */
+export function reportSkillInstalls(results: readonly SkillInstallResult[]): void {
+  for (const { name, path, action } of results) {
+    // A skill that did not ship is the whole feature failing silently, and this
+    // is the only in-process signal there is. Named and loud, because
+    // `docs/COMPATIBILITY.md` claims skills are supported.
+    if (action === 'unavailable') {
+      console.warn(`[nexus] Skill ${name} is not present in the installed package; skipping ${path}`)
+    } else if (action === 'updated') {
+      // The sibling arm. A user's edit may have just been discarded and they
+      // cannot act on it retroactively, so it is said out loud — but it is a
+      // warning and not an error, because the write is the specified policy and
+      // it succeeded. `created` and `unchanged` fall through silently: a first
+      // install loses nothing, and `unchanged` is the steady state on nearly
+      // every load, so warning there would fire almost every startup.
+      console.warn(overwriteWarning(name, path))
+    }
+  }
+}
 
 /**
  * Render one cost with the label that says whether it was measured or
@@ -1458,15 +1501,7 @@ A design decision, in this shape:
     // no override mechanism here: OpenCode's own skill precedence already lets a
     // user's project `.opencode/skills` copy shadow this global one.
     try {
-      const results = installNexusSkills(nexusSkillsDir(), homedir())
-      for (const { name, path, action } of results) {
-        // A skill that did not ship is the whole feature failing silently, and
-        // this is the only in-process signal there is. Named and loud, because
-        // `docs/COMPATIBILITY.md` claims skills are supported.
-        if (action === 'unavailable') {
-          console.warn(`[nexus] Skill ${name} is not present in the installed package; skipping ${path}`)
-        }
-      }
+      reportSkillInstalls(installNexusSkills(nexusSkillsDir(), homedir()))
     } catch {
       // Best-effort, like every other file this plugin writes on load. The
       // skills are guidance; failing to install guidance must never be the

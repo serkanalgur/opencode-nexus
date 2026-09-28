@@ -35,8 +35,15 @@ import { join, dirname, resolve } from 'node:path'
 const SANDBOX_HOME = mkdtempSync(join(tmpdir(), 'nexus-skills-'))
 mock.module('node:os', () => ({ ...realOs, default: realOs, homedir: () => SANDBOX_HOME }))
 
-const { installNexusSkills, nexusSkillsDir, nexusSkillsTargetDir, NEXUS_SKILL_NAMES } =
+const { installNexusSkills, nexusSkillsDir, nexusSkillsTargetDir, NEXUS_SKILL_NAMES, overwriteWarning } =
   await import('../src/skills-install')
+// The reporting home for this feature. The overwrite warning used to be printed
+// by `installNexusSkills` itself; it now lives here, beside the `unavailable`
+// warning, as a sibling arm of one loop. The tests below therefore drive
+// `reportSkillInstalls` with the installer's REAL results rather than capturing
+// `console.warn` around the installer — same assertion, moved to the code that
+// now makes it, so moving the warning again cannot quietly drop its coverage.
+const { reportSkillInstalls } = await import('../src/index')
 
 // The real `skills/` directory in the repo — the installer copies from it, so
 // the tests below check the bytes that actually ship, not a fixture.
@@ -103,6 +110,26 @@ function captureWarnings(body: () => unknown): string[] {
   }
   try {
     body()
+  } finally {
+    console.warn = original
+  }
+  return seen
+}
+
+/**
+ * The same, for an async body — `plugin.setup` returns a promise, and the sync
+ * version would restore `console.warn` before the load had run, so every
+ * warning would be missed and the "nothing was reported" assertions would pass
+ * because nothing had happened yet rather than because nothing was said.
+ */
+async function captureWarningsAsync(body: () => Promise<unknown>): Promise<string[]> {
+  const original = console.warn
+  const seen: string[] = []
+  console.warn = (...args: unknown[]) => {
+    seen.push(args.map(a => String(a)).join(' '))
+  }
+  try {
+    await body()
   } finally {
     console.warn = original
   }
@@ -379,11 +406,30 @@ describe('nexus design skills: warning when a bundled skill is overwritten', () 
     }
   }
 
+  /**
+   * Install and then report, exactly as `plugin.setup` does.
+   *
+   * The two steps in one closure so `captureWarnings` sees the whole load. This
+   * is what keeps the relocated warning honestly covered: the assertion is on
+   * the output of the real install-then-report path, not on `overwriteWarning`
+   * called directly (which would pass even if the call site were deleted) and
+   * not on the installer alone (which no longer prints anything).
+   */
+  function installAndReport(source: string, home: string): void {
+    reportSkillInstalls(installNexusSkills(source, home))
+  }
+
   it('warns on the overwrite, naming the file and where to customise instead', () => {
     // The absence this pins: the overwrite policy is the user's informed
     // choice, but a hand-edited global copy used to be clobbered with nothing
     // said. README documents the policy; README is not read by the person
     // editing a file at ~/.config/opencode/skills.
+    //
+    // Driven through `installAndReport`, i.e. the install and the reporting the
+    // plugin actually performs. The warning moved out of the installer and into
+    // the caller's loop, and the assertion moved with it rather than being
+    // deleted — `overwriteWarning` is not exercised on its own anywhere, so
+    // testing it in isolation would pass even if nothing ever called it.
     const home = makeHome()
     const source = mkdtempSync(join(tmpdir(), 'nexus-skills-src-'))
     installNexusSkills(SOURCE_DIR, home)
@@ -391,9 +437,18 @@ describe('nexus design skills: warning when a bundled skill is overwritten', () 
     const name = 'nexus-design-taste'
     const target = skillPath(name, home)
     writeFileSync(target, readFileSync(target, 'utf-8') + '\nmy house style\n')
-    stageSkill(source, name, readFileSync(join(SOURCE_DIR, name, 'SKILL.md'), 'utf-8') + '\n## v2\n')
+    // All THREE staged, with only `name` bumped to a v2 body. The other two are
+    // staged with the text this version already ships, so they resolve
+    // `unchanged` and stay silent. Staging only the bumped one — which is what
+    // this used to do — leaves the other two `unavailable`, and a missing skill
+    // is now correctly reported by the same loop, so the count below would be
+    // measuring the wrong thing.
+    for (const skill of NEXUS_SKILL_NAMES) {
+      const shipped = readFileSync(join(SOURCE_DIR, skill, 'SKILL.md'), 'utf-8')
+      stageSkill(source, skill, skill === name ? shipped + '\n## v2\n' : shipped)
+    }
 
-    const warnings = captureWarnings(() => installNexusSkills(source, home))
+    const warnings = captureWarnings(() => installAndReport(source, home))
 
     // Asserted on the text, not merely that a warning happened: a message that
     // is empty, or that says only "updated", satisfies "a warning fired" while
@@ -420,9 +475,14 @@ describe('nexus design skills: warning when a bundled skill is overwritten', () 
   it('does not warn on a first install — a missing file is not a surprise', () => {
     // Warning about creating a file the user never had would be pure noise, and
     // noise on the very first run is how a user learns to ignore this channel.
+    //
+    // Through `installAndReport`, because the silence now belongs to the
+    // REPORTER: the installer prints nothing at all, so a test that captured
+    // only the install would pass whether or not `created` were reported. The
+    // absence is asserted where the behaviour now lives.
     const home = makeHome()
 
-    const warnings = captureWarnings(() => installNexusSkills(SOURCE_DIR, home))
+    const warnings = captureWarnings(() => installAndReport(SOURCE_DIR, home))
 
     expect(warnings).toEqual([])
     // And the install really did happen, so the silence above is a decision
@@ -430,6 +490,9 @@ describe('nexus design skills: warning when a bundled skill is overwritten', () 
     for (const name of NEXUS_SKILL_NAMES) {
       expect(existsSync(skillPath(name, home))).toBe(true)
     }
+    // The outcomes really were `created`, so the silence is a decision about
+    // that action and not about a result the loop never saw.
+    expect(installNexusSkills(SOURCE_DIR, home).every(r => r.action === 'unchanged')).toBe(true)
   })
 
   it('does not warn, and does not write, when the on-disk copy already matches', () => {
@@ -441,7 +504,7 @@ describe('nexus design skills: warning when a bundled skill is overwritten', () 
     const backdated = new Date('2001-02-03T04:05:06Z')
     for (const path of targets) utimesSync(path, backdated, backdated)
 
-    const warnings = captureWarnings(() => installNexusSkills(SOURCE_DIR, home))
+    const warnings = captureWarnings(() => installAndReport(SOURCE_DIR, home))
 
     expect(warnings).toEqual([])
     // "No write" is asserted via mtime, not content: the content check would
@@ -461,7 +524,7 @@ describe('nexus design skills: warning when a bundled skill is overwritten', () 
     const source = mkdtempSync(join(tmpdir(), 'nexus-skills-src-'))
     stageAllChanged(source, home)
 
-    const warnings = captureWarnings(() => installNexusSkills(source, home))
+    const warnings = captureWarnings(() => installAndReport(source, home))
 
     expect(warnings.length).toBe(NEXUS_SKILL_NAMES.length)
     // Every skill is represented exactly once — no duplicates, none missed.
@@ -476,17 +539,35 @@ describe('nexus design skills: warning when a bundled skill is overwritten', () 
     rmSync(source, { recursive: true, force: true })
   })
 
-  it('does not warn for a skill that did not ship, only for one that was overwritten', () => {
-    // Keeps the channel narrow. A missing SKILL.md is a packaging failure
-    // reported separately (by `src/index.ts`, from the returned results), and it
-    // never touches the user's files, so it must not appear on this channel.
+  it('does not claim an overwrite for a skill that did not ship', () => {
+    // RESTATED, because the two warnings now share a channel.
+    //
+    // This used to assert that a missing SKILL.md produced no output AT ALL
+    // from the installer, on the grounds that the two cases were reported from
+    // different places and had to stay that way. They no longer are: the
+    // overwrite warning moved into the caller's loop beside the `unavailable`
+    // one, deliberately, so there is one reporting style for the feature. The
+    // assertion that still has teeth is the narrower and more useful one — a
+    // skill that did not ship is reported as MISSING, never as an overwrite,
+    // because it never touched the user's files and telling them their edit was
+    // clobbered would be false.
     const home = makeHome()
     const source = mkdtempSync(join(tmpdir(), 'nexus-skills-partial-'))
     stageSkill(source, 'nexus-design-taste', '# only one\n')
 
-    const warnings = captureWarnings(() => installNexusSkills(source, home))
+    const warnings = captureWarnings(() => installAndReport(source, home))
 
-    expect(warnings).toEqual([])
+    // The two absent skills are named as missing, each once.
+    expect(warnings.filter(w => w.includes('is not present in the installed package')).length)
+      .toBe(NEXUS_SKILL_NAMES.length - 1)
+    // And nothing anywhere claims an overwrite happened, for any skill. This is
+    // the part that would fail if `unavailable` were ever folded into the
+    // `updated` arm.
+    expect(warnings.filter(w => w.includes('Overwrote'))).toEqual([])
+    // The one skill that did ship is not named at all: it was `created`, which
+    // the reporter deliberately ignores. Asserted by absence rather than by
+    // counting, so a `created` that started reporting would fail here.
+    expect(warnings.filter(w => w.includes('nexus-design-taste'))).toEqual([])
 
     rmSync(source, { recursive: true, force: true })
   })
@@ -558,5 +639,81 @@ describe('nexus design skills: wiring into plugin load', () => {
       expect(body).toBe(readFileSync(join(SOURCE_DIR, name, 'SKILL.md'), 'utf-8'))
       expect(frontmatter(body).name).toBe(name)
     }
+  })
+
+  it('keeps the reporting reachable from a real plugin load', async () => {
+    // Closes a gap that mutation testing found. With the warning moved into the
+    // caller's loop, every other test here drives `reportSkillInstalls` by hand,
+    // and deleting the CALL from `plugin.setup` left all of them green — the
+    // feature would have been mute in production while the suite reported it
+    // covered. This asserts the two halves that a hand-driven test cannot see:
+    // that the load path calls the reporter, and that it does so with the
+    // installer's real results.
+    // `SANDBOX_HOME`, not a per-test temp home: `plugin.setup` installs under
+    // `homedir()`, which is mocked at the top of this file, so a different
+    // directory here would simply not be the one written to. The skills are
+    // therefore already present from the load above, which makes this second
+    // load resolve `unchanged` — the quietest possible outcome, and the one
+    // where a reporter that is wired up but wrong stays silent.
+    const { default: plugin } = await import('../src/index')
+    const ctx = (): any => ({
+      location: { directory: SANDBOX_HOME },
+      event: { subscribe: mock(() => Promise.resolve(() => {})) },
+      storage: { set: mock(() => Promise.resolve()), get: mock(() => Promise.resolve(null)) },
+      tool: {
+        transform: mock(async (cb: any) => { cb({ namespace: () => {}, add: (t: any) => { void t } }) }),
+        list: mock(() => Promise.resolve([])),
+      },
+      session: {
+        create: mock(() => Promise.resolve({ id: 'ses_skills' })),
+        prompt: mock(() => Promise.resolve()),
+        wait: mock(() => Promise.resolve()),
+        context: mock(() => Promise.resolve([])),
+        background: mock(() => Promise.resolve()),
+        hook: mock(() => Promise.resolve()),
+      },
+    })
+
+    // A clean first load: the skills land and NOTHING is reported, which is the
+    // steady state the silence assertions above are about, reached here through
+    // the real boot rather than through a direct call.
+    const warnings = await captureWarningsAsync(async () => { await plugin.setup(ctx()) })
+
+    for (const name of NEXUS_SKILL_NAMES) {
+      expect(existsSync(skillPath(name, SANDBOX_HOME))).toBe(true)
+    }
+    // No `unavailable` (all three ship) and no `updated` (nothing was there to
+    // overwrite), so a correctly-wired reporter is silent here. Asserted
+    // through the boot, which is the assertion the hand-driven tests duplicate.
+    expect(warnings.filter(w => w.includes('is not present in the installed package'))).toEqual([])
+    expect(warnings.filter(w => w.includes('Overwrote'))).toEqual([])
+
+    // NOW the half that actually pins the wiring. Silence alone cannot: deleting
+    // the `reportSkillInstalls(...)` call from `plugin.setup` leaves every
+    // assertion above green, because a reporter that is never called and a
+    // reporter that correctly ignores `unchanged` print the same thing. So the
+    // user edits their global copy — which makes the next load an `updated` —
+    // and the load is booted again. Only a reporter that is genuinely reached
+    // from `setup` can print this.
+    //
+    // Restored afterwards, because `SANDBOX_HOME` is shared with the test above
+    // and this file's `afterAll` removes it wholesale.
+    const name = 'nexus-design-taste'
+    const target = skillPath(name, SANDBOX_HOME)
+    const original = readFileSync(target, 'utf-8')
+    writeFileSync(target, original + '\nmy house style\n', 'utf-8')
+
+    const second = await captureWarningsAsync(async () => { await plugin.setup(ctx()) })
+
+    const overwrites = second.filter(w => w.includes('Overwrote'))
+    expect(overwrites.length).toBe(1)
+    // The full message, not just that one was printed: the path the user has to
+    // act on, and the escape hatch that is the reason the plugin ships no
+    // override mechanism of its own.
+    expect(overwrites[0]).toContain(target)
+    expect(overwrites[0]).toContain(`.opencode/skills/${name}/SKILL.md`)
+    expect(overwrites[0].startsWith('[nexus]')).toBe(true)
+
+    writeFileSync(target, original, 'utf-8')
   })
 })

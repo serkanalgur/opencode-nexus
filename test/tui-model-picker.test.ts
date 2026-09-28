@@ -5,6 +5,7 @@ import { join } from "node:path"
 import {
   buildModelOptions,
   providerNamesFor,
+  USE_DEFAULT_VALUE,
   type ModelSelectOption,
 } from "../src/tui"
 import {
@@ -32,9 +33,15 @@ const PROVIDERS: readonly ProviderLabelSource[] = [
   { id: "openrouter", name: "OpenRouter" },
 ]
 
-/** Every option except the trailing reset row. */
+/**
+ * Every option except the trailing reset row.
+ *
+ * Filtered on `USE_DEFAULT_VALUE` rather than a restated `""`, so this cannot
+ * quietly stop excluding the row if the sentinel changes — and so a change to the
+ * sentinel is a deliberate edit here rather than a silent one.
+ */
 function modelRows(options: readonly ModelSelectOption[]): readonly ModelSelectOption[] {
-  return options.filter(o => o.value !== "")
+  return options.filter(o => o.value !== USE_DEFAULT_VALUE)
 }
 
 function descriptionsFor(
@@ -179,7 +186,15 @@ describe("model picker: the Use default row", () => {
     const options = buildModelOptions([model({ providerID: "anthropic", id: "c" })], PROVIDERS)
     const reset = options[options.length - 1]
     expect(reset.title).toBe("Use default")
-    expect(reset.value).toBe("")
+    // Pinned against the CONSTANT, not a restated `""`. A test asserting the row
+    // carries `""` and a constant that happens to be `""` agree by coincidence,
+    // and the agreement would survive renaming the sentinel — leaving the suite
+    // green while the product submitted a value the resolver has never seen.
+    expect(reset.value).toBe(USE_DEFAULT_VALUE)
+    // The constant itself, so the coincidence above cannot be reintroduced by
+    // editing the test alone: if the sentinel is ever given a real token, this
+    // fails here with the reason visible, rather than at a spawn.
+    expect(USE_DEFAULT_VALUE).toBe("")
     // Selectable: not hidden behind a `disabled` flag, and not `undefined`.
     expect("disabled" in reset).toBe(false)
     expect(reset.value).not.toBeUndefined()
@@ -196,8 +211,8 @@ describe("model picker: the Use default row", () => {
   })
 
   it("is present even with an empty catalogue, so a role can always be reset", () => {
-    expect(buildModelOptions([], PROVIDERS).some(o => o.value === "")).toBe(true)
-    expect(buildModelOptions(undefined, undefined).some(o => o.value === "")).toBe(true)
+    expect(buildModelOptions([], PROVIDERS).some(o => o.value === USE_DEFAULT_VALUE)).toBe(true)
+    expect(buildModelOptions(undefined, undefined).some(o => o.value === USE_DEFAULT_VALUE)).toBe(true)
   })
 })
 
