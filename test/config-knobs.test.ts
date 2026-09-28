@@ -203,11 +203,12 @@ describe('the deleted keys are gone, and stay gone', () => {
 
   it('keeps the deleted keys out of both config types, by name', async () => {
     // Scoped to the two interfaces rather than grepped file-wide, and the reason
-    // is `RetryPolicy`: `src/types.ts` still declares a `backoffMultiplier` on
-    // THAT interface, where it is a different field with a different owner, and a
-    // file-wide grep would have to be weakened until it proved nothing. Reading
-    // the field names out of the source is also stronger than a grep — it cannot
-    // be satisfied by the key appearing in a comment.
+    // is `backoffMultiplier`: it is still NAMED, at length, in the doc comments
+    // on `NexusConfig.selfHealing` explaining that it was deleted — the key and
+    // the type that once owned it are both gone from the source, so a file-wide
+    // grep would be testing this file's own prose. Reading the field names out of
+    // the source is also stronger than a grep — it cannot be satisfied by the
+    // key appearing in a comment.
     const types = await readSourceFile('types')
     const config = await readSourceFile('config')
 
@@ -217,9 +218,10 @@ describe('the deleted keys are gone, and stay gone', () => {
     }
     // And the two INLINE sub-blocks, which a flat field-name read cannot reach.
     // The body is sliced out of the source and scanned, rather than the file
-    // being grepped: `RetryPolicy.backoffMultiplier` is a legitimate survivor
-    // elsewhere in `types.ts`, so a file-wide check would have to be weakened
-    // until it proved nothing.
+    // being grepped: `backoffMultiplier` survives only as PROSE, in the comment
+    // on `selfHealing` that documents its removal, so a file-wide check would
+    // have to be weakened until it proved nothing. Comments are stripped
+    // precisely so that prose cannot satisfy — or break — this.
     const body = interfaceBody(stripComments(types), 'NexusConfig')
     expect(body).toContain('retryDelay: number')
     expect(body).not.toContain('backoffMultiplier')
@@ -253,7 +255,10 @@ describe('the deleted keys are gone, and stay gone', () => {
       }
     }
     // `backoffMultiplier` is checked on the page but NOT on `types`, for the
-    // `RetryPolicy` reason given above.
+    // reason given above: on the page it is only ever a stale rendered row,
+    // where in `types.ts` it is only ever the comment recording its removal.
+    // Inline sub-blocks are not reachable by a field-name read, so `selfHealing`
+    // is covered by the interface-body check in the previous test instead.
     const pageCode = stripComments(await readDashboardHtml())
     for (const key of [...global, 'backoffMultiplier']) {
       expect({ key, presentInPage: new RegExp(`\\b${key}\\b`).test(pageCode) })

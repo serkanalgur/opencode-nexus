@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { blankNonCode } from './helpers/dashboard-page'
+import { blankNonCode, matchBrace } from './helpers/dashboard-page'
 
 /**
  * Regressions for three fixes, locked in one file.
@@ -173,22 +173,27 @@ function saveableConfigBlocks(): string[] {
   const decl = /private\s+getSaveableConfig\s*\(/.exec(code)
   expect(decl).not.toBeNull()
   const open = code.indexOf('{', decl!.index)
-  let depth = 0
-  let close = -1
-  for (let i = open; i < code.length; i++) {
-    if (code[i] === '{') depth++
-    else if (code[i] === '}' && --depth === 0) {
-      close = i
-      break
-    }
-  }
-  if (close === -1) throw new Error('getSaveableConfig() body never closed')
+  // Shared with the dashboard-page tests rather than open-coded a second time:
+  // it throws on an unbalanced body, which is the same failure this file had to
+  // hand-roll a sentinel `-1` and a second throw for.
+  const close = matchBrace(code, open)
   return [...code.slice(open, close).matchAll(/\bresult\.(\w+)\s*=/g)].map(m => m[1]!)
 }
 
-/** The English number word for a small count, so the expectation is not magic. */
+/** The English number words this file can state, indexed by count. */
+const NUMBER_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve'] as const
+
+/**
+ * The English number word for a small count, so the expectation is not magic.
+ *
+ * Throws rather than returning `undefined` for a count past the table: the
+ * caller compares this word against words scraped out of prose, so an
+ * out-of-range count would make the comparison vacuously true instead of wrong.
+ */
 function numberWord(n: number): string {
-  return ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve'][n]!
+  const word: string | undefined = NUMBER_WORDS[n]
+  if (word === undefined) throw new Error(`no number word for ${n} — extend NUMBER_WORDS and blockCountMentions' regex`)
+  return word
 }
 
 /** docs/API.md's config-schema code fence, parsed to its top-level keys. */
@@ -235,12 +240,50 @@ function apiSchemaKeys(): string[] {
 }
 
 /**
+ * The `NexusConfig` fields whose value is an inline object — the ones a reader
+ * would call "blocks" — as opposed to the plain scalars beside them.
+ *
+ * Read from the source at the top level of the interface body only, so a nested
+ * `{ … }` belonging to some inner field is not mistaken for a block of its own.
+ */
+function nexusConfigBlocks(): string[] {
+  const code = blankNonCode(readFileSync(join(SRC, 'types.ts'), 'utf-8'), false)
+  const decl = /export\s+interface\s+NexusConfig\s*\{/.exec(code)
+  expect(decl).not.toBeNull()
+  const open = code.indexOf('{', decl!.index)
+  const close = matchBrace(code, open)
+  return [...code.slice(open, close).matchAll(/^ {2}(\w+)\??:\s*\{/gm)].map(m => m[1]!)
+}
+
+/** The backticked names in the "not in this schema" sentence of docs/API.md. */
+function apiConstructorOnlyBlocks(): string[] {
+  const api = readFileSync(join(REPO, 'docs', 'API.md'), 'utf-8')
+  const at = api.indexOf('that are **not** in this schema')
+  expect(at).toBeGreaterThan(-1)
+  // The sentence runs to the first `—` AFTER the em dash that opens the list,
+  // which is the only delimiter in it that is not a backtick or a word.
+  const rest = api.slice(at)
+  const open = rest.indexOf('—')
+  const close = rest.indexOf('—', open + 1)
+  expect(close).toBeGreaterThan(-1)
+  return [...rest.slice(open, close).matchAll(/`(\w+)`/g)].map(m => m[1]!)
+}
+
+/**
  * Every count word in a docs/API.md paragraph that is talking about config
  * BLOCKS, as `[paragraph, word]`.
  *
  * Scoped to paragraphs that mention "block" on purpose. The document also says
  * "all four precedence levels", and a number word in that sentence is a true
  * statement about something this test knows nothing about.
+ *
+ * KNOWN LIMITS, stated rather than hidden. The alternation is bounded at
+ * "twelve" (and by the lookahead, which only fires before "block"/"blocks" or a
+ * comma), so a count phrased some other way — "eight of the blocks", a numeral
+ * "8 blocks" — is not matched at all and this sweep misses it silently. The
+ * guard in the caller (`NUMBER_WORDS.length > blocks.length`) catches the
+ * out-of-range direction; nothing here catches a differently-PHRASED in-range
+ * count, and the `mentions.length >= 2` floor is what keeps that honest.
  */
 function blockCountMentions(): { paragraph: string; word: string }[] {
   const api = readFileSync(join(REPO, 'docs', 'API.md'), 'utf-8')
@@ -283,6 +326,12 @@ describe('#86 — the config block count is stated once, correctly, and follows 
   it('says the same number in words wherever docs/API.md counts the blocks', () => {
     const blocks = saveableConfigBlocks()
     const word = numberWord(blocks.length)
+    // `numberWord` throws past twelve, but `blockCountMentions`'s alternation
+    // would simply stop MATCHING — a thirteenth block would then make the
+    // `mentions.length >= 2` guard below fail, which is the intended signal but
+    // a confusing one. Assert the range explicitly, against the same table, so
+    // the failure says which of the two has to be extended.
+    expect(NUMBER_WORDS.length).toBeGreaterThan(blocks.length)
     const mentions = blockCountMentions()
 
     // At least two places count them (the schema paragraph and saveGlobalConfig).
@@ -298,6 +347,24 @@ describe('#86 — the config block count is stated once, correctly, and follows 
     expect(namesOut).toBeDefined()
     for (const block of blocks) {
       expect(namesOut).toContain(`\`${block}\``)
+    }
+  })
+
+  it('names the constructor-only blocks the TYPE has, not ones it lost', () => {
+    // The complement sentence — the blocks `NexusConfig` has and the schema
+    // does not — was wrong in both directions at once: it listed `memory`,
+    // `security` and `communication`, which no longer exist on the type at all,
+    // and omitted `agents`, `learning` and `cost`, which do. Both halves are
+    // asserted off the source rather than restated, so the doc cannot agree
+    // with itself while disagreeing with `src/types.ts`.
+    const expected = nexusConfigBlocks().filter(b => !saveableConfigBlocks().includes(b)).sort()
+    expect(apiConstructorOnlyBlocks().sort()).toEqual(expected)
+
+    // And the named ones really are gone from the type, so the doc is not
+    // listing a block the source happens to still carry.
+    const blocks = nexusConfigBlocks()
+    for (const gone of ['memory', 'security', 'communication']) {
+      expect({ gone, onType: blocks.includes(gone) }).toEqual({ gone, onType: false })
     }
   })
 })
@@ -333,13 +400,17 @@ describe('#89 — RetryPolicy is gone rather than merely unused', () => {
     expect(types).toMatch(/^\s*timeout\?: number$/m)
   })
 
-  it('names the one stale copy left outside src/, rather than hiding it', () => {
-    // `TECHNICAL_DESIGN.md` is a design sketch, not a generated artefact, and
-    // #89 did not touch it: its `Task` sketch still carries
-    // `retryPolicy?: RetryPolicy`. Asserting the exact set of remaining
-    // occurrences means the day someone re-adds the field to a second doc, or
-    // deletes this one, the test says so — and it means a reader of this file
-    // is not misled into thinking the repository is clean.
+  it('names retryPolicy in no doc either, so src/ and the docs agree', () => {
+    // The docs are read as WRITTEN, comments and all: a design sketch that
+    // still shows `retryPolicy?: RetryPolicy` is a reader being told the field
+    // exists, and that is the same defect as the type having carried it. So
+    // this is a plain textual sweep of the shipped markdown — the one place
+    // where "documented on purpose" is not an acceptable escape hatch.
+    //
+    // The search space is enumerated rather than globbed so that a doc added
+    // under a new top-level directory is a visible omission here, not a silent
+    // hole in the sweep. `docs/` is read flat, which is a limit and not a
+    // claim of depth: a nested `docs/x/y.md` would be missed.
     const files = [
       join(REPO, 'README.md'),
       join(REPO, 'TECHNICAL_DESIGN.md'),
@@ -350,7 +421,7 @@ describe('#89 — RetryPolicy is gone rather than merely unused', () => {
       if (!file.endsWith('.md')) continue
       if (/\bretryPolicy\b/.test(readFileSync(file, 'utf-8'))) docs.push(rel(file))
     }
-    expect(docs.sort()).toEqual(['TECHNICAL_DESIGN.md'])
+    expect(docs.sort()).toEqual([])
   })
 })
 

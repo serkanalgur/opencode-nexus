@@ -939,7 +939,6 @@ interface Task {
   files: FileScope
   priority: 'low' | 'normal' | 'high' | 'critical'
   timeout?: number
-  retryPolicy?: RetryPolicy
 }
 
 interface ComplexityScore {

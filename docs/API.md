@@ -145,10 +145,14 @@ arguments to that method still win.
 block left out of that list would be a block *deleted* from the user's config on
 the first save.
 
-Blocks on the `NexusConfig` type that are **not** in this schema — `memory`,
-`security`, `learning`, `communication`, `cost` — are settable through the
-`NexusOrchestrator` constructor only, and are documented that way rather than
-as user-configurable, because they are not.
+Blocks on the `NexusConfig` type that are **not** in this schema — `agents`,
+`learning`, `cost` — are settable through the `NexusOrchestrator` constructor
+only, and are documented that way rather than as user-configurable, because they
+are not. (`cost` is optional, and `mergeConfig` fills in its default, so an
+omitted block behaves exactly as a configured one.) `memory`, `security` and
+`communication` are not listed because no such blocks exist on the type at all —
+they were deleted rather than left unread, and `saveProjectConfig` cannot drop
+what is not there.
 
 #### getConfig(): NexusFullConfig
 
