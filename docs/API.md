@@ -125,7 +125,11 @@ editing any level takes effect without a restart.
   "models": { "architect": "provider/model", "coder": "provider/model", /* ... */ },
   "budget": { "maxTotalCost": 10, "maxCostPerTask": 1, "maxCostPerAgent": 2, "alertThreshold": 0.2 },
   "selfHealing": { "enabled": true, "maxRetries": 3, "contextTransfer": true },
-  "dashboard": { "enabled": true, "port": 4747, "host": "127.0.0.1" }
+  "dashboard": { "enabled": true, "port": 4747, "host": "127.0.0.1" },
+  "notifications": { "enabled": true },
+  "gitFlow": { "enabled": true, "conventionalCommits": true, "requireBranch": true, "prBeforeMerge": true },
+  "effort": { "enabled": false, "maxEffort": "high", "minDifficulty": 0 },
+  "customRoles": []
 }
 ```
 
@@ -136,9 +140,10 @@ The other `dashboard` fields are the defaults for `startDashboard()`; explicit
 arguments to that method still win.
 
 `saveProjectConfig` and `saveGlobalConfig` write `models`, `budget`,
-`selfHealing` and `dashboard` — all four, unconditionally. They overwrite the
-whole file, so a block left out of that list would be a block *deleted* from the
-user's config on the first save.
+`selfHealing`, `dashboard`, `notifications`, `gitFlow`, `effort` and
+`customRoles` — all eight, unconditionally. They overwrite the whole file, so a
+block left out of that list would be a block *deleted* from the user's config on
+the first save.
 
 Blocks on the `NexusConfig` type that are **not** in this schema — `memory`,
 `security`, `learning`, `communication`, `cost` — are settable through the
@@ -168,7 +173,8 @@ saveProjectConfig(basePath: string): void
 ```
 
 Persist the current configuration to `<basePath>/.opencode/nexus.jsonc`. Writes
-`models`, `budget`, `selfHealing` and `dashboard` — see the schema above.
+`models`, `budget`, `selfHealing`, `dashboard`, `notifications`, `gitFlow`,
+`effort` and `customRoles` — see the schema above.
 
 #### saveGlobalConfig(): void
 
@@ -176,7 +182,7 @@ Persist the current configuration to `<basePath>/.opencode/nexus.jsonc`. Writes
 saveGlobalConfig(): void
 ```
 
-Persist the current configuration to `~/.config/opencode/nexus.jsonc`. Same four
+Persist the current configuration to `~/.config/opencode/nexus.jsonc`. Same eight
 blocks.
 
 #### applyPreset(name: string): void
