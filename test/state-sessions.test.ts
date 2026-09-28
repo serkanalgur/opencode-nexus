@@ -347,6 +347,210 @@ describe('getState().sessions', () => {
 })
 
 /**
+ * A finished agent, and what `getState()` says about it afterwards.
+ *
+ * The bug this pins: nothing settled the agent. `working` is written by the
+ * spawn tools and by `executeTask`, and every exit that was not one of the
+ * tools' own success branches — a `session.wait` that REJECTS rather than
+ * timing out, a throw from any later read — returned to the caller and left
+ * the row at `working` for the life of the process. So `getState().agents`
+ * reported a dead agent as busy, and because `sessionStateOfAgent` maps
+ * `working` to `running`, the SESSION row agreed with it: one session, in two
+ * views, both claiming spend that had stopped.
+ */
+describe('a finished agent', () => {
+  /** Spawn, mark it working the way a spawn tool does, then let it settle. */
+  async function spawnThenSettle(status: 'completed' | 'failed') {
+    const orchestrator = new NexusOrchestrator()
+    await orchestrator.initialize(makeCtx() as never)
+    const agent = await orchestrator.spawnAgent({ role: 'coder', model: MODEL }, { task: 't' })
+    agent.status = 'working'
+    orchestrator.settleAgent(agent.id, status)
+    return { orchestrator, agent }
+  }
+
+  it('is never published as `working` again once its outcome is known', async () => {
+    const { orchestrator } = await spawnThenSettle('completed')
+
+    const state = orchestrator.getState()
+    expect(state.agents[0]?.status).toBe('completed')
+    // The SESSION view reads the same field, so it cannot disagree with the
+    // agent view. 'settled', not 'idle' and above all not 'running'.
+    expect(state.sessions[0]?.state).toBe('settled')
+
+    await orchestrator.shutdown()
+  })
+
+  it('keeps its row, and its ownership, rather than dropping it from the map', async () => {
+    const { orchestrator, agent } = await spawnThenSettle('completed')
+
+    // The row SURVIVES the settle, and that is the point: removing the agent
+    // from `this.agents` would take its session row with it, and the only
+    // reason a session outlives its agent — the orphan `SessionStateView` exists
+    // to make visible — is `terminateAgent` dropping a session that is STILL
+    // RUNNING. A settled agent is not that case, and deleting it here would
+    // publish a fabricated `agentId: null` orphan.
+    const state = orchestrator.getState()
+    expect(state.agents.map(a => a.id)).toEqual([agent.id])
+    expect(state.sessions).toHaveLength(1)
+    // Still owned: the owner exists, so the orphan fields stay null only where
+    // they mean "nobody owns this".
+    expect(state.sessions[0]?.owned).toBe(true)
+    expect(state.sessions[0]?.agentId).toBe(agent.id)
+    expect(state.sessions[0]?.role).toBe('coder')
+
+    await orchestrator.shutdown()
+  })
+
+  it('reports a failure as terminal too, not as an agent still going', async () => {
+    const { orchestrator } = await spawnThenSettle('failed')
+
+    const state = orchestrator.getState()
+    expect(state.agents[0]?.status).toBe('failed')
+    expect(state.sessions[0]?.state).toBe('settled')
+
+    await orchestrator.shutdown()
+  })
+
+  it('keeps the FIRST terminal outcome, and lets termination outrank it', async () => {
+    const { orchestrator, agent } = await spawnThenSettle('completed')
+
+    // A late `failed` is a second reading of the same task, not a later stage
+    // of it, so it must not overwrite a completion.
+    orchestrator.settleAgent(agent.id, 'failed')
+    expect(orchestrator.getState().agents[0]?.status).toBe('completed')
+
+    // `terminated` is the escalation path and is stronger than either.
+    agent.status = 'working'
+    orchestrator.settleAgent(agent.id, 'completed')
+    agent.status = 'working'
+    orchestrator.settleAgent(agent.id, 'failed')
+    agent.status = 'working'
+    await orchestrator.terminateAgent(agent.id)
+
+    // `terminateAgent` deletes, which is its own documented behaviour: the
+    // session survives as the orphan the view exists for. The settle is not
+    // what removed it, and it must not have left a settled row behind to
+    // contradict that.
+    expect(orchestrator.getState().agents).toEqual([])
+    expect(orchestrator.getState().sessions).toEqual([])
+
+    // And a settle that arrives after the agent is gone is a no-op, not a
+    // resurrection: a spawn tool unwinding after a termination must not
+    // re-insert the row it was about to settle.
+    expect(() => orchestrator.settleAgent(agent.id, 'failed')).not.toThrow()
+    expect(orchestrator.getState().agents).toEqual([])
+
+    await orchestrator.shutdown()
+  })
+
+  it('refreshes lastActivity, so a settled row is not evicted an hour after it SPAWNED', async () => {
+    const orchestrator = new NexusOrchestrator()
+    await orchestrator.initialize(makeCtx() as never)
+    const agent = await orchestrator.spawnAgent({ role: 'coder', model: MODEL }, { task: 't' })
+    // An hour and a half ago, so the stale-cleanup sweep would drop the row
+    // today. This is what `cleanupStaleData` keys on.
+    agent.lastActivity = new Date(Date.now() - 90 * 60 * 1000)
+
+    agent.status = 'working'
+    orchestrator.settleAgent(agent.id, 'completed')
+    orchestrator['cleanupStaleData']()
+
+    expect(orchestrator.getState().agents.map(a => a.id)).toEqual([agent.id])
+
+    await orchestrator.shutdown()
+  })
+})
+
+/**
+ * `sessions[]` is the one collection a reader is entitled to treat as fully
+ * populated, so these pin the whole-shape invariant rather than one row: every
+ * row names a session and states something about it.
+ *
+ * Pass 1 of `sessionViews()` already skipped an agent with no session. Passes 2
+ * and 3 — the collection records, keyed by session id — did not, and a record
+ * with an empty id built a row whose `id` was empty: a row that names no
+ * session. It is not reachable from a real ledger (one is armed only for an
+ * agent that has a session), which is exactly why it needed asserting rather
+ * than assuming.
+ */
+describe('the shape of sessions[]', () => {
+  /** Assert the whole-collection invariant, so a future row type cannot skip it. */
+  function expectNoHoles(state: OrchestratorState): void {
+    for (const row of state.sessions) {
+      expect(typeof row.id).toBe('string')
+      expect(row.id.length).toBeGreaterThan(0)
+      expect(row.state === null || row.state === undefined).toBe(false)
+      expect(['running', 'idle', 'abandoned', 'settled']).toContain(row.state)
+    }
+  }
+
+  it('never carries a row with an empty id, from an agent or from a collection record', async () => {
+    const orchestrator = new NexusOrchestrator()
+    await orchestrator.initialize(makeCtx() as never)
+    const agent = await orchestrator.spawnAgent({ role: 'coder', model: MODEL }, { task: 't' })
+
+    // A real row exists first — the invariant is not vacuous on an empty list.
+    expect(orchestrator.getState().sessions).toHaveLength(1)
+    expectNoHoles(orchestrator.getState())
+
+    // Pass 1: an agent whose session never resolved. Already guarded, and
+    // asserted so the two passes cannot drift apart.
+    agent.sessionID = ''
+    expect(orchestrator.getState().sessions).toEqual([])
+
+    // Pass 3: an abandoned record keyed by nothing. Before the guard this built
+    // `{ id: '', state: 'abandoned' }` — a row naming no session, published
+    // with a spend figure attached to it.
+    orchestrator['uncollected'].set('', {
+      sessionID: '',
+      taskId: 'node-x',
+      agentId: agent.id,
+      model: MODEL,
+      lastKnownTokens: 1000,
+      observedUncollected: 0.003,
+    } as never)
+
+    expect(orchestrator.getState().sessions).toEqual([])
+    expectNoHoles(orchestrator.getState())
+
+    // And a well-formed sibling of that record is still published: the guard
+    // drops a row with no key, not every row that arrives in the same pass.
+    orchestrator['uncollected'].set('ses_ok', {
+      sessionID: 'ses_ok',
+      taskId: 'node-y',
+      agentId: agent.id,
+      model: MODEL,
+      lastKnownTokens: 1000,
+      observedUncollected: 0.003,
+    } as never)
+    const rows = orchestrator.getState().sessions
+    expect(rows.map(r => r.id)).toEqual(['ses_ok'])
+    expectNoHoles(orchestrator.getState())
+
+    await orchestrator.shutdown()
+  })
+
+  it('holds for every row a finished task leaves behind, not just the first', async () => {
+    const { orchestrator } = await runTask(makeCtx())
+    orchestrator['uncollected'].set('ses_second', {
+      sessionID: 'ses_second',
+      taskId: 'node-2',
+      agentId: 'agent-gone',
+      model: MODEL,
+      lastKnownTokens: 2000,
+      observedUncollected: 0.006,
+    } as never)
+
+    const state = orchestrator.getState()
+    expect(state.sessions).toHaveLength(2)
+    expectNoHoles(state)
+
+    await orchestrator.shutdown()
+  })
+})
+
+/**
  * Time a task out, terminate its agent, and return the live orchestrator.
  *
  * `settle: 'pending'` leaves the collection outstanding (a long grace window

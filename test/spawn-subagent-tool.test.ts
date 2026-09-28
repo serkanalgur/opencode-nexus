@@ -376,3 +376,171 @@ describe('nexus.spawn executor — single task delivery', () => {
     expect(ctx.session.wait).toHaveBeenCalledWith({ sessionID: CHILD_SESSION_ID })
   })
 })
+
+/**
+ * Issue #100, at the level it shipped: a spawn tool that gives up leaves the
+ * agent it spawned sitting at `working` in the published state forever.
+ *
+ * The tools mark the agent `working` as soon as `spawnAgent` returns, and the
+ * only writer of a terminal status on that path was the tool body's own success
+ * branch. Every other exit — and the ordinary one is a `session.wait` that
+ * REJECTS rather than timing out, which is what an aborted or evicted child
+ * session does — returned "Failed to spawn agent" / "Delegate failed" to the
+ * caller and dropped out with the row still `working`. The session row agreed,
+ * because `sessionStateOfAgent` maps `working` to `running`: one dead session,
+ * reported as spending in both views, with no way for a reader to tell.
+ *
+ * These read the state through the `dashboard` tool, which is `getState()`
+ * verbatim — the same payload `/api/state` serves.
+ */
+describe('a spawn tool that gives up (issue #100)', () => {
+  /** The published state, via the tool that serves `getState()` verbatim. */
+  async function state(tools: Map<string, any>): Promise<any> {
+    const dashboard = tools.get('dashboard')
+    expect(dashboard).toBeDefined()
+    return JSON.parse((await dashboard.execute({})).content)
+  }
+
+  /**
+   * Boot the plugin with a `session.wait` that rejects — the way a real child
+   * session does when it is aborted, evicted, or gone before it went idle.
+   */
+  async function bootWithRejectingWait() {
+    const booted = await bootPlugin({ withSubagentTool: true })
+    booted.ctx.session.wait = mock(() =>
+      Promise.reject(new Error('SessionNotFoundError: ses_child_123')))
+    return booted
+  }
+
+  it('does not leave the spawn tool\'s agent working', async () => {
+    const { ctx, tools } = await bootWithRejectingWait()
+
+    const result = await tools.get('spawn').execute(
+      { role: 'explorer', task: 'Find the leak', model: 'opencode/test-model', wait: true, timeout: 5000 },
+      { sessionID: 'ses_parent', agent: 'nexus-orchestrator', messageID: 'msg_1', id: 'call_1' },
+    )
+
+    // The tool still reports rather than throwing at the caller, and it reports
+    // through its own partial-result branch — a rejected poll reaches that
+    // branch, not the outer `catch`, so the copy is deliberately not asserted
+    // here. What is under test is what it left in the STATE.
+    expect(result.content).toContain(CHILD_SESSION_ID)
+
+    const s = await state(tools)
+    // THE ASSERTION. Pre-fix this row read `working`, and the session row
+    // below read `running`, for the rest of the process.
+    expect(s.agents).toHaveLength(1)
+    expect(s.agents[0].status).not.toBe('working')
+    expect(s.agents[0].status).toBe('failed')
+    // And the session view, which reads the same field, cannot disagree.
+    expect(s.sessions).toHaveLength(1)
+    expect(s.sessions[0].state).not.toBe('running')
+  })
+
+  it('does not leave the delegate tool\'s agent working', async () => {
+    const { tools } = await bootWithRejectingWait()
+
+    const result = await tools.get('delegate').execute(
+      { role: 'reviewer', task: 'Review the parser', model: 'opencode/test-model', timeout: 5000 },
+      { sessionID: 'ses_parent', agent: 'nexus-orchestrator', messageID: 'msg_2', id: 'call_2' },
+    )
+
+    expect(result.content).toContain('Delegate failed')
+
+    const s = await state(tools)
+    expect(s.agents).toHaveLength(1)
+    expect(s.agents[0].status).not.toBe('working')
+    expect(s.sessions[0].state).not.toBe('running')
+  })
+
+  it('keeps the agent row, because a settled agent is not an orphan', async () => {
+    const { tools } = await bootWithRejectingWait()
+
+    await tools.get('delegate').execute(
+      { role: 'reviewer', task: 'Review the parser', model: 'opencode/test-model', timeout: 5000 },
+      { sessionID: 'ses_parent', agent: 'nexus-orchestrator', messageID: 'msg_2', id: 'call_2' },
+    )
+
+    const s = await state(tools)
+    // The row SURVIVES, owned. Deleting the agent here — the way
+    // `terminateAgent` does — would publish the session as an `owned: false`
+    // orphan, which is reserved for a session still generating after its agent
+    // was escalated away. This one is finished; it is a different fact.
+    expect(s.agents).toHaveLength(1)
+    expect(s.sessions[0].owned).toBe(true)
+    expect(s.sessions[0].agentId).toBe(s.agents[0].id)
+    expect(s.sessions[0].state).toBe('settled')
+  })
+
+  it('settles when the spawn tool fails AFTER the spawn, not only on a dead poll', async () => {
+    // The other half of the same leak, on a different exit. A rejected `wait`
+    // is caught by the tool's own partial-result branch; a throw from anything
+    // after that — a failing `storage.set` here, a throw from a read — reaches
+    // the tool's OUTER `catch`, which used to return "Failed to spawn agent"
+    // with the row still at `working`. Two distinct exits, one invariant, so
+    // both are driven.
+    const { ctx, tools } = await bootPlugin({ withSubagentTool: true })
+    const healthySet = ctx.storage.set
+    ctx.storage.set = mock(() => Promise.reject(new Error('storage is down')))
+
+    const result = await tools.get('spawn').execute(
+      { role: 'explorer', task: 'Find the leak', model: 'opencode/test-model', wait: true, timeout: 5000 },
+      { sessionID: 'ses_parent', agent: 'nexus-orchestrator', messageID: 'msg_1', id: 'call_1' },
+    )
+
+    expect(result.content).toContain('Failed to spawn agent')
+    // Restored before reading: the `dashboard` tool persists the state it
+    // returns through the same `storage.set`, and a read that fails is not a
+    // measurement.
+    ctx.storage.set = healthySet
+    const s = await state(tools)
+    expect(s.agents[0].status).not.toBe('working')
+    expect(s.sessions[0].state).not.toBe('running')
+  })
+
+  it('settles a dead poll as completed when the session did produce output', async () => {
+    // The other side of the dead-poll branch, and the reason the settle is at
+    // each exit rather than on entry to the catch. A rejected poll says nothing
+    // about whether the child finished; the session's own messages do. When
+    // they carry an answer, 'failed' would be the wrong terminal status for a
+    // task that produced its result — and settling to 'failed' on entry would
+    // have made that permanent, since the first terminal outcome wins.
+    const { ctx, tools } = await bootWithRejectingWait()
+    ctx.session.context = mock(() => Promise.resolve([
+      { type: 'assistant', content: [{ type: 'text', text: 'the answer' }] },
+    ]))
+
+    const result = await tools.get('spawn').execute(
+      { role: 'explorer', task: 'Find the leak', model: 'opencode/test-model', wait: true, timeout: 5000 },
+      { sessionID: 'ses_parent', agent: 'nexus-orchestrator', messageID: 'msg_1', id: 'call_1' },
+    )
+    expect(result.content).toContain('the answer')
+
+    const s = await state(tools)
+    expect(s.agents[0].status).toBe('completed')
+    expect(s.sessions[0].state).toBe('settled')
+  })
+
+  it('publishes no session row with a missing id or state, on any path', async () => {
+    // The second half of #100, asserted over the whole collection rather than
+    // one row: `sessions[]` is the one list a reader may treat as fully
+    // populated, so an empty `id` or an absent `state` anywhere in it is a
+    // defect even when every other field on that row is fine.
+    for (const wait of [true, false]) {
+      const { tools } = await bootWithRejectingWait()
+      await tools.get('spawn').execute(
+        { role: 'explorer', task: 'Find the leak', model: 'opencode/test-model', wait, timeout: 5000 },
+        { sessionID: 'ses_parent', agent: 'nexus-orchestrator', messageID: 'msg_1', id: 'call_1' },
+      )
+
+      const s = await state(tools)
+      for (const row of s.sessions) {
+        expect(typeof row.id).toBe('string')
+        expect(row.id.length).toBeGreaterThan(0)
+        expect(row.state).not.toBeNull()
+        expect(row.state).not.toBeUndefined()
+        expect(['running', 'idle', 'abandoned', 'settled']).toContain(row.state)
+      }
+    }
+  })
+})
