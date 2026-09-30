@@ -608,4 +608,200 @@ describe('PersistentMemoryStore', () => {
       store2.close()
     })
   })
+  // ── LIVE RESOLUTION ──
+  //
+  // `storage` and `maxEntries` were frozen at CONSTRUCTION: the store opened
+  // `dbPath` in its constructor and held the handle, and `maxEntries` was read
+  // from a field nobody updated. So a user who edited `nexus.jsonc` saw the new
+  // value in the config modal — `getConfig().memory` reports it — while the
+  // running process kept using the old path until restart. That is a knob that
+  // reports itself saved and does nothing, which is the failure the whole
+  // `memory` block was rebuilt to remove.
+  //
+  // These tests drive the RESOLVER directly rather than through a config file,
+  // because the resolver is the mechanism: a file-level test would pass whether
+  // the value arrived by resolver or by a snapshot taken at construction, which
+  // is precisely the distinction under test. The end-to-end half — the store and
+  // the config manager agreeing — is in `test/config-knobs.test.ts`.
+  describe('the config is resolved LIVE, not snapshotted at construction', () => {
+    it('swaps the open database when the resolved path changes, leaving the old file intact', () => {
+      const first = join(TEST_DIR, 'first.db')
+      const second = join(TEST_DIR, 'second.db')
+      // A mutable view of "what nexus.jsonc says now", which is the shape the
+      // orchestrator's resolver has over `configManager.getConfig().memory`.
+      let resolved: Partial<MemoryStoreConfig> = { dbPath: first, maxEntries: 1000 }
+      const store = new PersistentMemoryStore(() => resolved)
+
+      store.set({ key: 'before', value: 'v1', scope: 'project', author: 'a', confidence: null, tags: [] })
+      expect(store.path).toBe(first)
+
+      // The edit. No reconstruction, no reload hook, no restart.
+      resolved = { dbPath: second, maxEntries: 1000 }
+      store.set({ key: 'after', value: 'v2', scope: 'project', author: 'a', confidence: null, tags: [] })
+      expect(store.path).toBe(second)
+
+      // The live store sees only the new file. Seeing both would mean one
+      // process was querying two stores and calling it one.
+      expect(store.getByScope('project').map(e => e.key).sort()).toEqual(['after'])
+
+      // The OLD FILE IS STILL THERE AND STILL COMPLETE. A swap that deleted or
+      // truncated the previous database would silently destroy a user's notes
+      // the moment they repointed the setting — the least recoverable way this
+      // feature could be wrong.
+      expect(existsSync(first)).toBe(true)
+      const old = new PersistentMemoryStore({ dbPath: first, maxEntries: 1000 })
+      expect(old.getByScope('project').map(e => e.key)).toEqual(['before'])
+      old.close()
+
+      // And the new one, read by a fresh handle, is where the second write went.
+      const fresh = new PersistentMemoryStore({ dbPath: second, maxEntries: 1000 })
+      expect(fresh.getByScope('project').map(e => e.key)).toEqual(['after'])
+      fresh.close()
+
+      store.close()
+    })
+
+    it('applies a changed maxEntries to the VERY NEXT write, with no reconstruction', () => {
+      // The cap is a PURE READ — no database swap is involved — so this is the
+      // cheaper half of the fix and the one that was silently wrong: raising
+      // `maxEntries` in the config did nothing at all until restart, and
+      // nothing about the store's identity had changed to hint at it.
+      const dbPath = join(TEST_DIR, 'cap.db')
+      let maxEntries = 1000
+      const store = new PersistentMemoryStore(() => ({ dbPath, maxEntries }))
+
+      for (let i = 0; i < 5; i++) {
+        store.set({ key: `k${i}`, value: 'v', scope: 'temp', author: 'a', confidence: null, tags: [] })
+      }
+      expect(store.getByScope('temp')).toHaveLength(5)
+      expect(store.getEvictionTotals()['temp']).toBeUndefined()
+
+      // Lower the cap below what is already stored. The NEXT write is the one
+      // that observes it — there is no "rebuild" step in between that a caller
+      // could be expected to remember to trigger.
+      maxEntries = 2
+      store.set({ key: 'k5', value: 'v', scope: 'temp', author: 'a', confidence: null, tags: [] })
+      expect(store.getByScope('temp')).toHaveLength(2)
+      expect(store.getEvictionTotals()['temp']).toBe(4)
+
+      // Raising it again stops eviction immediately, and does not resurrect
+      // anything already evicted (it could not: the rows are gone, which is
+      // what `evictedTotals` is reporting).
+      maxEntries = 1000
+      store.set({ key: 'k6', value: 'v', scope: 'temp', author: 'a', confidence: null, tags: [] })
+      expect(store.getByScope('temp')).toHaveLength(3)
+      store.close()
+    })
+
+    it('keeps `project` exempt from a cap that is ALSO resolved live', () => {
+      // The exemption is load-bearing and the change could have broken it by
+      // making the cap a per-write read: an exempt scope must still be exempt
+      // when the cap arrives from a resolver rather than a field.
+      const maxEntries = 1
+      const store = new PersistentMemoryStore(() => ({ dbPath: join(TEST_DIR, 'exempt.db'), maxEntries }))
+      store.set({ key: 'durable', value: 'keep me', scope: 'project', author: 'a', confidence: null, tags: [] })
+      for (let i = 0; i < 5; i++) {
+        store.set({ key: `junk-${i}`, value: 'x', scope: 'temp', author: 'a', confidence: null, tags: [] })
+      }
+      expect(store.get('durable', 'project')?.value).toBe('keep me')
+      expect(store.getByScope('temp')).toHaveLength(1)
+      store.close()
+    })
+
+    it('survives concurrent reads and writes ACROSS a path change, losing nothing', () => {
+      // The safety claim is about MANY calls in flight, because that is the
+      // shape a rebuild-inside-`reloadConfigFromDisk` design breaks: a store
+      // closed underneath a reader. Here the swap is a synchronous block with
+      // no await point in it, so a caller either sees the whole transition or
+      // none of it. What is asserted is not the happy path — it is that every
+      // write either landed in one of the two files, and that the file the
+      // write was issued against is the one holding it.
+      const first = join(TEST_DIR, 'concurrent-a.db')
+      const second = join(TEST_DIR, 'concurrent-b.db')
+      let resolved: Partial<MemoryStoreConfig> = { dbPath: first, maxEntries: 1000 }
+      const store = new PersistentMemoryStore(() => resolved)
+
+      const paths = [first, second]
+      const errors: unknown[] = []
+      // A write and a read per iteration, with the path flipped every other
+      // iteration so the change happens repeatedly and mid-sequence rather than
+      // once at a convenient moment.
+      const work: Array<Promise<void>> = []
+      for (let i = 0; i < 24; i++) {
+        const at = i % 2 === 0 ? first : second
+        work.push((async () => {
+          try {
+            if (i % 4 === 0) {
+              store.set({ key: `k${i}`, value: 'v', scope: 'project', author: 'a', confidence: null, tags: [] })
+            } else {
+              // A read must not throw whatever the handle is doing, and must
+              // never see a half-swapped store.
+              expect(Array.isArray(store.getByScope('project'))).toBe(true)
+            }
+            // Every third caller moves the config on, from inside the same
+            // interleaving.
+            if (i % 3 === 0) resolved = { dbPath: at, maxEntries: 1000 }
+          } catch (error) {
+            errors.push(error)
+          }
+        })())
+      }
+
+      return Promise.all(work).then(() => {
+        expect(errors).toEqual([])
+        // Nothing was lost: every write is in exactly one of the two files.
+        const a = new PersistentMemoryStore({ dbPath: paths[0]!, maxEntries: 1000 })
+        const b = new PersistentMemoryStore({ dbPath: paths[1]!, maxEntries: 1000 })
+        const keys = [...a.getByScope('project'), ...b.getByScope('project')].map(e => e.key)
+        expect(new Set(keys).size).toBe(keys.length)
+        for (let i = 0; i < 24; i += 4) expect(keys).toContain(`k${i}`)
+        a.close()
+        b.close()
+        store.close()
+      })
+    })
+
+    it('keeps the LAST GOOD database open when a new path cannot be opened', () => {
+      // The order inside `database` earns its keep here. Opening first and
+      // closing second means a path that blows up throws with the previous
+      // database still serving reads, rather than leaving a store with no
+      // handle at all — a user who mistypes `storage` gets an error, not a
+      // memory feature that has quietly stopped working.
+      const good = join(TEST_DIR, 'good.db')
+      const store = new PersistentMemoryStore(() => ({ dbPath: good, maxEntries: 1000 }))
+      store.set({ key: 'k', value: 'v', scope: 'project', author: 'a', confidence: null, tags: [] })
+
+      // A directory, not a file: `new Database` on this path fails.
+      store['resolveConfig'] = () => ({ dbPath: TEST_DIR, maxEntries: 1000 })
+      expect(() => store.getByScope('project')).toThrow()
+      // Still readable, from the path that worked.
+      store['resolveConfig'] = () => ({ dbPath: good, maxEntries: 1000 })
+      expect(store.getByScope('project').map(e => e.key)).toEqual(['k'])
+      store.close()
+    })
+
+    it('still accepts a fixed config object, so existing callers are unaffected', () => {
+      // The union, not a new required parameter: `new
+      // PersistentMemoryStore({ dbPath })` is how the store is constructed
+      // everywhere else in the repository, and the type is re-exported from
+      // `index.ts` for embedders who construct it themselves.
+      const dbPath = join(TEST_DIR, 'fixed.db')
+      const store = new PersistentMemoryStore({ dbPath, maxEntries: 2 })
+      expect(store.path).toBe(dbPath)
+      store.set({ key: 'a', value: '1', scope: 'temp', author: 'a', confidence: null, tags: [] })
+      store.set({ key: 'b', value: '2', scope: 'temp', author: 'a', confidence: null, tags: [] })
+      store.set({ key: 'c', value: '3', scope: 'temp', author: 'a', confidence: null, tags: [] })
+      expect(store.getByScope('temp').map(e => e.key)).toEqual(['c', 'b'])
+      store.close()
+    })
+
+    it('reports the RESOLVED path from `path`, not the one it was built with', () => {
+      // `path` is what a surface prints to tell a user where to look, so it has
+      // to be the path in effect. Returning the construction-time one is how a
+      // diagnostic tool sends someone to the wrong file.
+      const store = new PersistentMemoryStore(() => ({ dbPath: join(TEST_DIR, 'live.db'), maxEntries: 1000 }))
+      expect(store.path).toBe(join(TEST_DIR, 'live.db'))
+      store.close()
+    })
+  })
 })

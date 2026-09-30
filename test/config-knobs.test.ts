@@ -1,6 +1,6 @@
 import { describe, it, expect, mock, afterAll } from 'bun:test'
 import * as realOs from 'node:os'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, existsSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { blankNonCode, readDashboardHtml, readSourceFile, interfaceFieldNames } from './helpers/dashboard-page'
@@ -339,9 +339,11 @@ describe('retryDelay is file-settable, and round-trips', () => {
     // `effort` is in this list because this test is the mechanism that put it
     // there: the block was added to `getSaveableConfig()` and this assertion
     // failed until the list named it, which is the whole reason the list is
-    // written out in full instead of being derived.
+    // written out in full instead of being derived. `memory` is here for the
+    // same reason, and the failure it would have caused is the quiet one — a
+    // dropped `storage` leaves the store writing to a file nothing names.
     expect(Object.keys(written).sort()).toEqual([
-      'budget', 'customRoles', 'dashboard', 'effort', 'gitFlow', 'models', 'notifications', 'selfHealing',
+      'budget', 'customRoles', 'dashboard', 'effort', 'gitFlow', 'memory', 'models', 'notifications', 'selfHealing',
     ])
 
     // The custom role survived, and so did the settings a user would be most
@@ -758,6 +760,120 @@ describe('a file-set knob reaches the ORCHESTRATOR, not just the config manager'
     // and brace-matches, so this reads the real block.
     expect(declaredBlockKeys('budget', config, types)).not.toContain('hardLimit')
     expect(interfaceFieldNames(types, 'BudgetConstraint')).toContain('hardLimit')
+  })
+})
+
+describe('the memory seed does not DELETE the defaults it is meant to fall through to', () => {
+  /**
+   * WHY THIS SUITE MISSED IT, stated once so the next test here knows the trap.
+   *
+   * Every other test in this file builds a BARE `NexusConfigManager`, so the
+   * 8th-seed argument is either absent or a real value. The orchestrator is the
+   * only caller that passes a literal of possibly-absent fields
+   * (`{ storage: cfg?.dbPath, maxEntries: cfg?.maxEntries }`), and object spread
+   * copies own enumerable keys INCLUDING `undefined`-valued ones — so
+   * `{ ...DEFAULT_CONFIG.memory, { storage: undefined } }` does not fall through
+   * to the default, it DELETES the key. `??` would have fallen through; spread
+   * does not. That is the whole defect.
+   */
+  it('keeps all three keys when the seed leaves storage and maxEntries undefined', () => {
+    const manager = new NexusConfigManager(
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      { storage: undefined, maxEntries: undefined },
+    )
+    const memory = manager.getConfig().memory
+    // The WHOLE default, key for key — not "storage is a string", which a
+    // partial assertion would also pass if only `enabled` had survived.
+    expect(memory).toEqual({
+      enabled: true,
+      storage: expect.any(String),
+      maxEntries: expect.any(Number),
+    })
+    expect(Object.keys(memory).sort()).toEqual(['enabled', 'maxEntries', 'storage'])
+    // And they are the VALUES, not merely the keys.
+    expect((memory.storage as string).length).toBeGreaterThan(0)
+    expect(memory.maxEntries).toBe(1000)
+  })
+
+  it('reports a storage path on the ORCHESTRATOR, matching the store it opened', () => {
+    // The disagreement this is really about: `getConfig().memory.storage` and
+    // `memoryStore.path` are two literals of the same default, and an empty
+    // string on the config side with a real path on the store side is exactly
+    // what the mirror comments in `config.ts` and `memory-store.ts` exist to
+    // prevent.
+    const orchestrator = new NexusOrchestrator()
+    const memory = orchestrator.configManager.getConfig().memory
+    expect(typeof memory.storage).toBe('string')
+    expect((memory.storage as string).length).toBeGreaterThan(0)
+    expect(memory).toEqual(orchestrator.configManager.getConfig().memory)
+  })
+
+  it('gives an ORCHESTRATOR-configured manager the whole three-key default', () => {
+    // The same seed the orchestrator actually passes — a literal of
+    // possibly-absent fields — built the way the orchestrator builds it. The
+    // tests above this one all use a BARE manager, which is precisely the gap
+    // that let the `undefined`-valued spread delete two keys and go unnoticed:
+    // the orchestrator is the only caller that passes absent fields on
+    // purpose, so it is the only caller the seed has to survive.
+    const manager = new NexusConfigManager(
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      { storage: undefined, maxEntries: undefined },
+    )
+    expect(manager.getConfig().memory).toEqual({
+      enabled: true,
+      storage: expect.any(String),
+      maxEntries: 1000,
+    })
+  })
+
+  it('has the live store resolve to the SAME path the config reports', () => {
+    // THE AGREEMENT THIS CHANGE EXISTS TO MAKE. `memory.storage` used to be
+    // frozen into the store's constructor argument while the config manager
+    // read it live, so the two could diverge the instant a file was edited —
+    // and the config panel would report the edit as saved while the app used
+    // the old path. The store now resolves through the config manager, so
+    // `memoryStore.path` and `getConfig().memory.storage` are the same string
+    // by construction, and this asserts it on a REAL orchestrator rather than on
+    // a bare config manager, because the wiring is the thing that can regress.
+    const orchestrator = new NexusOrchestrator()
+    const memory = orchestrator.configManager.getConfig().memory
+    expect(orchestrator.memoryStore.path).toBe(memory.storage)
+    // And it is the real default rather than an empty string, which is what a
+    // deleted key looks like from this side.
+    expect(orchestrator.memoryStore.path).toContain(join('.local', 'share', 'opencode-nexus', 'memory.db'))
+
+    // A session-level override — the storage precedence level, which is the
+    // level a TUI edit lands on — moves BOTH sides together, with no restart
+    // and no reconstruction of the store.
+    const moved = join(tmpdir(), 'nexus-config-knobs-live.db')
+    // A PARTIAL `memory` block is enough, because `getConfig()` merges key by
+    // key across the levels rather than replacing the object — which is the same
+    // reason a TUI edit that toggles one key cannot silently reset the other two.
+    orchestrator.configManager.updateStorageConfig({
+      memory: { ...memory, storage: moved },
+    } as never)
+    expect(orchestrator.configManager.getConfig().memory.storage).toBe(moved)
+    expect(orchestrator.memoryStore.path).toBe(moved)
+    // And the store really writes there, so this is a resolution and not a
+    // string comparison that would pass with a stale handle.
+    orchestrator.memoryStore.set({ key: 'k', value: 'v', scope: 'temp', author: 'a', confidence: null, tags: [] })
+    expect(existsSync(moved)).toBe(true)
+    orchestrator.memoryStore.close()
+    try { rmSync(moved, { force: true }) } catch {}
+  })
+
+  it('carries all three memory keys into the file a save writes', () => {
+    // The consequence that made this a data-loss bug rather than a display one:
+    // `getSaveableConfig()` spreads `{ ...current.memory }`, so a block that lost
+    // two keys wrote `"memory": {"enabled": true}` — the user's `storage` absent
+    // from the very file the tool had just written.
+    const manager = new NexusConfigManager()
+    manager.updateStorageConfig(manager.getConfig() as never)
+    expect(manager['getSaveableConfig']().memory).toEqual({
+      enabled: true,
+      storage: expect.any(String),
+      maxEntries: expect.any(Number),
+    })
   })
 })
 

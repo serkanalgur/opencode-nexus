@@ -2,10 +2,10 @@
 import { Plugin } from "@opencode/plugin/tui"
 import { NexusConfigManager } from "./config"
 import {
-  booleanOptions,
   commitConfigModel,
   commitConfigText,
   commitConfigToggle,
+  configDirtyCount,
   configFieldsScreen,
   configIsDirty,
   configOptionDescription,
@@ -14,6 +14,8 @@ import {
   configPathLabel,
   configPromptDescription,
   configSaveUpdate,
+  configScreenTitle,
+  configSearchQuery,
   configScreenOptions,
   configSelect,
   configUp,
@@ -1275,10 +1277,27 @@ export default Plugin.define({
       const discovery = discoverConfig(base)
       let screen: ConfigScreen = { kind: 'blocks' }
 
+      /**
+       * How many leaves of the whole config have moved — a FUNCTION, never a
+       * `const`.
+       *
+       * `draft` is reassigned on every staged edit, so a count captured when a
+       * screen was built would be frozen at whatever the draft held then. That
+       * is a real bug rather than a style preference: the number is what tells a
+       * user their edit landed, so a frozen one reports the state before it.
+       */
+      const changes = (): number => configDirtyCount(discovery, base, draft)
+
       /** The row for one option. The row's VALUE is the option itself. */
       const toDialogRow = (option: ConfigOption): ConfigRow<ConfigOption> => ({
         title: configOptionTitle(option, configSaveScope),
-        description: configOptionDescription(option, draft, configIsDirty(base, draft)),
+        description: configOptionDescription(
+          option,
+          draft,
+          base,
+          configIsDirty(base, draft),
+          changes()
+        ),
         value: option,
         ...(configOptionDisabled(option) ? { disabled: true } : {})
       })
@@ -1312,19 +1331,16 @@ export default Plugin.define({
       const runEditor = async (field: ConfigField): Promise<ConfigScreen> => {
         const back = configFieldsScreen(field)
         switch (editorFor(field)) {
-          case 'boolean': {
-            // TWO ROWS, because the host has no checkbox: `dialog.select`
-            // resolves a single value out of a list, and a switch in a list can
-            // only be two rows you pick between. The glyph is in the row's title.
-            const rows = booleanOptions(configValueAt(draft, field.path) === true)
-            const chosen = await context.ui.dialog.select({
-              title: configPathLabel(field.path),
-              options: rows.map(toDialogRow)
-            })
-            if (chosen !== undefined) stage(commitConfigToggle(field, chosen))
+          case 'boolean':
+            // Nothing to open. The boolean's OWN screen is the toggle surface:
+            // `configSelect` answers a `switch` row with `stay`, and the loop
+            // below handles it in its `case 'stay'` arm. This is what removes
+            // the second dialog a boolean used to cost — there is no `select`
+            // here to open, so pressing Enter on a boolean flips it in place and
+            // comes straight back to the block's list.
             return back
-          }
           case 'number':
+          case 'path':
           case 'text': {
             const typed = await context.ui.dialog.prompt({
               title: configPathLabel(field.path),
@@ -1373,12 +1389,10 @@ export default Plugin.define({
         const options = configScreenOptions(screen, discovery, configSaveScope, field =>
           configValueAt(draft, field.path)
         )
-        const title =
-          screen.kind === 'blocks'
-            ? 'Nexus configuration'
-            : screen.kind === 'fields'
-              ? `Nexus configuration — ${screen.block}`
-              : `Nexus configuration — ${configPathLabel(screen.field.path)}`
+        // The title, including "N changes not written" on the hub, is
+        // `configScreenTitle`'s decision. It was a ternary here, which is three
+        // strings this file had no test for.
+        const title = configScreenTitle(screen, changes())
 
         // `undefined` from the host IS the escape key, and the only way out of a
         // list. That is why escape needs no binding here: the host owns it, and
@@ -1402,8 +1416,30 @@ export default Plugin.define({
               // edit in this flow will be written to, and nothing is written
               // until save, so it is safe to change after staging them.
               configSaveScope = chosen.scope === 'project' ? 'global' : 'project'
+            } else if (chosen.kind === 'switch') {
+              // A boolean is answered in place — there is no second dialog for it
+              // any more. `commitConfigToggle` stays the ONLY way a boolean
+              // reaches the draft, and this is its one call site, which is why
+              // the write is here rather than in `runEditor`: an editor screen
+              // that answered its own widget would be a second path.
+              stage(commitConfigToggle(chosen.field, chosen))
             }
             break
+          case 'ask': {
+            // The hub's search row. The flow named a screen but no query — the
+            // only source of a query is this prompt — so a dismissal or an empty
+            // line leaves the user exactly where they were rather than dropping
+            // them into a search that matched every setting in the config.
+            const typed = await context.ui.dialog.prompt({
+              title: 'Search settings',
+              description: 'Block names and setting names',
+              placeholder: 'e.g. maxTotalCost, or budget'
+            })
+            const query = configSearchQuery(typed)
+            if (query === undefined) break
+            screen = { kind: 'search', query }
+            break
+          }
           case 'to':
             screen =
               outcome.screen.kind === 'editor'
