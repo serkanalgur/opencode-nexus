@@ -15,7 +15,6 @@ mock.module('node:os', () => ({ ...realOs, default: realOs, homedir: () => SANDB
 
 const { NexusConfigManager } = await import('../src/config')
 const {
-  blockMatches,
   blockOptions,
   booleanOptions,
   commitConfigModel,
@@ -23,29 +22,28 @@ const {
   commitConfigToggle,
   configBlockDirtyCount,
   configDirtyCount,
+  configFieldContext,
+  configFieldDirty,
   configFieldsScreen,
+  configHubCurrent,
   configIsDirty,
   configOptionDescription,
   configOptionDisabled,
+  configOptionFooter,
   configOptionTitle,
   configPathLabel,
   configPromptDescription,
   configSaveUpdate,
   configScreenOptions,
   configScreenTitle,
-  configSearchQuery,
   configSelect,
   configUp,
   configValueAt,
   describeConfigValue,
   discoverConfig,
   editorFor,
-  fieldMatches,
   fieldOptions,
-  filterConfigBlocks,
-  filterConfigFields,
   parseConfigNumber,
-  searchOptions,
   setConfigValue
 } = await import('../src/config-flow')
 
@@ -126,18 +124,9 @@ function reachableScreens(
   const key = (screen: ConfigScreen): string =>
     screen.kind === 'blocks'
       ? 'blocks'
-      // The query is part of the ID, and it has to be: two different queries are
-      // two different screens with two different result lists, and keying on the
-      // kind alone would collide them in `seen` — the search would then be
-      // explored ONCE with whichever query the walk happened to try first, and
-      // the state-space count below would be quietly too small. That is a silent
-      // under-exploration: the walk returns a smaller `seen` and every assertion
-      // about it still passes.
-      : screen.kind === 'search'
-        ? `search:${screen.query}`
-        : screen.kind === 'fields'
-          ? `fields:${screen.block}`
-          : `editor:${screen.field.path.join('.')}`
+      : screen.kind === 'fields'
+        ? `fields:${screen.block}`
+        : `editor:${screen.field.path.join('.')}`
 
   const seen = new Map<string, ConfigScreen>([[key(initial), initial]])
   const queue: ConfigScreen[] = [initial]
@@ -429,19 +418,12 @@ describe('config flow reachability', () => {
     const discovery = discoverConfig(config)
     const reached = reachableScreens({ kind: 'blocks' }, discovery, config, 'global')
 
-    // SEARCH IS NOT REACHABLE BY THE WALK, stated directly so the guarantee is
-    // not resting on a count. A `search` screen's `query` does not exist until the
-    // host's prompt produces one, and the hub's search row yields `ask` rather than
-    // `to` precisely so the flow cannot navigate to a screen with a query it never
-    // got. This is the assertion that pins it.
-    expect(reached.some(screen => screen.kind === 'search')).toBe(false)
-    // The walk covers the WHOLE rest of the state space. One hub, one list per
-    // block, one editor per field — derived from the discovery rather than written
-    // down, so a block or a field that produced no screen at all fails here
-    // instead of quietly shrinking the search. The `+1` the search screen would
-    // add is absent, which is the count-level echo of the assertion above: a
-    // change that made `ask` a `to` — the fix that would let a blank prompt drop a
-    // user into a list of the whole config — also breaks this number.
+    // The walk covers the WHOLE state space. One hub, one list per block, one
+    // editor per field — derived from the discovery rather than written down, so a
+    // block or a field that produced no screen at all fails here instead of
+    // quietly shrinking the search. This number is the search screen's tombstone:
+    // there is no `+1` for it any more, so reintroducing a fourth screen kind
+    // would break this count before anything softer noticed.
     expect(reached).toHaveLength(1 + discovery.blocks.length + discovery.fields.length)
 
     for (const screen of reached) {
@@ -649,11 +631,11 @@ describe('a boolean, as one switch and a way out', () => {
   it('refuses an answer that is not one of its own rows', () => {
     // The switch is the only thing a boolean editor can return, and a commit
     // that accepted anything else would be a write to a path nothing chose.
-    // Every hub row is tried, not just `back`: the search and no-results rows
-    // are the ones a later change could plausibly have let through here.
-    for (const kind of ['back', 'save', 'search', 'no-results'] as const) {
-      const option =
-        kind === 'no-results' ? ({ kind, query: 'x' } as const) : ({ kind } as const)
+    // Every non-switch row is tried, not just `back`, because a row that is not
+    // a switch reaching here at all is the defect — whatever a later change adds
+    // to the hub has to be refused here too.
+    for (const kind of ['back', 'save', 'close', 'scope'] as const) {
+      const option = { kind, scope: 'project' } as const
       expect(() => commitConfigToggle(field, option as never)).toThrow(/switch row/)
     }
   })
@@ -784,7 +766,7 @@ describe('the models block still routes through the grouped picker', () => {
 // ── Rows carry the current value and a staged-change mark ───────────
 
 describe('config flow rows', () => {
-  it('shows every field row\'s current value, and marks the ones that differ from disk', () => {
+  it('shows every field row\'s current value in the FOOTER, and its description is not the value', () => {
     const config = realConfig()
     const discovery = discoverConfig(config)
     const field = fieldAt(discovery, 'budget.maxTotalCost')
@@ -793,16 +775,99 @@ describe('config flow rows', () => {
     // `base` is the third argument and is REQUIRED, which is the point: an
     // omitted one defaulted to `draft` would report "0 changed" on every row
     // rather than failing to compile.
-    expect(configOptionDescription(row as never, config, config, false)).toBe('10')
+    //
+    // THE ROUTING IS THE CLAIM, and it is asserted per-field on the real config
+    // rather than by a substring sweep over the row. The host renders `footer`
+    // right-aligned and `description` muted and inline, so where the value goes
+    // decides whether the field list reads as two aligned columns or as nine
+    // sentences. `expect(description).not.toContain('10')` alone would be weak —
+    // a row with the value in BOTH slots passes it — so the description is
+    // asserted to be ABSENT here, which is what it is: a field directly under
+    // its block has a label that is already its whole address.
+    expect(configOptionFooter(row as never, config, config)).toBe('10')
+    expect(configOptionDescription(row as never, config, config, false)).toBeUndefined()
 
     // The staged value shows immediately, marked, because the only other place it
-    // appears is a toast that has already gone. The `25  *` string is UNCHANGED
-    // by the dirty-count work — a field row gets no number, because 0 and 1 are
-    // not information and `25  *  1 changed` is noise.
+    // appears is a toast that has already gone. A field row gets no NUMBER with
+    // its `*`, because 1 is not information and `25  *  1 changed` is noise.
     const staged = setConfigValue(config, field.path, 25)
-    expect(configOptionDescription(row as never, staged, config, true)).toBe('25  *')
-    // …and an UNSTAGED value is not marked, so a `*` always means "not on disk".
-    expect(configOptionDescription(row as never, staged, config, false)).toBe('25')
+    expect(configOptionFooter(row as never, staged, config)).toBe('25  *')
+    // …and a `*` always means "not on disk", checked on a field that was NOT
+    // staged. Dirtiness is per field now (`configFieldDirty`), so the honest
+    // unmarked case is a sibling row rather than this one with a flag turned off.
+    const sibling = fieldOptions(discovery, 'budget').find(
+      o => o.kind === 'field' && o.field.label === 'maxCostPerTask'
+    ) as never
+    expect(configOptionFooter(sibling, staged, config)).toBe('1')
+  })
+
+  it('gives a NESTED field its path as the description, so two identically named fields are tellable apart', () => {
+    // The reason `description` is not free for values. Every element of
+    // `customRoles` is labelled by the key it sits under, so `model` appears once
+    // per role and a list of identical rows is a list nobody can pick from. The
+    // host fuzzy-filters `category` as well as `title` (1:2), but `title` is what
+    // is drawn, so the disambiguation has to be drawn too.
+    const discovery = realDiscovery()
+    const withRoles = discoverConfig({
+      customRoles: [
+        { name: 'architect', model: 'anthropic/claude-sonnet-4-6' },
+        { name: 'tester', model: 'openai/gpt-5-mini' }
+      ]
+    })
+    const models = withRoles.fields.filter(f => f.label === 'model')
+    expect(models).toHaveLength(2)
+    // Same label, same kind, DIFFERENT description — and the different
+    // description is the whole point.
+    expect(configOptionTitle({ kind: 'field', field: models[0] }, 'global')).toBe('model')
+    expect(configOptionTitle({ kind: 'field', field: models[1] }, 'global')).toBe('model')
+    const first = configOptionDescription({ kind: 'field', field: models[0] } as never, {}, {}, false)
+    const second = configOptionDescription({ kind: 'field', field: models[1] } as never, {}, {}, false)
+    // WITHOUT the block name: the list's title is already
+    // `Nexus configuration — customRoles`, so repeating it on every row is ink
+    // that says nothing. `[0]` and `[1]` are the part that is not already on
+    // screen, and they are the whole disambiguation.
+    expect(first).toBe('[0].model')
+    expect(second).toBe('[1].model')
+    expect(first).not.toBe(second)
+
+    // And the VALUE is still in the footer on a nested field, not promoted into
+    // the description to pay for the path.
+    const draft: ConfigDraft = {
+      customRoles: [
+        { name: 'architect', model: 'anthropic/claude-sonnet-4-6' },
+        { name: 'tester', model: 'openai/gpt-5-mini' }
+      ]
+    }
+    expect(
+      configOptionFooter({ kind: 'field', field: models[1] } as never, draft, draft)
+    ).toBe('openai/gpt-5-mini')
+    // A field directly under its block gets NO description, because the path
+    // minus the block prefix is the label and the title is already the block.
+    expect(configFieldContext(fieldAt(discovery, 'budget.maxTotalCost'))).toBeUndefined()
+  })
+
+  it('says a BOOLEAN\'s state in words and a glyph in the footer, never as a bare true/false', () => {
+    // `true` names the TYPE, not the state, and this flow's rule is that no
+    // signal is carried by colour or by a glyph alone. The footer must read the
+    // same way the switch SCREEN reads, so the two screens speak one vocabulary.
+    const config = realConfig()
+    const discovery = discoverConfig(config)
+    const row = fieldOptions(discovery, 'gitFlow').find(o => o.kind === 'field') as never
+    const field = (row as { field: ConfigField }).field
+    expect(field.kind).toBe('boolean')
+
+    const on = configOptionFooter(row, config, config)
+    expect(on).toMatch(/^(✅|☐) (enabled|disabled)$/)
+    // A boolean in the FIELD LIST, not just on the switch screen: the glyph is
+    // never the carrier, and `true` alone names the type rather than the state.
+    // Flipped: the other word, and still a word.
+    const flipped = setConfigValue(config, field.path, false)
+    const off = configOptionFooter(row, flipped, config)
+    expect(off).toMatch(/^(✅|☐) disabled {2}\*$/)
+    expect(off).not.toBe(on)
+    // Never the bare literal, in either direction.
+    expect(on).not.toBe('true')
+    expect(off).not.toBe('false')
   })
 
   it('says plainly that nothing is written until Save, on the two rows that decide it', () => {
@@ -836,7 +901,8 @@ describe('config flow rows', () => {
     expect(configPromptDescription(fieldAt(discovery, 'models.coder'))).toBeUndefined()
   })
 
-  it('counts a block\'s settings, and says so when a block has none', () => {    // `customRoles` is `[]` on a fresh install, and a row reading "0 settings"
+  it('counts a block\'s settings in the FOOTER, and says so when a block has none', () => {
+    // `customRoles` is `[]` on a fresh install, and a row reading "0 settings"
     // with nothing behind it is indistinguishable from a block the flow failed to
     // load.
     const discovery = realDiscovery()
@@ -844,15 +910,148 @@ describe('config flow rows', () => {
       o => o.kind === 'block' && o.block.name === 'customRoles'
     )
     const config = realConfig()
+    // The count is a FOOTER, like every other current value — a block's size is
+    // its state, and putting it in the description would make the hub the one
+    // screen whose numbers do not line up.
+    expect(configOptionFooter(customRoles as never, config, config)).toBe('no settings')
     expect(configOptionDescription(customRoles as never, config, config, false)).toMatch(/no settings here yet/)
 
     const budget = blockOptions(discovery, 'global').find(o => o.kind === 'block' && o.block.name === 'budget')
     // A SHAPE, not a count. The exact number is a fact about `budget` and would
     // fail for a reason no user would recognise when a key is added; what matters
     // is that a block with fields counts them and a block with none says so.
-    // UNCHANGED by the dirty badge: a CLEAN block's description is still exactly
+    // UNCHANGED by the dirty badge: a CLEAN block's footer is still exactly
     // `N settings`, so this regex has to keep passing verbatim.
-    expect(configOptionDescription(budget as never, config, config, false)).toMatch(/^\d+ settings$/)
+    expect(configOptionFooter(budget as never, config, config)).toMatch(/^\d+ settings$/)
+    // AND, the other direction of the claim: a block whose footer carries the
+    // count has no description at all, rather than one repeating the count. This
+    // is the assertion that fails if someone routes the count back to the
+    // description "for consistency with the old layout".
+    expect(configOptionDescription(budget as never, config, config, false)).toBeUndefined()
+  })
+
+  it('marks only the field that moved, not every row in the block', () => {
+    // THE `*` IS A PER-ROW SIGNAL, and this is the assertion that says so. It
+    // used to be driven by the adapter's whole-draft `configIsDirty` boolean, so
+    // staging `maxTotalCost` marked `maxCostPerTask` and `alertThreshold` too —
+    // a `*` on rows nobody touched is a mark meaning "something changed
+    // somewhere", and a user who cannot trust it cannot use it to find their own
+    // edit. It is worse in a footer than it was in a description, because a
+    // right-aligned column of markers is exactly what a user scans to find what
+    // they changed.
+    const config = realConfig()
+    const discovery = realDiscovery()
+    const rows = fieldOptions(discovery, 'budget').filter(o => o.kind === 'field') as never[]
+    const staged = setConfigValue(config, ['budget', 'maxTotalCost'], 25)
+
+    const marked = rows.map(row => configOptionFooter(row, staged, config))
+    expect(marked.filter(text => text?.includes('*'))).toHaveLength(1)
+    expect(marked[0]).toBe('25  *')
+    // The two untouched rows show their values and no marker, which is the
+    // assertion that fails if the draft-wide flag is ever wired back in.
+    expect(marked[1]).not.toContain('*')
+    expect(marked[2]).not.toContain('*')
+    // And the exported predicate agrees, so the rule is testable on its own
+    // rather than only through a rendered string.
+    const field = fieldAt(discovery, 'budget.maxTotalCost')
+    expect(configFieldDirty(field, config, staged)).toBe(true)
+    expect(configFieldDirty(field, config, config)).toBe(false)
+    expect(configFieldDirty(fieldAt(discovery, 'budget.maxCostPerTask'), config, staged)).toBe(false)
+  })
+
+  it('leaves the hub\'s own rows with a description and NO footer, so one rule covers them all', () => {
+    // The consistency claim, stated: `footer` is the CURRENT-STATE column, and
+    // scope/save/close/back have no state to report — they say the same thing
+    // every time they are drawn. A right-aligned column of repeated sentences is a
+    // column nobody reads, so they get a description and an absent footer.
+    const config = realConfig()
+    const discovery = realDiscovery()
+    const hub = blockOptions(discovery, 'global')
+    for (const kind of ['scope', 'save', 'close'] as const) {
+      const row = hub.find(o => o.kind === kind) as never
+      expect(configOptionFooter(row, config, config)).toBeUndefined()
+      expect(configOptionDescription(row, config, config, true)).toBeTypeOf('string')
+    }
+    // …and the boolean switch screen, whose two rows are answers rather than
+    // settings, is the same case: no state column, all context inline.
+    const enabled = fieldAt(discovery, 'gitFlow.enabled')
+    const switchRow = booleanOptions(enabled, false)[0]
+    expect(configOptionFooter(switchRow, config, config)).toBeUndefined()
+    expect(configOptionDescription(switchRow, config, config, false)).toMatch(/Turns it on/)
+  })
+
+  it('marks the hub\'s scope row as the CURRENT one, and no other screen has a current row', () => {
+    // `current` is the host's own vocabulary for "of these, this is the one in
+    // effect" — it draws a `●` in the row's gutter and tints it `theme.primary`.
+    // The scope row is exactly that question with one honest answer: Save writes
+    // to project or to global, and only one of them.
+    const discovery = realDiscovery()
+    const hub = blockOptions(discovery, 'project')
+    const current = configHubCurrent(hub)
+    expect(current?.kind).toBe('scope')
+    // It is the row the scope ASKED for, so the mark follows the toggle rather
+    // than sitting on a fixed row.
+    expect(configHubCurrent(blockOptions(discovery, 'global'))).toEqual(
+      blockOptions(discovery, 'global').find(o => o.kind === 'scope')
+    )
+    // HUB ONLY, and the reason is in `configHubCurrent`: the host also MOVES the
+    // cursor to the current row, so on a field list it would park the cursor on
+    // whichever field happened to be current and skip the first one.
+    for (const block of discovery.blocks) {
+      expect(configHubCurrent(fieldOptions(discovery, block.name))).toBeUndefined()
+    }
+    const enabled = fieldAt(discovery, 'gitFlow.enabled')
+    expect(configHubCurrent(booleanOptions(enabled, false))).toBeUndefined()
+  })
+})
+
+// ── Uneditable fields are hidden by the host, so the BLOCK says so ──
+
+describe('a setting the host will not draw is still said to exist', () => {
+  // THE HOST FILTERS `disabled` ROWS OUT. `dialog-select.tsx`'s `filtered()` is
+  // `filter(x => x.disabled !== true)` before anything is drawn, so `disabled:
+  // true` is not a dimmed row and there is no marker to draw — the row is ABSENT.
+  // Which means `configOptionDisabled` on its own is a silent deletion, and the
+  // count has to be said on the block row that survives.
+  const config: ConfigDraft = { odd: { ok: true, when: null } }
+  const discovery = discoverConfig(config)
+  const blockRow = blockOptions(discovery, 'global').find(
+    o => o.kind === 'block' && o.block.name === 'odd'
+  ) as never
+
+  it('still offers the field as a row, marked disabled', () => {
+    const when = fieldAt(discovery, 'odd.when')
+    const row = fieldOptions(discovery, 'odd').find(
+      o => o.kind === 'field' && o.field === when
+    )
+    // The flow does not DROP it: the row is built, and `disabled` is how it is
+    // refused. A field that vanished from `fieldOptions` would be a setting the
+    // flow believes it cannot address at all, which is a different and larger lie.
+    expect(row).toBeDefined()
+    expect(configOptionDisabled(row as never)).toBe(true)
+    // And it is still not somewhere the flow can go.
+    expect(configSelect(configFieldsScreen(when), row as never)).toEqual({ kind: 'stay' })
+  })
+
+  it('counts it in the BLOCK\'s description, so the block does not over-claim', () => {
+    // The claim that would fail if the counting were left out: the footer says
+    // "2 settings" and the block genuinely holds 2 — but only 1 of them will be
+    // on screen, and the difference between what the row says and what the user
+    // sees is exactly the silent-vanishing defect.
+    expect(configOptionFooter(blockRow, config, config)).toBe('2 settings')
+    expect(configOptionDescription(blockRow, config, config, false)).toBe(
+      '1 setting not editable here'
+    )
+  })
+
+  it('says nothing at all for a block whose every field is editable', () => {
+    // The counterpart, so the sentence cannot become boilerplate: it is a fact
+    // about THIS block, not a line every row carries.
+    const real = realDiscovery()
+    const budget = blockOptions(real, 'global').find(
+      o => o.kind === 'block' && o.block.name === 'budget'
+    ) as never
+    expect(configOptionDescription(budget, realConfig(), realConfig(), false)).toBeUndefined()
   })
 })
 
@@ -998,193 +1197,6 @@ describe('config flow save path', () => {
   })
 })
 
-// ── Search ──────────────────────────────────────────────────────────
-//
-// Search is ONE-SHOT, and that is a property of the host rather than a choice:
-// `ui.dialog.select` owns the lifetime of its list and exposes no `onInput`, so
-// a persistent filter field would have to keep the query in the ADAPTER, where
-// no test can drive it and where a decision would live that this file does not
-// own. A prompt, then a list, keeps the query in a `ConfigScreen` the flow
-// decided — so `searchOptions` is headlessly testable at all, which is the only
-// reason this can be tested rather than hoped for.
-
-describe('config flow search', () => {
-  const config = realConfig()
-  const discovery = discoverConfig(config)
-
-  it('treats an empty or absent prompt as no search, so a blank query is never a query', () => {
-    // The load-bearing one. An empty string reaching `searchOptions` would match
-    // every row — turning "search" into a second copy of the hub, reachable by
-    // pressing Enter on an empty prompt.
-    for (const raw of ['', '   ', '\t', undefined]) {
-      expect(configSearchQuery(raw)).toBeUndefined()
-    }
-    // Trimmed, not merely tested for emptiness: a query with a stray leading
-    // space should match the same rows as one without.
-    expect(configSearchQuery('  budget  ')).toBe('budget')
-    // And the same rule reaches the matchers, so a blank query matches nothing
-    // rather than everything.
-    const field = fieldAt(discovery, 'budget.maxTotalCost')
-    expect(fieldMatches(field, '')).toBe(false)
-  })
-
-  it('matches a field by its label OR its dotted path, case-insensitively, as a substring', () => {
-    const cost = fieldAt(discovery, 'budget.maxTotalCost')
-    // By label…
-    expect(fieldMatches(cost, 'maxTotalCost')).toBe(true)
-    // …by path, which is not redundant: `enabled` exists in eight blocks, so a
-    // qualified search is the only one that can identify a single setting.
-    expect(fieldMatches(cost, 'budget.maxTotal')).toBe(true)
-    // Case is folded on BOTH sides, and it is a SUBSTRING rather than a prefix:
-    // a user who types `cost` means `maxTotalCost`.
-    expect(fieldMatches(cost, 'MAXtotalcost')).toBe(true)
-    expect(fieldMatches(cost, 'cost')).toBe(true)
-    // And something that is not there is not there. No fuzzy matching: a wrong
-    // row at the top of a list whose job is addressing one key is a config value
-    // changed to something the user never read.
-    expect(fieldMatches(cost, 'costt')).toBe(false)
-    expect(fieldMatches(cost, 'gateway')).toBe(false)
-  })
-
-  it('matches a block by its own name OR by any field it holds', () => {
-    const budget = discovery.blocks.find(block => block.name === 'budget')
-    if (budget === undefined) throw new Error('no budget block')
-    expect(blockMatches(budget, 'budget')).toBe(true)
-    // A field's name is enough to find its block, which is the "I remember the
-    // setting but not where it lives" case search exists for.
-    expect(blockMatches(budget, 'maxTotalCost')).toBe(true)
-    expect(blockMatches(budget, 'gateway')).toBe(false)
-    // Case-insensitivity is `blockMatches`' OWN fold, and the field tests do not
-    // reach it: a block is matched by its NAME as well as by its fields, so the
-    // name fold has to hold separately or a block search is case-sensitive while
-    // a field search is not — the same word, two answers, depending on where the
-    // user looked for it.
-    expect(blockMatches(budget, 'BUDGET')).toBe(true)
-    expect(blockMatches(budget, 'BuDgEt')).toBe(true)
-  })
-
-  it('answers an empty search with `back` alone, not a row quoting nothing', () => {
-    // `searchOptions` is exported and tested on its own terms, so it cannot rely
-    // on every caller having normalised at the boundary. The live path does
-    // (`configSearchQuery`, and the adapter before it), but a function called
-    // directly with `''` would otherwise match nothing and report "no results"
-    // while quoting the empty string: a dead end manufactured out of a question
-    // nobody asked.
-    for (const empty of ['', '   ', '\t\n ']) {
-      expect(searchOptions(discovery, empty)).toEqual([{ kind: 'back' }])
-    }
-  })
-
-  it('leads with the matching FIELD, and lists a block only if none of its fields matched', () => {
-    const cost = fieldAt(discovery, 'budget.maxTotalCost')
-    const rows = searchOptions(discovery, 'maxTotalCost')
-    const budgetBlock = discovery.blocks.find(block => block.name === 'budget') as never
-
-    // The FIELD is first, and this ordering is the feature: the result opens the
-    // setting's editor directly, with no second Enter to descend through the
-    // block. Searching for a block name is the case that still needs the hop.
-    expect(rows[0]).toEqual({ kind: 'field', field: cost })
-    // `budget` matched (it holds `maxTotalCost`) but is NOT listed as a block
-    // row: the same setting appearing twice under two descriptions is a list
-    // nobody can learn to read.
-    expect(rows.some(row => row.kind === 'block' && (row.block as { name: string }).name === 'budget')).toBe(false)
-    expect(rows).not.toContainEqual(budgetBlock)
-    // Exactly one way out, always.
-    expect(rows.filter(row => row.kind === 'back')).toHaveLength(1)
-  })
-
-  it('lists a block as a block only when none of its fields matched', () => {
-    // The no-double-listing rule needs a block whose fields do NOT match, and in
-    // the real config no such block exists for a real query: every field's PATH
-    // carries the block's name, so a query naming a block matches all of that
-    // block's fields and the block is correctly suppressed in favour of the
-    // fields. So this is pinned on a fixture built for the case rather than
-    // wished for on the real config — a `gateway` block whose fields are called
-    // `enabled` and `port`, exactly the shape that makes the two rules differ.
-    const gateway = discoverConfig({ gateway: { enabled: true, port: 1 } })
-    const rows = searchOptions(gateway, 'gateway')
-
-    // `gateway.enabled`'s PATH contains "gateway", so it matches and leads…
-    expect(rows[0].kind).toBe('field')
-    // …and the block is not listed beside it.
-    expect(rows.filter(row => row.kind === 'block')).toHaveLength(0)
-
-    // A query naming a block that HAS fields can never produce a block row, and
-    // that is a property of the addressing rather than a gap: every field's
-    // dotted path begins with its own block name, so the block always matches
-    // and so do all of its fields. Which means the block row is reachable in
-    // exactly one shape — a block with NO fields, which `customRoles` is on a
-    // fresh install. That is the case worth pinning: without it, "search for
-    // customRoles" would return only a `no-results` row, which is a lie, because
-    // the block exists and has nothing in it yet.
-    const empty = discoverConfig({ customRoles: [] })
-    const rows2 = searchOptions(empty, 'customRoles')
-    expect(rows2.map(row => row.kind)).toEqual(['block', 'back'])
-    expect(blockMatches(empty.blocks[0], 'customRoles')).toBe(true)
-    expect(filterConfigFields(empty, 'customRoles')).toEqual([])
-    expect(filterConfigBlocks(empty, 'customRoles').map(b => b.name)).toEqual(['customRoles'])
-  })
-
-  it('answers a search that matched NOTHING with a quotable row that goes somewhere', () => {
-    const rows = searchOptions(discovery, 'zzznotasetting')
-    // A `select` with zero options is a dialog the user can see but not leave,
-    // and it looks exactly like a failed load. So the miss is a ROW.
-    expect(rows.map(row => row.kind)).toEqual(['no-results', 'back'])
-    const miss = rows[0]
-    if (miss.kind !== 'no-results') throw new Error('the miss is not a no-results row')
-
-    // It QUOTES the query: a user who does not remember what they typed cannot
-    // otherwise tell a typo from a missing setting.
-    expect(configOptionTitle(miss, 'global')).toBe('No setting matches "zzznotasetting"')
-    // And it says what the search COVERS, so a user who assumed it searched
-    // values learns that it does not.
-    expect(configOptionDescription(miss, config, config, false)).toBe(
-      'Searches block names and setting names'
-    )
-    // Selectable, and it leads somewhere real.
-    expect(configSelect({ kind: 'search', query: 'zzznotasetting' }, miss)).toEqual({
-      kind: 'to',
-      screen: { kind: 'blocks' }
-    })
-  })
-
-  it('is one escape from the hub, and an unmatched search screen is still escapable', () => {
-    // The "at most two escapes to the hub" guarantee. A search that had to be
-    // left before a result could be opened would push the deepest screen in the
-    // flow to three.
-    expect(configUp({ kind: 'search', query: 'budget' })).toEqual({ kind: 'blocks' })
-    // `search` is a screen rather than an instant for the same reason the editor
-    // is: "can the user get out of here" has to be answerable, and it cannot be
-    // answered for something that is not a state.
-    expect(configScreenTitle({ kind: 'search', query: 'budget' }, 0)).toBe(
-      'Nexus configuration — search "budget"'
-    )
-  })
-
-  it('reaches the search screen from the hub\'s SECOND row, before any block', () => {
-    // Positional, and load-bearing: the hub lists every config key, so it is
-    // past a screenful on any real config. A search row below the blocks would
-    // sit under the fold on every device — a feature nobody finds.
-    const hub = blockOptions(discovery, 'global')
-    expect(hub[0].kind).toBe('scope')
-    expect(hub[1].kind).toBe('search')
-    const firstBlock = hub.findIndex(option => option.kind === 'block')
-    expect(firstBlock).toBeGreaterThan(1)
-    expect(hub.filter(option => option.kind === 'search')).toHaveLength(1)
-  })
-
-  it('asks the host for a query rather than navigating to a search it has not been given', () => {
-    // The `ask` outcome exists so the flow never invents a state containing a
-    // string it never decided. An empty-query screen would be a real screen that
-    // matched EVERYTHING, so a dismissed prompt would drop the user into a list
-    // of the whole config.
-    const outcome = configSelect({ kind: 'blocks' }, { kind: 'search' })
-    expect(outcome.kind).toBe('ask')
-    if (outcome.kind !== 'ask') throw new Error('the search row did not ask')
-    expect(outcome.screen).toEqual({ kind: 'search', query: '' })
-  })
-})
-
 // ── Dirty badges ────────────────────────────────────────────────────
 
 describe('config flow dirty counts', () => {
@@ -1217,16 +1229,21 @@ describe('config flow dirty counts', () => {
   it('marks a dirty block with a NUMBER and a glyph, and leaves a clean one exactly as it was', () => {
     // Readable WITHOUT colour: the glyph alone is a mark with no magnitude, and
     // "which block did I change" is a question a count answers.
+    //
+    // IN THE FOOTER, like every other current value — the dirty count is a number
+    // about the block's state, and the footer is the column the host right-aligns.
+    // Putting it back in the description would be a "consistency" change that
+    // un-columns the one screen with a number on every row.
     const budget = blockOptions(discovery, 'global').find(o => o.kind === 'block' && o.block.name === 'budget')
-    const clean = configOptionDescription(budget as never, config, config, true)
+    const clean = configOptionFooter(budget as never, config, config)
     expect(clean).toMatch(/^\d+ settings$/)
 
     const staged = setConfigValue(config, ['budget', 'maxTotalCost'], 25)
-    const dirty = configOptionDescription(budget as never, staged, config, true)
+    const dirty = configOptionFooter(budget as never, staged, config)
     expect(dirty).toMatch(/^\d+ settings {2}1 changed {2}\*$/)
     // A block nobody touched is untouched, so a `*` still means "not on disk".
     const models = blockOptions(discovery, 'global').find(o => o.kind === 'block' && o.block.name === 'models')
-    expect(configOptionDescription(models as never, staged, config, true)).toMatch(/^\d+ settings$/)
+    expect(configOptionFooter(models as never, staged, config)).toMatch(/^\d+ settings$/)
   })
 
   it('reports Save as clean only when the draft is clean, and never counts', () => {
@@ -1440,6 +1457,32 @@ describe('the config flow adapter in src/tui.tsx', () => {
     // layer, not the panel's — but nothing registers a TARGETED one any more,
     // which is the thing that used to claim `j` and `s` in a normal session.
     expect(code).not.toContain('keymap.layer(() => ({ target')
+  })
+
+  it('delegates every slot of a row to config-flow, and has no search screen of its own', async () => {
+    const code = await codeOnly()
+    // THE ROUTING IS A DECISION, so it is in the tested file. `toDialogRow` is
+    // allowed to call the three functions and to spread their `undefined`s; it is
+    // not allowed to assemble a title, a description or a footer itself, because
+    // a string built here is a string no test can reach.
+    expect(code).toContain('configOptionTitle(')
+    expect(code).toContain('configOptionDescription(')
+    expect(code).toContain('configOptionFooter(')
+    expect(code).toContain('configHubCurrent(')
+    // No string literal that looks like a row. A title or a footer written out
+    // here would be one this file cannot assert anything about.
+    expect(code).not.toMatch(/title:\s*['"`]/)
+    expect(code).not.toMatch(/footer:\s*['"`]/)
+    // And the search screen is GONE from the adapter, not merely unused. The
+    // host filters every `select` live, so a `prompt` standing in for a filter is
+    // a keystroke between the user and the thing they meant to type. Asserted
+    // over the whole file because reintroducing it is a file-level choice.
+    expect(code).not.toContain("kind: 'search'")
+    expect(code).not.toContain("'ask'")
+    // The host's own filter is left switched ON, which is what makes the removal
+    // safe: no `skipFilter`, no `renderFilter`.
+    expect(code).not.toContain('skipFilter')
+    expect(code).not.toContain('renderFilter')
   })
 
   it('has exactly two write paths, and the flow\'s is the save branch', async () => {

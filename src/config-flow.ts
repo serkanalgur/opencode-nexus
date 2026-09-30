@@ -33,8 +33,14 @@
  *   3. `editor`  — the widget for one field: a one-keystroke `select` for a
  *                  boolean, a `prompt` for a number or a string, the grouped
  *                  provider picker for a model reference.
- *   4. `search`  — reached from the hub's own second row, so it is one escape
- *                  from the hub rather than a fourth level to climb out of.
+ *
+ * THERE IS NO SEARCH SCREEN, and the host is why. Every `ui.dialog.select` draws
+ * the host's own fuzzy filter over `title` and `category` (weighted 2:1 toward
+ * the title), live, above the list — see `dialog-select.tsx`'s `filtered`. A
+ * `search` screen added on top of that had to be ENTERED first, which meant a
+ * keystroke before a keystroke, and its own substring filter over labels and
+ * paths that was strictly worse than the fuzzy match already running underneath
+ * it. A second search box over a searchable list is not a feature.
  *
  * ESCAPE IS "GO UP ONE LEVEL", EVERYWHERE, AND IT NEVER DISCARDS SILENTLY — the
  * draft lives in memory and nothing has been written, so escaping from an editor
@@ -166,13 +172,10 @@ export type ConfigDraft = Record<string, unknown>
  * question "can the user get out of here" has to be answerable, and it cannot
  * be answered for something that is not a state.
  *
- * `search` is a screen for the same reason, and it is only ONE level above the
- * hub so that the "at most two escapes to the hub" guarantee survives it: a
- * search that took three to leave would be a feature that can strand someone.
+ * THREE KINDS, and there is no fourth: filtering is the host's, not a screen.
  */
 export type ConfigScreen =
   | { readonly kind: 'blocks' }
-  | { readonly kind: 'search'; readonly query: string }
   | { readonly kind: 'fields'; readonly block: string }
   | { readonly kind: 'editor'; readonly field: ConfigField }
 
@@ -508,7 +511,6 @@ export function configDirtyCount(
  * honest thing is to drop it and re-add it when there is a title to vary.
  */
 export function configScreenTitle(screen: ConfigScreen, changes: number): string {
-  if (screen.kind === 'search') return `Nexus configuration — search "${screen.query}"`
   if (screen.kind === 'fields') return `Nexus configuration — ${screen.block}`
   if (screen.kind === 'editor') {
     return `Nexus configuration — ${configPathLabel(screen.field.path)}`
@@ -705,14 +707,6 @@ export function configOptionTitle(option: ConfigOption, scope: ConfigScope): str
       return option.block.name
     case 'field':
       return option.field.label
-    case 'search':
-      return '🔍 Search settings…'
-    case 'no-results':
-      // QUOTES the query. A miss whose row says only "no results" cannot be told
-      // from a typo by a user who does not remember what they typed, and the
-      // quotes make a query containing a space or a dot read as the one thing it
-      // is rather than as a sentence.
-      return `No setting matches "${option.query}"`
     case 'switch':
       // The direction is in WORDS. The glyph is reinforcement, not the carrier:
       // a host that dropped it, or rendered it monochrome, would still leave a
@@ -728,26 +722,61 @@ export function configOptionTitle(option: ConfigOption, scope: ConfigScope): str
 }
 
 /**
- * What a row says underneath itself, which is where the CURRENT value lives.
+ * A field's ADDRESS, relative to its own block, or `undefined` when the label
+ * already is the address.
  *
- * A block's row counts its fields, because a list of eight block names tells a
- * user nothing about which one holds the setting they are looking for. A field's
- * row shows its value AND whether it has been changed since the flow opened —
- * the dialog equivalent of the panel's `*`, and the only way a staged edit is
- * visible before the save that commits it.
+ * The description of a field row, and the reason it is not the block name: the
+ * dialog's title already says which block this is, so repeating `gitFlow` on
+ * every one of its four rows is ink that says nothing. What the label alone
+ * cannot carry is the NESTING — `customRoles[0].model` and `customRoles[7].model`
+ * are both labelled `model`, and a list of identical rows is a list nobody can
+ * pick from. So the path is given, minus the prefix the title is already showing,
+ * and only when there is a prefix worth giving.
+ */
+export function configFieldContext(field: ConfigField): string | undefined {
+  // SEGMENTS, not a string prefix. The segment after the block is not always a
+  // key: for `customRoles[0].model` the second segment is the INDEX `0`, so
+  // `full.startsWith('customRoles.')` is false and a prefix implementation drops
+  // the context for exactly the fields that need it most.
+  if (field.path[0] !== field.block) return undefined
+  const rest = field.path.slice(1)
+  if (rest.length === 0) return undefined
+  const context = configPathLabel(rest)
+  // A field directly under its block has a context that IS its label:
+  // `budget.maxTotalCost` minus `budget.` is `maxTotalCost`, and the title of the
+  // field list is already `Nexus configuration — budget`. Printing it would put
+  // the row's own name next to itself. Only a NESTED field earns the slot.
+  return context === field.label ? undefined : context
+}
+
+/**
+ * What a row says BESIDE ITSELF, which is the HOST's muted inline slot.
+ *
+ * ── THE ROUTING, AND WHY IT IS NOT NEGOTIABLE ──
+ *
+ * The host gives every row three text slots and they are not the same slot:
+ * `description` renders muted and INLINE immediately after the title,
+ * `footer` renders muted and RIGHT-ALIGNED after the flexing title, and
+ * `category` becomes a bold accent group header above the row. So:
+ *
+ *   title       what the row IS                — `maxTotalCost`, `budget`
+ *   description what disambiguates it          — the nested path, what is not
+ *                                                editable here, what a choice does
+ *   footer      its CURRENT STATE, right-aligned — the value, the settings count,
+ *                                                the dirty marker
+ *
+ * A value in a `description` reads as a parenthetical about the setting, and
+ * that is what it used to be: `maxTotalCost 10` on one line, with every row's
+ * value starting at a different column, so the one thing a user scans this list
+ * for was the one thing that would not line up. In a `footer` the values right-
+ * align into a column of their own and the labels into another, which is what
+ * the host's own lists (`DialogSelectOption.footer`) are for.
  *
  * `base` is REQUIRED, not defaulted. It is the only way a row can say how much
  * has changed, and an omitted argument defaulted to `draft` would report `0
  * changed` for every block on every save — a plausible-looking lie rather than a
  * type error, and the harder of the two to notice. A required parameter makes
  * the call site fail to compile instead, which is the correct time to find out.
- *
- * EVERY DIRTY MARKER CARRIES A NUMBER as well as its glyph. The `*` is a glyph:
- * it survives colour loss, a narrow font and a monochrome terminal, but it does
- * not say HOW MUCH, and "which block did I change" is a question a count
- * answers and a star does not. Where the number would be 0 or 1 it is left off
- * instead — a field row reading `true  *  1 changed` is noise, and a block with
- * one edit does not need a count to be found.
  */
 export function configOptionDescription(
   option: ConfigOption,
@@ -755,30 +784,42 @@ export function configOptionDescription(
   base: ConfigDraft,
   dirty: boolean,
   changes?: number
-): string {
+): string | undefined {
   switch (option.kind) {
     case 'scope':
       return 'Nothing is written until you choose Save'
-    case 'search':
-      return 'Find a setting by block or name'
-    case 'no-results':
-      return 'Searches block names and setting names'
     case 'block': {
-      const count = option.block.fields.length
+      // THE UNEDITABLE COUNT LIVES HERE, and it is here because of what the host
+      // does with `disabled`, not because this is the tidiest sentence. The host
+      // FILTERS a `disabled` row out of the list — `filtered()` drops
+      // `x.disabled !== true` before anything is drawn — so a field the flow has
+      // no editor for is not dimmed, it is GONE. A block row that said only "3
+      // settings" would then be claiming three settings and showing two, and the
+      // missing one is indistinguishable from a key this flow never walked. The
+      // count on the BLOCK is the only place the fact can honestly live: it is
+      // the row that survives, and it is the row a user reads before choosing to
+      // go in. Zero for every block shipped today, which is why this is a
+      // sentence that mostly says nothing.
+      const uneditable = uneditableBlockCount(option.block)
+      const parts: string[] = []
+      if (uneditable > 0) {
+        parts.push(`${uneditable} ${uneditable === 1 ? 'setting' : 'settings'} not editable here`)
+      }
       // The empty case is said out loud. `customRoles` is empty on a fresh
       // install, and a list holding nothing but "← Back" reads as a screen that
       // failed to load rather than as a block with nothing in it.
-      if (count === 0) {
-        return 'no settings here yet — add custom roles in nexus.jsonc'
+      if (option.block.fields.length === 0) {
+        parts.push('no settings here yet — add custom roles in nexus.jsonc')
       }
-      const changed = configBlockDirtyCount(option.block, base, draft)
-      return changed === 0
-        ? `${count} ${count === 1 ? 'setting' : 'settings'}`
-        : `${count} ${count === 1 ? 'setting' : 'settings'}  ${changed} changed  *`
+      return parts.length === 0 ? undefined : parts.join(' · ')
     }
     case 'field': {
-      const value = describeConfigValue(configValueAt(draft, option.field.path))
-      return dirty ? `${value}  *` : value
+      const context = configFieldContext(option.field)
+      if (context !== undefined) return context
+      // A top-level field's label IS its address once the title has named the
+      // block, so there is nothing to add — and a description reading
+      // `maxTotalCost` under a title reading `maxTotalCost` is noise.
+      return undefined
     }
     case 'switch':
       return option.value
@@ -809,6 +850,115 @@ export function configOptionDescription(
 }
 
 /**
+ * Whether THIS field's value differs between `base` and `draft`.
+ *
+ * A per-FIELD question, asked with the same structural comparison
+ * `configIsDirty` and `configBlockDirtyCount` use, so "a row is marked" and
+ * "the config is dirty" cannot be two different notions of equality.
+ *
+ * The adapter has a whole-draft `configIsDirty` boolean and it is the WRONG
+ * input for a row. It is one bit about the entire config, and using it to mark
+ * a single field's row means staging one edit marks every field in the block. A
+ * marker on rows the user did not touch is worse than no marker, because a user
+ * who cannot trust the `*` also cannot use it to find what they changed.
+ */
+export function configFieldDirty(
+  field: ConfigField,
+  base: ConfigDraft,
+  draft: ConfigDraft
+): boolean {
+  return !configSameValue(configValueAt(base, field.path), configValueAt(draft, field.path))
+}
+
+/**
+ * How many of `block`'s fields this flow has no editor for.
+ *
+ * The count that has to exist SOMEWHERE VISIBLE, because `configOptionDisabled`
+ * marks those rows and the HOST REMOVES THEM: `dialog-select.tsx`'s `filtered()`
+ * keeps `x.disabled !== true`, so a disabled row is never drawn, dimmed or
+ * otherwise. The alternative — rendering them as ordinary rows and refusing the
+ * choice in `configSelect` — would show a row that swallows Enter and does
+ * nothing, which is the dead-knob defect this flow is built to avoid. So the
+ * rows go, and the count goes on the block.
+ */
+function uneditableBlockCount(block: ConfigBlock): number {
+  return block.fields.filter(field => editorFor(field) === 'none').length
+}
+
+/**
+ * A boolean's value in words, with a glyph that is NOT the carrier.
+ *
+ * The house rule applied to a new place: colour is never the only signal, and
+ * neither is a bare glyph. `✅ enabled` survives a monochrome terminal, a narrow
+ * font and a font that has no glyph at all — the word is what remains — and the
+ * same two words are what the switch SCREEN spells out in full.
+ */
+function describeConfigToggle(value: boolean): string {
+  return value ? '✅ enabled' : '☐ disabled'
+}
+
+/**
+ * What a row shows at its RIGHT EDGE, which is where the CURRENT value lives.
+ *
+ * The counterpart to `configOptionDescription`, and the change a user actually
+ * sees. Values used to sit in the description, immediately after the label, so
+ * every row's value began at a different column and the eye had to read nine
+ * rows to compare two settings. The host renders `footer` right-aligned against
+ * a flexing title, so the same nine values now line up in a column of their own
+ * and the labels in another.
+ *
+ * EVERY DIRTY MARKER CARRIES A NUMBER as well as its glyph, where a count is
+ * meaningful. The `*` is a glyph: it survives colour loss, a narrow font and a
+ * monochrome terminal, but it does not say HOW MUCH, and "which block did I
+ * change" is a question a count answers and a star does not. A FIELD's count
+ * would be 1 by construction — the row is the change — so it gets the glyph
+ * alone; a BLOCK gets `N changed  *` because the block is where the ambiguity
+ * is.
+ *
+ * `undefined` for the rows that have no state to report: the scope, back, save
+ * and close rows say the same thing every time, and a right-aligned column of
+ * repeated sentences is a column nobody reads.
+ */
+export function configOptionFooter(
+  option: ConfigOption,
+  draft: ConfigDraft,
+  base: ConfigDraft
+): string | undefined {
+  switch (option.kind) {
+    case 'field': {
+      const current = configValueAt(draft, option.field.path)
+      // A boolean is the one value whose bare rendering is `true`/`false`, which
+      // names the type rather than the state. `✅ enabled` says what the setting
+      // is, and the glyph is the same one the switch row uses for the same two
+      // answers, so the two screens speak one vocabulary.
+      const value = option.field.kind === 'boolean'
+        ? describeConfigToggle(current === true)
+        : describeConfigValue(current)
+      // THIS ROW'S OWN dirtiness, and never the draft's. The adapter has a
+      // whole-draft `configIsDirty` boolean available and it is the WRONG input
+      // here — one bit about the entire config would mark every row in the list
+      // when one field is staged. A `*` on rows the user never touched is a mark
+      // that means "something changed somewhere", and the whole reason it moved
+      // into a right-aligned column is that it is a per-row signal.
+      return configFieldDirty(option.field, draft, base) ? `${value}  *` : value
+    }
+    case 'block': {
+      const count = option.block.fields.length
+      if (count === 0) return 'no settings'
+      const changed = configBlockDirtyCount(option.block, base, draft)
+      const settings = `${count} ${count === 1 ? 'setting' : 'settings'}`
+      return changed === 0 ? settings : `${settings}  ${changed} changed  *`
+    }
+    case 'scope':
+    case 'switch':
+    case 'back':
+    case 'save':
+    case 'close':
+      return undefined
+  }
+}
+
+/**
  * The line of help under a `prompt`'s title, or nothing.
  *
  * A decision rather than a string, and it lives here for the same reason every
@@ -824,11 +974,20 @@ export function configPromptDescription(field: ConfigField): string | undefined 
 /**
  * Whether the host should refuse this row.
  *
- * Only one case: a value this flow has no editor for. It is still LISTED —
- * omitting it would make a setting look non-existent rather than unchangeable,
- * which is the same defect as a dead knob — and the host's `disabled` flag
- * renders it and refuses it, which is a real host feature rather than a
- * hand-rolled grey row.
+ * Only one case: a value this flow has no editor for. It is still OFFERED — the
+ * flow hands it to the host as a `disabled` row rather than dropping it from
+ * `fieldOptions` — but the HOST REMOVES IT FROM THE LIST: `filtered()` keeps
+ * `x.disabled !== true`, and it does that before the filter input and before
+ * anything is drawn. So `true` here does not mean "drawn grey" and there is no
+ * `disabled`-looking marker to draw ourselves: the row is ABSENT.
+ *
+ * WHICH MEANS THE FACT HAS TO BE SAID ELSEWHERE, and it is said on the block
+ * row's description — see `uneditableBlockCount`. The alternative, rendering
+ * these as ordinary rows and refusing the selection in `configSelect`, would
+ * give the user a row that takes Enter and does nothing: the dead knob. And
+ * `configSelect` still returns `stay` for such a field, not because the host
+ * will let the row through but because nothing may become a write on a path no
+ * row chose.
  *
  * `save` IS NEVER DISABLED, and this is deliberate rather than an oversight, so
  * it is stated here where the temptation to "fix" it lives. Greying Save out when
@@ -854,14 +1013,26 @@ export function configOptionDisabled(option: ConfigOption): boolean {
  * `Plugin`, the solid provider and the hook — `DialogSelectOption` lives in
  * `dist/tui/context.d.ts` and is not part of the public entry, and the adapter
  * must not reach into `dist/` for it. This is a structural SUBSET of that
- * interface (title, value, description?, disabled?), so an array of these is
- * assignable to what `ui.dialog.select` asks for, and the check is the
- * compiler's rather than this comment's.
+ * interface (title, value, description?, footer?, category?, disabled?), so an
+ * array of these is assignable to what `ui.dialog.select` asks for, and the
+ * check is the compiler's rather than this comment's.
+ *
+ * THE FOUR SLOTS ARE NOT INTERCHANGEABLE, and the host is what makes them so.
+ * Reading `dialog-select.tsx`'s `Option`: `title` is the row, `description`
+ * renders MUTED AND INLINE immediately after it, `footer` renders MUTED AND
+ * RIGHT-ALIGNED after the flexible title, and `category` puts a BOLD ACCENT
+ * header above the row's group. So the routing decision this file now makes is
+ * title = what the row IS, description = the context that disambiguates it,
+ * footer = its current state, and the host lays them out. A value in a
+ * description reads as a parenthetical about the setting; the same value in a
+ * footer reads as a column, which is what it is.
  */
 export interface ConfigRow<Option> {
   readonly title: string
   readonly value: Option
   readonly description?: string
+  readonly footer?: string
+  readonly category?: string
   readonly disabled?: boolean
 }
 
@@ -873,18 +1044,6 @@ export type ConfigOption =
   | { readonly kind: 'block'; readonly block: ConfigBlock }
   /** One field. Choosing it opens that field's editor. */
   | { readonly kind: 'field'; readonly field: ConfigField }
-  /** The hub's search row. Choosing it asks the host for a query. */
-  | { readonly kind: 'search' }
-  /**
-   * A search that matched nothing, standing in for the result list.
-   *
-   * A ROW rather than an absence of one, and that is the whole reason it exists:
-   * `ui.dialog.select` with zero options is a dialog the user can see but not
-   * leave, and it looks exactly like a failed load. A row that names the query
-   * that missed and says what the search covers turns "nothing here" into
-   * something the user can read and something they can answer.
-   */
-  | { readonly kind: 'no-results'; readonly query: string }
   /**
    * The one answer a boolean editor offers: switch to the OTHER value.
    *
@@ -900,7 +1059,7 @@ export type ConfigOption =
   | { readonly kind: 'close' }
 
 /**
- * The hub's rows: the save scope, search, then every block, then save and close.
+ * The hub's rows: the save scope, then every block, then save and close.
  *
  * `save` and `close` are rows rather than the absence of a selection, because
  * "press escape to leave" and "press escape to throw your changes away" are the
@@ -908,12 +1067,12 @@ export type ConfigOption =
  * nothing staged to throw away in the first place, since nothing is written
  * until save.
  *
- * SEARCH IS THE SECOND ROW, and its position is load-bearing rather than
- * stylistic. The hub lists every config key, so it is past a screenful on any
- * real config; a search row below the blocks would sit under the fold on every
- * device this ships to, and a feature that is never seen is a feature with no
- * users. Immediately after the scope row is the only place in the list a user
- * reads before scrolling.
+ * THERE IS NO SEARCH ROW, and there was one here until last release. The host
+ * draws a fuzzy filter above every `select` it shows — over `title` and
+ * `category`, live, as the user types — so a row advertising a search was
+ * advertising something the user was already doing, and the screen it opened
+ * made them press Enter before the typing could start. Filtering this list needs
+ * no row of its own; see the note on `ConfigScreen`.
  */
 export function blockOptions(
   discovery: ConfigDiscovery,
@@ -921,12 +1080,66 @@ export function blockOptions(
 ): readonly ConfigOption[] {
   return [
     { kind: 'scope', scope },
-    { kind: 'search' as const },
     ...discovery.blocks.map(block => ({ kind: 'block' as const, block })),
     { kind: 'save' as const },
     { kind: 'close' as const }
   ]
 }
+
+/**
+ * THE HUB'S CURRENT ROW, which is the scope row, or `undefined` elsewhere.
+ *
+ * `current` is the host's own vocabulary for "of these, this is the one in
+ * effect", and it is used here for the one row on the one screen where the
+ * question has a single honest answer: the hub offers project and global as
+ * alternatives, and exactly one of them is where Save will write. The host draws
+ * a `●` in the row's gutter and tints it `theme.primary` — so this is a mark
+ * that is a glyph as well as a colour, which is what this flow's dirty markers
+ * are held to.
+ *
+ * SEMANTICS, verified in `dialog-select.tsx` rather than assumed, because the
+ * prop does one more thing than mark the row: an effect watches `props.current`
+ * and calls `setStore("selected", currentIndex)`, so it MOVES THE CURSOR there.
+ * On the hub that is harmless and arguably good — the scope row is row 0, which
+ * is where the cursor already is. It is stated here because the same call on
+ * the field list would be a defect: it would park the cursor on whichever field
+ * happened to be current and skip the first row, and a user who opens a block to
+ * change its FIRST setting would start on the wrong one. So this is a hub-only
+ * decision, stated as one.
+ *
+ * `undefined` on the other screens rather than a default: a row marked `current`
+ * that is not the one in effect is worse than no mark, and the editor's switch
+ * row is by construction the value the field is NOT on.
+ */
+export function configHubCurrent(options: readonly ConfigOption[]): ConfigOption | undefined {
+  return options.find(option => option.kind === 'scope')
+}
+
+/**
+ * ── ON `category` ──
+ *
+ * The host groups rows under a BOLD ACCENT header (`groupBy(x => x.category ??
+ * ""`, plus a blank line before every group after the first), and it is a real
+ * capability this flow does not use. That is a decision, and the reasoning is
+ * the point:
+ *
+ * The FIELD LIST IS PER BLOCK. Every row on it belongs to the one block named in
+ * the dialog's title, so one category is one group: a header reading `budget`
+ * above nine rows whose title is already `Nexus configuration — budget`. That is
+ * the redundant header this flow does not draw.
+ *
+ * The HUB is the other candidate, and grouping it by category would be worse than
+ * nothing for a specific reason: the hub's rows are ONE PER BLOCK, each already
+ * named by its own title. A category per block groups one row under a header
+ * that repeats its name, nine times. Grouping the hub's three NON-block rows
+ * (scope, save, close) under a header is the only version that would draw
+ * something true — and it would bury the save row under a heading, moving the
+ * row the whole flow exists to make findable further from the top of the list.
+ *
+ * So the value moves to the FOOTER and the grouping stays out. A capability is
+ * worth adopting where it says something the layout does not, and here on both
+ * screens the category would be a restatement of the title.
+ */
 
 /**
  * A block's rows: every field in it, then a way back.
@@ -992,133 +1205,10 @@ export function configScreenOptions(
   current: (field: ConfigField) => unknown
 ): readonly ConfigOption[] {
   if (screen.kind === 'blocks') return blockOptions(discovery, scope)
-  if (screen.kind === 'search') return searchOptions(discovery, screen.query)
   if (screen.kind === 'fields') return fieldOptions(discovery, screen.block)
   return screen.field.kind === 'boolean'
     ? booleanOptions(screen.field, current(screen.field) === true)
     : []
-}
-
-// ── Searching the hub ───────────────────────────────────────────────
-
-/**
- * The search's text, or `undefined` when there is nothing to search for.
- *
- * A dismissed prompt and an empty one are the SAME query, which is the point:
- * both mean "no query", and both mean the flow stays where it was. Normalising
- * them at the boundary means no later function has to ask which of the two it
- * got, and an empty string can never reach `searchOptions` as a query that
- * matches every row — which is the one outcome that would turn "search" into a
- * second copy of the hub.
- */
-export function configSearchQuery(raw: string | undefined): string | undefined {
-  const trimmed = raw?.trim()
-  return trimmed === undefined || trimmed === '' ? undefined : trimmed
-}
-
-/**
- * Lowercase both sides, once per call site that needs it.
- *
- * Search is a substring test, not a prefix and not a token: a user who types
- * `cost` means `maxTotalCost`, and a prefix rule would have told them nothing
- * matched. No fuzzy matching either — an edit distance invites the wrong row at
- * the top of a list whose whole job is addressing a specific key, and a wrong
- * match here is a config value changed to something the user never read.
- */
-function normalized(value: string): string {
-  return value.toLowerCase()
-}
-
-/**
- * Whether `field` is what the user typed.
- *
- * The LABEL or the DOTTED PATH, and the path is not redundant: `enabled` exists
- * in eight blocks, so a search for `budget.enabled` is only meaningful against
- * the path, and matching labels alone would return eight rows for it. Deep
- * matching is also the reason this is worth having over "jump to the block" —
- * a user who remembers `maxTotalCost` and not which block it lives in should
- * not have to walk nine blocks to find it.
- */
-export function fieldMatches(field: ConfigField, query: string): boolean {
-  const needle = normalized(configSearchQuery(query) ?? '')
-  if (needle === '') return false
-  return (
-    normalized(field.label).includes(needle) ||
-    normalized(configPathLabel(field.path)).includes(needle)
-  )
-}
-
-/** Whether the block is what the user typed, OR holds something that is. */
-export function blockMatches(block: ConfigBlock, query: string): boolean {
-  const needle = normalized(configSearchQuery(query) ?? '')
-  if (needle === '') return false
-  if (normalized(block.name).includes(needle)) return true
-  return block.fields.some(field => fieldMatches(field, query))
-}
-
-/** The fields `query` names, in the discovery's own order. */
-export function filterConfigFields(
-  discovery: ConfigDiscovery,
-  query: string
-): readonly ConfigField[] {
-  return discovery.fields.filter(field => fieldMatches(field, query))
-}
-
-/** The blocks `query` names or that hold something it names. */
-export function filterConfigBlocks(
-  discovery: ConfigDiscovery,
-  query: string
-): readonly ConfigBlock[] {
-  return discovery.blocks.filter(block => blockMatches(block, query))
-}
-
-/**
- * The search's rows.
- *
- * FIELDS FIRST, and that ordering is the feature. A user who typed a setting
- * name wants that setting, and a result list that led with the block containing
- * it would make them press Enter a second time to reach what they already
- * named. Blocks follow for the case where someone searched for a block's name
- * instead of a field's.
- *
- * A block appears ONLY if none of its fields matched, so a query like `enabled`
- * does not list the same eight settings twice — once as fields and once under
- * eight headings. A duplicate result is not a cosmetic problem here: each one
- * opens a different path, and a list that offers the same key twice under two
- * descriptions is a list nobody can learn to read.
- *
- * The `no-results` row is a ROW, and it is selectable, and it goes to the hub.
- * A `select` handed zero options cannot be escaped by anything but the host's
- * own key — and it is visually identical to a screen that failed to load, so a
- * user who mistyped once would be looking at what looks like a bug. `back` is
- * present unconditionally, which is what makes the search screen escapable even
- * when it has results.
- */
-export function searchOptions(
-  discovery: ConfigDiscovery,
-  query: string
-): readonly ConfigOption[] {
-  // The empty query is the ONE case that gets its own shape, and the reason is
-  // the same one `configSearchQuery` exists for. The live path normalises at the
-  // boundary so this cannot be reached with `''` — but a function that is
-  // exported, and tested, on its own terms should not depend on every caller
-  // having remembered that. Without the guard, `''` matches no field and no
-  // block, so the user would be told "no results" while staring at a row that
-  // quotes the empty string: a dead end manufactured out of a question that was
-  // never asked. `[{ kind: 'back' }]` is the honest answer — there is nothing to
-  // show and the screen stays escapable.
-  if (configSearchQuery(query) === undefined) return [{ kind: 'back' }]
-  const fields = filterConfigFields(discovery, query)
-  const blocks = filterConfigBlocks(discovery, query).filter(
-    block => !block.fields.some(field => fieldMatches(field, query))
-  )
-  const rows: ConfigOption[] = [
-    ...fields.map(field => ({ kind: 'field' as const, field })),
-    ...blocks.map(block => ({ kind: 'block' as const, block }))
-  ]
-  if (rows.length === 0) rows.push({ kind: 'no-results', query })
-  rows.push({ kind: 'back' })
-  return rows
 }
 
 // ── Navigation ──────────────────────────────────────────────────────
@@ -1141,18 +1231,6 @@ export type ConfigSelect =
   | { readonly kind: 'stay' }
   | { readonly kind: 'save' }
   | { readonly kind: 'close' }
-  /**
-   * The host has to produce a string before there is a screen to go to.
-   *
-   * Its own outcome rather than a `to`, and the reason is that the flow must not
-   * invent a state it has not decided to be in: `screen: {kind:'search'}` needs
-   * a `query`, and the only source of one is the host's prompt. Returning `to`
-   * with an empty query would make an EMPTY SEARCH a real screen — one that
-   * matched everything — so a dismissed prompt would silently drop the user into
-   * a list of every setting in the config. The adapter turns `ask` into the
-   * prompt, and stays put if there is no answer.
-   */
-  | { readonly kind: 'ask'; readonly screen: ConfigScreen }
 
 /**
  * Act on a chosen row.
@@ -1193,17 +1271,6 @@ export function configSelect(screen: ConfigScreen, option: ConfigOption): Config
       // is an ANSWER, not a destination: the flow does not move, and the adapter
       // commits it with `commitConfigToggle` and returns to the field's list.
       return { kind: 'stay' }
-    case 'search':
-      // An ASK, not a `to`. The `search` screen carries a query, and the query
-      // does not exist until the host's prompt produces one — so naming a screen
-      // here would mean naming one whose contents the flow has not decided.
-      // See `ConfigSelect`'s `ask`.
-      return { kind: 'ask', screen: { kind: 'search', query: '' } }
-    case 'no-results':
-      // Somewhere REAL rather than nowhere: a select with no options is
-      // unescapable and looks like a failed load. The hub is the one place a user
-      // can see every block, so it is where a dead end is worth routing to.
-      return { kind: 'to', screen: { kind: 'blocks' } }
     case 'back': {
       const up = configUp(screen)
       // Unreachable from any list the flow builds — `back` is only ever offered
@@ -1237,24 +1304,15 @@ export function configScreenField(screen: ConfigScreen): ConfigField | undefined
  */
 export function configUp(screen: ConfigScreen): ConfigScreen | undefined {
   if (screen.kind === 'blocks') return undefined
-  // ONE HOP, not a chain through the hub. The real path out of a search result
-  // is search → fields:<block> → blocks, and this is its penultimate step: an
-  // editor reached FROM a search goes to its block's field list, exactly as an
-  // editor reached from that list does, and the search screen itself goes
-  // straight to the hub. So the deepest route out of the flow is one escape
-  // from the editor, one from the field list, one from the hub — and a search
-  // screen that had to route through the hub first would put the user's
-  // "get me back to where I was" behind an extra list they did not ask for.
+  // ONE HOP, not a chain through the hub: the editor goes to its own block's
+  // field list rather than back past it, so the deepest route out of the flow
+  // is one escape from the editor, one from the field list, one from the hub.
   //
   // WHAT THIS RELIES ON: the editor screen is MODAL. `runEditor` awaits the
   // host's prompt and returns the answer, so the transient editor is not itself
   // an escape the user has to find — if a future refactor makes the editor a
   // screen the user navigates away from with the same key, the bound changes
   // and the counting above is no longer the guarantee.
-  //
-  // The query is not carried through, and does not need to be: escaping the
-  // search discards it, which is the same thing the user did by leaving.
-  if (screen.kind === 'search') return { kind: 'blocks' }
   if (screen.kind === 'fields') return { kind: 'blocks' }
   return { kind: 'fields', block: screen.field.block }
 }
@@ -1263,10 +1321,6 @@ export function configUp(screen: ConfigScreen): ConfigScreen | undefined {
 export function configScreenBlock(screen: ConfigScreen): string | undefined {
   switch (screen.kind) {
     case 'blocks':
-    // A search spans the whole config, so there is no single block it is in —
-    // and answering "which block" with the first one that matched would put the
-    // dialog's title on a block the user never entered.
-    case 'search':
       return undefined
     case 'fields':
       return screen.block
@@ -1304,9 +1358,9 @@ export function configFieldsScreen(field: ConfigField): ConfigScreen {
  * change. With one row standing only for the other value, that confusion is not
  * expressible: the row says what it writes, and this writes what the row says.
  *
- * The guard is on the ROW's kind and not on the value's type, so a `back` row, a
- * `save` row or a search result that reached here by mistake is refused rather
- * than written to a path nothing chose.
+ * The guard is on the ROW's kind and not on the value's type, so a `back` row or
+ * a `save` row that reached here by mistake is refused rather than written to a
+ * path nothing chose.
  */
 export function commitConfigToggle(field: ConfigField, chosen: ConfigOption): ConfigCommit {
   if (chosen.kind !== 'switch') {
