@@ -129,9 +129,31 @@ editing any level takes effect without a restart.
   "notifications": { "enabled": true },
   "gitFlow": { "enabled": true, "conventionalCommits": true, "requireBranch": true, "prBeforeMerge": true },
   "effort": { "enabled": false, "maxEffort": "high", "minDifficulty": 0 },
-  "customRoles": []
+  "customRoles": [],
+  // `storage` is an ABSOLUTE path, resolved as join($HOME, ".local/share/opencode-nexus/memory.db").
+  // There is no tilde expansion, so "~" written here is a literal directory name.
+  "memory": { "enabled": true, "storage": "/Users/you/.local/share/opencode-nexus/memory.db", "maxEntries": 1000 }
 }
 ```
+
+`memory.enabled` is honoured: it is the gate at the top of `recallForTask`, so
+`false` stops both automatic injections — the `executeTask` spawn and the
+`spawnAgent` path — and the gate lives in the method rather than at either call
+site so a third injection point cannot miss it. `memory.storage` is the sqlite
+file the store opens, and `memory.maxEntries` is a **per-scope** cap: the
+`project` scope is exempt from it by design, so lowering this never evicts a
+durable note.
+
+**Both take effect without a restart**, which is the whole point of them being
+in the schema at all. The store resolves its path and its cap on every use
+rather than holding a copy taken at construction, so saving the file is enough:
+`storage` closes the open database and opens the new one on the next store call,
+and `maxEntries` applies to the very next write — the store does not need to be
+rebuilt, and rebuilding it is not something a caller has to remember to do. The
+old database file is left on disk untouched when `storage` changes, so
+repointing the setting is reversible. `getConfig().memory.storage` and
+`orchestrator.memoryStore.path` are the same string because the store reads the
+config rather than a snapshot of it; they cannot disagree.
 
 `dashboard.enabled` is **honoured**: `NexusOrchestrator.startDashboard()` refuses
 to start and names the key when it is `false`, and the TUI's `/nexus dashboard`
@@ -140,8 +162,8 @@ The other `dashboard` fields are the defaults for `startDashboard()`; explicit
 arguments to that method still win.
 
 `saveProjectConfig` and `saveGlobalConfig` write `models`, `budget`,
-`selfHealing`, `dashboard`, `notifications`, `gitFlow`, `effort` and
-`customRoles` — all eight, unconditionally. They overwrite the whole file, so a
+`selfHealing`, `dashboard`, `notifications`, `gitFlow`, `effort`, `customRoles`
+and `memory` — all nine, unconditionally. They overwrite the whole file, so a
 block left out of that list would be a block *deleted* from the user's config on
 the first save.
 
@@ -149,10 +171,11 @@ Blocks on the `NexusConfig` type that are **not** in this schema — `agents`,
 `learning`, `cost` — are settable through the `NexusOrchestrator` constructor
 only, and are documented that way rather than as user-configurable, because they
 are not. (`cost` is optional, and `mergeConfig` fills in its default, so an
-omitted block behaves exactly as a configured one.) `memory`, `security` and
+omitted block behaves exactly as a configured one.) `security` and
 `communication` are not listed because no such blocks exist on the type at all —
 they were deleted rather than left unread, and `saveProjectConfig` cannot drop
-what is not there.
+what is not there. (`memory` was one of those deleted blocks; it is in the
+schema above now, because `recallForTask` reads its `enabled` flag.)
 
 #### getConfig(): NexusFullConfig
 
@@ -178,7 +201,7 @@ saveProjectConfig(basePath: string): void
 
 Persist the current configuration to `<basePath>/.opencode/nexus.jsonc`. Writes
 `models`, `budget`, `selfHealing`, `dashboard`, `notifications`, `gitFlow`,
-`effort` and `customRoles` — see the schema above.
+`effort`, `customRoles` and `memory` — see the schema above.
 
 #### saveGlobalConfig(): void
 
@@ -186,7 +209,7 @@ Persist the current configuration to `<basePath>/.opencode/nexus.jsonc`. Writes
 saveGlobalConfig(): void
 ```
 
-Persist the current configuration to `~/.config/opencode/nexus.jsonc`. Same eight
+Persist the current configuration to `~/.config/opencode/nexus.jsonc`. Same nine
 blocks.
 
 #### applyPreset(name: string): void

@@ -48,8 +48,55 @@ export interface MemoryStoreOptions {
 }
 
 const DEFAULT_CONFIG: MemoryStoreConfig = {
+  // MUST mirror `NexusFullConfig`'s `DEFAULT_CONFIG.memory.storage`
+  // (`src/config.ts`) exactly, expression and all. The same default is written
+  // down in two places because a user can now see and change it in
+  // `nexus.jsonc`; if the two drift, the config reports a path the store is not
+  // using, with nothing logging the disagreement. If you change one, change
+  // both.
+  //
+  // The two literals are the same value by CONSTRUCTION rather than by
+  // coincidence: the store never falls back to this one behind the config's
+  // back, because the orchestrator feeds it a resolver over
+  // `configManager.getConfig().memory` (see the constructor), and this default
+  // only applies when a caller supplies no config at all. So the mirror is not a
+  // "change both" convention resting on review — a change to one and not the
+  // other is a bug `test/config-knobs.test.ts` fails on. The resolution is LIVE:
+  // an edit to either key takes effect on the next store call, with no restart.
   dbPath: join(process.env.HOME || '~', '.local', 'share', 'opencode-nexus', 'memory.db'),
+  // Mirrored by `DEFAULT_CONFIG.memory.maxEntries` in `src/config.ts`, and
+  // applied live: read on every `set` rather than frozen here. See
+  // `evictOverflow`.
   maxEntries: 1000,
+}
+
+/**
+ * A live view of the store's settings.
+ *
+ * `() => Partial<MemoryStoreConfig>` rather than the full config, because every
+ * real caller has the merged result already and a required `dbPath` would make
+ * each of them restate a default. Both fields merge over `DEFAULT_CONFIG`.
+ */
+export type MemoryStoreConfigResolver = () => Partial<MemoryStoreConfig>
+
+/**
+ * Merge config layers over the defaults, IGNORING `undefined`-valued keys.
+ *
+ * Not a spread, and the difference is the same one that cost `memory.storage` a
+ * whole key once already (`src/config.ts`, the filtered `memorySeed`): object
+ * spread copies own enumerable keys INCLUDING ones whose value is
+ * `undefined`, so `{ storage: undefined }` would DELETE the key rather than fall
+ * through to the default. Callers legitimately pass literals of
+ * possibly-absent fields — the orchestrator's constructor parameter is one — so
+ * this is the expected shape here, not a hypothetical.
+ */
+function mergeStoreConfig(...layers: Array<Partial<MemoryStoreConfig> | undefined>): MemoryStoreConfig {
+  const merged: MemoryStoreConfig = { ...DEFAULT_CONFIG }
+  for (const layer of layers) {
+    if (layer?.dbPath !== undefined) merged.dbPath = layer.dbPath
+    if (layer?.maxEntries !== undefined) merged.maxEntries = layer.maxEntries
+  }
+  return merged
 }
 
 /**
@@ -84,8 +131,36 @@ export interface MemoryEviction {
 }
 
 export class PersistentMemoryStore {
-  private db: Database
-  private config: MemoryStoreConfig
+  /**
+   * The open handle, or `null` when nothing is open.
+   *
+   * Nullable because it is no longer opened once in the constructor and held for
+   * the life of the process: it is opened for the path that is CURRENTLY
+   * resolved, and re-opened when that changes. See `database`.
+   */
+  private db: Database | null = null
+  /**
+   * The path `db` was opened for, and the thing `database` compares a freshly
+   * resolved path against. Stored beside the handle rather than recomputed from
+   * it, because the resolved path is a config value and the handle does not
+   * report the file it came from.
+   */
+  private openPath: string | null = null
+  /**
+   * Set by `close`. Distinguished from "nothing is open yet" so a closed store
+   * stays closed: lazily reopening on the next call would turn an explicit
+   * `shutdown()` into a no-op that silently resurrects the file.
+   */
+  private closed = false
+  /**
+   * Where the settings come from, re-read on every use.
+   *
+   * A FUNCTION, not a snapshot, and that is the whole point of the field: a
+   * `storage` or `maxEntries` edit made in `nexus.jsonc` has to be observable by
+   * the running process. Holding a copy — which is what this field used to be —
+   * made the config panel report a saved value the store ignored until restart.
+   */
+  private resolveConfig: MemoryStoreConfigResolver
   /**
    * Cumulative per-scope count of entries removed by `maxEntries`, so a
    * surface can report "12 notes have been evicted" rather than leaving a user
@@ -137,19 +212,91 @@ export class PersistentMemoryStore {
    */
   private now: () => number
 
-  constructor(config?: Partial<MemoryStoreConfig>, options?: MemoryStoreOptions) {
-    this.config = { ...DEFAULT_CONFIG, ...config }
+  /**
+   * @param config Either a fixed `Partial<MemoryStoreConfig>`, or a RESOLVER
+   *   re-read on every use so `storage` / `maxEntries` take effect live. The
+   *   union rather than a second parameter because a fixed config is just the
+   *   degenerate resolver, and every existing caller passes the former — which
+   *   is why this is backward compatible and not a breaking change.
+   * @param options Clock seam, unchanged.
+   */
+  constructor(
+    config?: Partial<MemoryStoreConfig> | MemoryStoreConfigResolver,
+    options?: MemoryStoreOptions,
+  ) {
+    this.resolveConfig = typeof config === 'function' ? config : () => config ?? {}
     this.now = options?.now ?? (() => Date.now())
 
-    // Ensure directory exists
-    try { mkdirSync(dirname(this.config.dbPath), { recursive: true }) } catch {}
-
-    this.db = new Database(this.config.dbPath)
-    this.init()
+    // Opened eagerly rather than truly on first use, and the difference is
+    // worth naming: this is still the first USE, it just happens to be the
+    // constructor. Opening here means a bad path or an unwritable directory
+    // throws at construction — where the stack names the caller — instead of
+    // surfacing as a mysterious failure inside some agent's recall. A path
+    // change LATER is the part that is deferred, and that is the part that has
+    // to be, because the value cannot exist before the config is re-read.
+    this.database()
   }
 
-  private init(): void {
-    this.db.exec(`
+  /**
+   * The settings as of right now.
+   *
+   * A fresh object per call, so a caller cannot capture one and hold a stale
+   * copy — `evictOverflow` deliberately re-reads this per write rather than
+   * trusting a value resolved at the top of `set`.
+   */
+  private currentConfig(): MemoryStoreConfig {
+    return mergeStoreConfig(this.resolveConfig())
+  }
+
+  /**
+   * The open database for the CURRENTLY resolved path, opening or swapping it
+   * as needed.
+   *
+   * ── WHY A SWAP IS SAFE HERE, AND WHY IT IS SYNCHRONOUS ──
+   *
+   * `bun:sqlite` is synchronous, so this whole method runs to completion with no
+   * await point in it. JavaScript is single-threaded, so no other `recallForTask`
+   * — however many agents are mid-flight — can observe a state between "decided
+   * to swap" and "finished swapping": the next caller to arrive runs after this
+   * one returns. The race a rebuild-in-`reloadConfigFromDisk` design has (every
+   * in-flight reader holding a handle to a store that is being closed underneath
+   * it) does not exist when the swap is confined to one synchronous block.
+   *
+   * The ORDER is what makes a failure recoverable rather than destructive: the
+   * new handle is opened AND initialised first, and only then is the old one
+   * closed. A path that cannot be opened throws with the previous database
+   * still open and still current, so the store keeps serving reads from the last
+   * good path instead of ending up with no handle at all. A `close` that throws
+   * is swallowed for the mirror-image reason: the new handle is already open, and
+   * losing it over a cleanup failure would be strictly worse than leaking the old
+   * one.
+   */
+  private database(): Database {
+    if (this.closed) throw new Error('memory store is closed')
+    const { dbPath } = this.currentConfig()
+    if (this.db !== null && this.openPath === dbPath) return this.db
+
+    try { mkdirSync(dirname(dbPath), { recursive: true }) } catch {}
+    const opened = new Database(dbPath)
+    try {
+      this.init(opened)
+    } catch (error) {
+      // Never leave a half-open handle behind: the old database is still the
+      // live one, and an extra connection to a file the caller is about to be
+      // told is unusable is a lock they did not ask for.
+      try { opened.close() } catch {}
+      throw error
+    }
+    if (this.db !== null) {
+      try { this.db.close() } catch {}
+    }
+    this.db = opened
+    this.openPath = dbPath
+    return opened
+  }
+
+  private init(db: Database): void {
+    db.exec(`
       CREATE TABLE IF NOT EXISTS memory (
         id TEXT PRIMARY KEY,
         key TEXT NOT NULL,
@@ -222,7 +369,7 @@ export class PersistentMemoryStore {
     const id = `mem-${timestamp}-${sequence}-${Math.random().toString(36).substr(2, 9)}`
     const expiresAt = entry.ttl ? timestamp + entry.ttl : null
 
-    const stmt = this.db.prepare(`
+    const stmt = this.database().prepare(`
       INSERT INTO memory (id, key, value, scope, author, timestamp, confidence, tags, ttl, expires_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
@@ -250,7 +397,14 @@ export class PersistentMemoryStore {
    */
   private evictOverflow(scope: MemoryScope): void {
     if (COUNT_EXEMPT_SCOPES.has(scope)) return
-    if (this.config.maxEntries <= 0) return
+    // THE CAP IS A PURE READ, resolved on EVERY write. It is not snapshotted at
+    // construction, and it needs no database swap: lowering `maxEntries` in
+    // `nexus.jsonc` makes the very next `set` evict down to the new number, with
+    // no restart and no reopening. Reading it once per `set` rather than once
+    // per process is what makes the setting live.
+    const maxEntries = this.currentConfig().maxEntries
+    if (maxEntries <= 0) return
+    const db = this.database()
 
     // Expired first: they are unreadable already, so spending cap headroom on
     // them evicts a LIVE row in their place for no gain.
@@ -258,19 +412,19 @@ export class PersistentMemoryStore {
     // see `getRecent`. Without it, "the oldest N" is an arbitrary set whenever
     // two writes land in the same millisecond, and the entry evicted would be
     // whichever the query plan reached first.
-    const expired = this.db.prepare(
+    const expired = db.prepare(
       'SELECT id, timestamp FROM memory WHERE scope = ? AND expires_at IS NOT NULL AND expires_at <= ? ORDER BY timestamp ASC, id ASC'
     ).all(scope, this.now()) as Array<{ id: string; timestamp: number }>
 
-    const live = (this.db.prepare(
+    const live = (db.prepare(
       'SELECT COUNT(*) as count FROM memory WHERE scope = ? AND (expires_at IS NULL OR expires_at > ?)'
     ).get(scope, this.now()) as { count: number }).count
 
-    let over = expired.length + (live - this.config.maxEntries)
+    let over = expired.length + (live - maxEntries)
 
     let oldestEvictedAt: number | null = null
     let count = 0
-    const deleteStmt = this.db.prepare('DELETE FROM memory WHERE id = ?')
+    const deleteStmt = db.prepare('DELETE FROM memory WHERE id = ?')
 
     if (over > 0) {
       for (const row of expired) {
@@ -283,7 +437,7 @@ export class PersistentMemoryStore {
     }
 
     if (over > 0) {
-      const liveRows = this.db.prepare(
+      const liveRows = db.prepare(
         'SELECT id, timestamp FROM memory WHERE scope = ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY timestamp ASC, id ASC LIMIT ?'
       ).all(scope, this.now(), over) as Array<{ id: string; timestamp: number }>
       for (const row of liveRows) {
@@ -337,7 +491,7 @@ export class PersistentMemoryStore {
    * `describeEmptyResult` in `src/memory-recall.ts`.
    */
   get path(): string {
-    return this.config.dbPath
+    return this.currentConfig().dbPath
   }
 
   get(key: string, scope?: MemoryScope): MemoryEntry | null {
@@ -358,6 +512,7 @@ export class PersistentMemoryStore {
    * decided by the order the storage engine happened to return them in.
    */
   getByKey(key: string, scope?: MemoryScope): MemoryEntry[] {
+    const db = this.database()
     let query = 'SELECT * FROM memory WHERE key = ?'
     const params: SQLQueryBindings[] = [key]
 
@@ -371,12 +526,12 @@ export class PersistentMemoryStore {
 
     query += ' ORDER BY timestamp ASC, id ASC'
 
-    const rows = this.db.prepare(query).all(...params) as RowData[]
+    const rows = db.prepare(query).all(...params) as RowData[]
     return rows.map(row => this.rowToEntry(row))
   }
 
   getByScope(scope: MemoryScope): MemoryEntry[] {
-    const rows = this.db.prepare(
+    const rows = this.database().prepare(
       'SELECT * FROM memory WHERE scope = ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY timestamp DESC, id DESC'
     ).all(scope, this.now()) as RowData[]
     return rows.map(row => this.rowToEntry(row))
@@ -405,6 +560,7 @@ export class PersistentMemoryStore {
    * blob, nested `memoryEntries` and all, rendered as though it were a note.
    */
   search(query: string, scope?: MemoryScope): MemoryEntry[] {
+    const db = this.database()
     let sql = `SELECT * FROM memory WHERE (key LIKE ? OR value LIKE ?) AND (expires_at IS NULL OR expires_at > ?)`
     const params: SQLQueryBindings[] = [`%${query}%`, `%${query}%`, this.now()]
     if (scope) {
@@ -414,7 +570,7 @@ export class PersistentMemoryStore {
     // `id DESC` tie-breaks same-millisecond writes, which share a `timestamp`.
     // See `getRecent` for why that is not optional.
     sql += ' ORDER BY timestamp DESC, id DESC'
-    const rows = this.db.prepare(sql).all(...params) as RowData[]
+    const rows = db.prepare(sql).all(...params) as RowData[]
     return rows.map(row => this.rowToEntry(row))
   }
 
@@ -431,14 +587,14 @@ export class PersistentMemoryStore {
    * `id DESC` is "newest first" with no gaps.
    */
   getRecent(count: number): MemoryEntry[] {
-    const rows = this.db.prepare(
+    const rows = this.database().prepare(
       'SELECT * FROM memory WHERE (expires_at IS NULL OR expires_at > ?) ORDER BY timestamp DESC, id DESC LIMIT ?'
     ).all(this.now(), count) as RowData[]
     return rows.map(row => this.rowToEntry(row))
   }
 
   getByAuthor(author: string): MemoryEntry[] {
-    const rows = this.db.prepare(
+    const rows = this.database().prepare(
       'SELECT * FROM memory WHERE author = ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY timestamp DESC, id DESC'
     ).all(author, this.now()) as RowData[]
     return rows.map(row => this.rowToEntry(row))
@@ -466,18 +622,20 @@ export class PersistentMemoryStore {
    * than any caller above means to express. Pass the scope.
    */
   delete(key: string, scope?: MemoryScope): boolean {
+    const db = this.database()
     let query = 'DELETE FROM memory WHERE key = ?'
     const params: SQLQueryBindings[] = [key]
     if (scope) { query += ' AND scope = ?'; params.push(scope) }
-    const result = this.db.prepare(query).run(...params)
+    const result = db.prepare(query).run(...params)
     return result.changes > 0
   }
 
   clear(scope?: MemoryScope): number {
+    const db = this.database()
     let query = 'DELETE FROM memory'
     const params: SQLQueryBindings[] = []
     if (scope) { query += ' WHERE scope = ?'; params.push(scope) }
-    const result = this.db.prepare(query).run(...params)
+    const result = db.prepare(query).run(...params)
     return result.changes
   }
 
@@ -492,13 +650,14 @@ export class PersistentMemoryStore {
    * as what it is — a per-run total, not a lifetime figure.
    */
   getStats(): { total: number; byScope: Record<string, number>; expired: number; evicted: Record<string, number> } {
-    const total = (this.db.prepare('SELECT COUNT(*) as count FROM memory').get() as CountRow).count
+    const db = this.database()
+    const total = (db.prepare('SELECT COUNT(*) as count FROM memory').get() as CountRow).count
     const byScope: Record<string, number> = {}
-    const scopes = this.db.prepare('SELECT DISTINCT scope FROM memory').all() as Array<{ scope: string }>
+    const scopes = db.prepare('SELECT DISTINCT scope FROM memory').all() as Array<{ scope: string }>
     for (const { scope } of scopes) {
-      byScope[scope] = (this.db.prepare('SELECT COUNT(*) as count FROM memory WHERE scope = ?').get(scope) as CountRow).count
+      byScope[scope] = (db.prepare('SELECT COUNT(*) as count FROM memory WHERE scope = ?').get(scope) as CountRow).count
     }
-    const expired = (this.db.prepare('SELECT COUNT(*) as count FROM memory WHERE expires_at IS NOT NULL AND expires_at <= ?').get(this.now()) as CountRow).count
+    const expired = (db.prepare('SELECT COUNT(*) as count FROM memory WHERE expires_at IS NOT NULL AND expires_at <= ?').get(this.now()) as CountRow).count
     return { total, byScope, expired, evicted: this.getEvictionTotals() }
   }
 
@@ -536,8 +695,17 @@ export class PersistentMemoryStore {
     }
   }
 
+  /**
+   * Close the open handle. Idempotent, and terminal: a later store call throws
+   * rather than reopening, so `shutdown()` cannot be undone by a recall that
+   * races teardown.
+   */
   close(): void {
-    this.db.close()
+    this.closed = true
+    this.openPath = null
+    const db = this.db
+    this.db = null
+    db?.close()
   }
 }
 

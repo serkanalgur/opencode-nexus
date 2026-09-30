@@ -1093,10 +1093,44 @@ export class NexusOrchestrator {
   constructor(config?: Partial<NexusConfig>, messageStoreConfig?: Partial<MessageStoreConfig>, memoryStoreConfig?: Partial<MemoryStoreConfig>) {
     this.config = this.mergeConfig(config)
     this.budget = this.config.budget
-    this.configManager = new NexusConfigManager(this.config.dashboard, this.config.notifications, this.config.customRoles, this.config.gitFlow, this.config.effort, this.config.budget, this.config.selfHealing)
+    // The 8th seed is the `memory` block, and it is seeded from
+    // `memoryStoreConfig` rather than from `config`. `NexusConfig` deliberately
+    // does not carry a `memory` block — it was removed from that type for doing
+    // nothing, and re-adding it to feed a seed would resurrect the inert block
+    // rather than seed a live one. The store's own parameter is where a
+    // programmatic caller already expresses a DB path and a cap, so the config
+    // manager is given the same two values: `getConfig().memory.storage` then
+    // reports the path the store will actually open instead of the default, and
+    // the two cannot disagree. `enabled` is absent from `memoryStoreConfig` (it
+    // is a user-facing gate, not a store setting) and so falls through to the
+    // default `true`, which is what already happens.
+    this.configManager = new NexusConfigManager(
+      this.config.dashboard, this.config.notifications, this.config.customRoles,
+      this.config.gitFlow, this.config.effort, this.config.budget, this.config.selfHealing,
+      { storage: memoryStoreConfig?.dbPath, maxEntries: memoryStoreConfig?.maxEntries },
+    )
     this.moduleRegistry = new ModuleRegistry()
     this.messageStore = new MessageStore(messageStoreConfig)
-    this.memoryStore = new PersistentMemoryStore(memoryStoreConfig)
+    // A RESOLVER, not the snapshot. `memoryStoreConfig` still seeds
+    // `configManager` above, so the constructor parameter keeps working
+    // unchanged — but it seeds a CONFIG LEVEL, and the store reads that level
+    // live. Passing the object itself froze the path for the life of the
+    // process: `getConfig().memory.storage` then reported whatever
+    // `nexus.jsonc` said while the store went on opening the path it was
+    // constructed with, and the config modal reported a saved setting the app
+    // was ignoring.
+    //
+    // Deliberately NOT a rebuild inside `reloadConfigFromDisk`, which calls
+    // `notifyStateChange()` and emits `config:reloaded`: swapping the database
+    // there would race every in-flight `recallForTask` from a running agent,
+    // and a reconstructed store would reset `evictedTotals` — the running
+    // eviction count a surface shows. Resolving at USE time puts the swap on a
+    // call that is already reading, which is synchronous, so the transition
+    // completes before any other caller can observe it.
+    this.memoryStore = new PersistentMemoryStore(() => {
+      const memory = this.configManager.getConfig().memory
+      return { dbPath: memory.storage, maxEntries: memory.maxEntries }
+    })
     this.messageRouter = new MessageRouter()
 
     // Initialize escalation policy from config selfHealing settings.
@@ -4799,6 +4833,24 @@ export class NexusOrchestrator {
    * one of them is a problem.
    */
   recallForTask(request: RecallRequest): RecallOutcome {
+    // The `memory.enabled` gate, read through the config manager rather than
+    // from a second stored copy — so a TUI toggle, a file edit, or a reload
+    // takes effect on the very next task, with no re-seeding to forget.
+    //
+    // HERE and not at the two call sites (`executeTask` ~:2512 and
+    // `spawnAgent` ~:3742) because this method already owns the rule "an
+    // enhancement never takes down a task" — the try/catch below is the
+    // existing expression of it. One guard at the one choke point beats two
+    // guards at the call sites, which can drift: a third injection point added
+    // later would silently miss both, and a spy on either call site would go on
+    // reporting recalls that were never injected.
+    //
+    // Returns exactly what the catch below returns, so "off" and "the read
+    // failed" are the same observable outcome to a caller — which is correct,
+    // because to a task they are: nothing was injected.
+    if (!this.configManager.getConfig().memory.enabled) {
+      return { block: null, matched: 0, shown: 0, characters: 0 }
+    }
     try {
       return runRecall(this.memoryStore, request)
     } catch (err) {

@@ -347,7 +347,7 @@ describe('#86 — the config block count is stated once, correctly, and follows 
   it('writes every block NexusFullConfig models, and the docs list the same ones', async () => {
     const blocks = saveableConfigBlocks()
     expect([...blocks].sort()).toEqual([
-      'budget', 'customRoles', 'dashboard', 'effort', 'gitFlow', 'models', 'notifications', 'selfHealing',
+      'budget', 'customRoles', 'dashboard', 'effort', 'gitFlow', 'memory', 'models', 'notifications', 'selfHealing',
     ])
 
     // The same answer, from the RUNTIME rather than from the source text, so the

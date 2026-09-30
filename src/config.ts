@@ -344,6 +344,49 @@ export interface NexusFullConfig {
    */
   effort: NexusEffortConfig
   customRoles: NexusCustomRoleConfig[]
+  /**
+   * The durable note store, the ninth block.
+   *
+   * This block used to live on the wider embedder type `NexusConfig` and was
+   * REMOVED from it, correctly: nothing read any of it. `enabled` gated
+   * nothing, `maxEntriesPerScope` was written into a defaults literal and read
+   * by no consumer, and a knob a user can set with no effect is worse than no
+   * knob — see `src/types.ts:465` for the full reasoning. It is listed here
+   * now because that is no longer true: `recallForTask` is called
+   * unconditionally at both injection points (`orchestrator.ts:2512` in
+   * `executeTask`, `orchestrator.ts:3742` in `spawnAgent`), so memory is
+   * unconditionally ON and the knob below is the first honest way to turn it
+   * off. It returns on the FILE-settable type rather than the embedder type
+   * because every field here has a consumer, which is what the removed block
+   * did not.
+   *
+   * Field by field, and named against its consumer:
+   * - `enabled` — the gate at the TOP of `recallForTask`
+   *   (`orchestrator.ts:4801`). `true` by default, and `true` is what is
+   *   already happening, so the default is behaviour-preserving.
+   * - `storage` — the sqlite file path, `MemoryStoreConfig.dbPath`, resolved
+   *   at USE time through the resolver the orchestrator passes to
+   *   `new PersistentMemoryStore(...)` (`orchestrator.ts`). A change of path
+   *   closes the open database and opens the new one on the next call, so it
+   *   needs no restart — see `database` in `src/memory-store.ts`.
+   * - `maxEntries` — `MemoryStoreConfig.maxEntries`, the per-scope FIFO cap
+   *   enforced by `evictOverflow` in `src/memory-store.ts` and re-read on every
+   *   write. The `project` scope is exempt from it BY DESIGN (a human's durable
+   *   notes must not be evicted by disposable entries), and that exemption is
+   *   not to be "fixed" here.
+   *
+   * There is deliberately NO `inject` field — considered and rejected. A second
+   * boolean that turns the prompt block on while leaving retrieval running would
+   * be a half-differentiated switch whose two states a user cannot tell apart
+   * after the fact, which is the SAME failure the block removed from
+   * `NexusConfig` was: a knob that changes nothing observable. `enabled` is
+   * the only knob, and it is wired to a real early return.
+   */
+  memory: {
+    enabled: boolean
+    storage: string
+    maxEntries: number
+  }
 }
 
 /**
@@ -683,7 +726,34 @@ const DEFAULT_CONFIG: NexusFullConfig = {
   // Empty rather than absent: a user with no custom roles is the default, and
   // an empty list is what every merge level falls through to, so "no
   // `customRoles` block anywhere" and "an empty one" resolve the same way.
-  customRoles: []
+  customRoles: [],
+  // On by default, and the default is what is ALREADY happening: `recallForTask`
+  // is called unconditionally at `orchestrator.ts:2512` and `~:3742`, so `false`
+  // would be a behaviour change and `true` is merely the first honest way to
+  // say it. This is the deliberate difference from the `memory` block that was
+  // removed from `NexusConfig` — there, `enabled` gated nothing.
+  memory: {
+    enabled: true,
+    // MUST mirror `MemoryStoreConfig.DEFAULT_CONFIG.dbPath`
+    // (`src/memory-store.ts`) exactly, expression and all. The two literals are
+    // the same value by CONSTRUCTION, not by a "change both" convention resting
+    // on review: the orchestrator constructs the store with a RESOLVER over
+    // `configManager.getConfig().memory` (`orchestrator.ts`, `new
+    // PersistentMemoryStore(() => …)`), so this is the value the store opens and
+    // the store's own default only applies when a caller passes no config at
+    // all. `test/config-knobs.test.ts` asserts the two agree, so a one-sided
+    // change fails the suite rather than shipping a path the config does not
+    // name.
+    //
+    // The resolution is LIVE: editing this takes effect on the next store call,
+    // with no restart. See `database` in `src/memory-store.ts`.
+    storage: join(process.env.HOME || '~', '.local', 'share', 'opencode-nexus', 'memory.db'),
+    // Mirrors `MemoryStoreConfig.DEFAULT_CONFIG.maxEntries`
+    // (`src/memory-store.ts`), which is a PER-SCOPE cap: `project` is exempt
+    // by design, so a smaller number here still never evicts a durable note.
+    // Also live — re-read on every `set`, no reopen involved.
+    maxEntries: 1000
+  }
 }
 
 /**
@@ -823,6 +893,20 @@ export class NexusConfigManager {
    * `dashboardBase`.
    */
   private selfHealingBase: NexusFullConfig['selfHealing']
+  /**
+   * Programmatic starting point for the `memory` block, beneath the file levels
+   * and above `DEFAULT_CONFIG`. Same single-consumer rationale as
+   * `dashboardBase`: the orchestrator seeds it and every consumer reads the
+   * merged result, so the setting is readable from one place with a defined
+   * precedence.
+   *
+   * There is deliberately NO stored copy of `memory.enabled` on the
+   * orchestrator. The flag is read through `getConfig()` at the gate in
+   * `recallForTask`, so a second copy could not be updated by a TUI edit or a
+   * file reload and would go on answering with the value it was constructed
+   * with — which is the exact failure `dashboardBase`'s doc comment describes.
+   */
+  private memoryBase: NexusFullConfig['memory']
 
   constructor(
     dashboardBase?: Partial<NexusDashboardConfig>,
@@ -831,7 +915,8 @@ export class NexusConfigManager {
     gitFlowBase?: Partial<NexusGitFlowConfig>,
     effortBase?: Partial<NexusEffortConfig>,
     budgetBase?: Partial<BudgetConstraint>,
-    selfHealingBase?: Partial<NexusFullConfig['selfHealing']>
+    selfHealingBase?: Partial<NexusFullConfig['selfHealing']>,
+    memoryBase?: Partial<NexusFullConfig['memory']>
   ) {
     // Config files are loaded later via loadFromPath(basePath)
     this.projectConfig = null
@@ -868,6 +953,27 @@ export class NexusConfigManager {
       alertThreshold: budgetBase?.alertThreshold ?? DEFAULT_CONFIG.budget.alertThreshold
     }
     this.selfHealingBase = { ...DEFAULT_CONFIG.selfHealing, ...selfHealingBase }
+    // Last one added, so last one seeded. A spread rather than three `??`
+    // chains because this block has no file-shape subset to protect: there is
+    // no constructor-only key in it, unlike `budget`'s `hardLimit`.
+    //
+    // …but the seed is FILTERED first, and that filter is the point. Object
+    // spread copies own enumerable keys INCLUDING ones whose value is
+    // `undefined`, so `{ storage: undefined }` would not fall through to the
+    // default — it would DELETE `storage` from the base. The orchestrator's 8th
+    // seed is built as a literal of possibly-absent fields
+    // (`{ storage: memoryStoreConfig?.dbPath, maxEntries: ... }`), which is
+    // exactly that shape, so an unfiltered spread here left
+    // `getConfig().memory` as `{ enabled: true }`: `getSaveableConfig()` then
+    // wrote `"memory": {"enabled": true}` on the next save, `discoverConfig`
+    // classified both lost keys `opaque`, and `getConfig().memory.storage`
+    // disagreed with `memoryStore.path` with nothing logging it. Assigning a
+    // field only when its source is `!== undefined` keeps the "the store's
+    // config and the store agree" promise the mirror comments above make.
+    const memorySeed: Partial<NexusFullConfig['memory']> = {}
+    if (memoryBase?.storage !== undefined) memorySeed.storage = memoryBase.storage
+    if (memoryBase?.maxEntries !== undefined) memorySeed.maxEntries = memoryBase.maxEntries
+    this.memoryBase = { ...DEFAULT_CONFIG.memory, ...memorySeed }
   }
 
   /**
@@ -1088,7 +1194,21 @@ export class NexusConfigManager {
       customRoles: (this.storageConfig?.customRoles
         ?? this.projectConfig?.customRoles
         ?? this.globalConfig?.customRoles
-        ?? this.customRolesBase).map(role => ({ ...role }))
+        ?? this.customRolesBase).map(role => ({ ...role })),
+      // Field by field, for the same reason as every other object block above:
+      // a level that sets only `enabled` — which is the single field a user is
+      // most likely to write, and the one `/nexus config` toggles — must not
+      // blank `storage` back to the level beneath. A spread would resolve the
+      // same way here, but the rule is uniform across the blocks and one
+      // exception is how the `retryDelay` class of bug got in.
+      memory: {
+        enabled: this.storageConfig?.memory?.enabled ?? this.projectConfig?.memory?.enabled
+          ?? this.globalConfig?.memory?.enabled ?? this.memoryBase.enabled,
+        storage: this.storageConfig?.memory?.storage ?? this.projectConfig?.memory?.storage
+          ?? this.globalConfig?.memory?.storage ?? this.memoryBase.storage,
+        maxEntries: this.storageConfig?.memory?.maxEntries ?? this.projectConfig?.memory?.maxEntries
+          ?? this.globalConfig?.memory?.maxEntries ?? this.memoryBase.maxEntries
+      }
     }
   }
 
@@ -1480,6 +1600,13 @@ export class NexusConfigManager {
     // from their `nexus.jsonc` the first time they change a model in the TUI,
     // with nothing to restore them from.
     result.customRoles = current.customRoles.map(role => ({ ...role }))
+
+    // Memory — same reason, all three fields. This block is the one where an
+    // omission is least visible: the file keeps working, the store keeps
+    // working, and a user's chosen DB path and entry cap silently reset to the
+    // defaults at the first model change, leaving notes in a file nothing names
+    // any more. `saveProjectConfig` writes this return value as the whole file.
+    result.memory = { ...current.memory }
 
     return result
   }

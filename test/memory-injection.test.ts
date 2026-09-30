@@ -301,3 +301,44 @@ describe('recall degrades to silence rather than taking a task down', () => {
     expect(prompted[0] ?? '').toContain('## Task')
   })
 })
+
+describe('memory.enabled is a gate that actually gates', () => {
+  it('injects nothing when the block is off, on the same path that injects when it is on', async () => {
+    const prompted: string[] = []
+    const orchestrator = await makeOrchestrator(prompted)
+    seedProjectNote(orchestrator, 'file:src/a.ts', 'GATED-MARKER')
+
+    // The control: on by default, so the note is in the prompt. Without this the
+    // test below would also pass if the path had simply stopped working.
+    orchestrator['dag'] = stubDAG()
+    await orchestrator['spawnAndExecute']({
+      id: 'n1', task: taskWith({ files: { include: ['src/a.ts'] } }),
+      dependencies: [], status: 'pending',
+    } as never)
+    expect(prompted[0] ?? '').toContain('GATED-MARKER')
+
+    // Now off. The gate is read from the config manager on every call, so
+    // flipping it here is enough — there is no second stored copy to re-seed,
+    // which is the property that makes the flag live rather than decorative.
+    orchestrator.configManager.updateStorageConfig({ memory: { enabled: false } } as never)
+
+    orchestrator['dag'] = stubDAG()
+    await orchestrator['spawnAndExecute']({
+      id: 'n2', task: taskWith({ files: { include: ['src/a.ts'] } }),
+      dependencies: [], status: 'pending',
+    } as never)
+
+    const second = prompted[1] ?? ''
+    expect(second).not.toContain('GATED-MARKER')
+    // The TASK still went out. A gate that stopped the prompt would be a worse
+    // bug than a gate that did nothing.
+    expect(second).toContain('## Task')
+
+    // And the outcome is indistinguishable from a miss, which is the same value
+    // the existing catch block returns — "off" and "the read failed" look
+    // identical to a caller, and correctly so: nothing was injected either way.
+    expect(orchestrator.recallForTask({ files: ['src/a.ts'], text: 'tidy' }))
+      .toEqual({ block: null, matched: 0, shown: 0, characters: 0 })
+    await orchestrator.shutdown()
+  })
+})
