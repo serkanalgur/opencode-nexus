@@ -15,7 +15,8 @@ import {
   configPromptDescription,
   configSaveUpdate,
   configScreenTitle,
-  configSearchQuery,
+  configHubCurrent,
+  configOptionFooter,
   configScreenOptions,
   configSelect,
   configUp,
@@ -1288,19 +1289,35 @@ export default Plugin.define({
        */
       const changes = (): number => configDirtyCount(discovery, base, draft)
 
-      /** The row for one option. The row's VALUE is the option itself. */
-      const toDialogRow = (option: ConfigOption): ConfigRow<ConfigOption> => ({
-        title: configOptionTitle(option, configSaveScope),
-        description: configOptionDescription(
+      /**
+       * The row for one option. The row's VALUE is the option itself.
+       *
+       * The four text slots are routed by `config-flow.ts`, not here: title from
+       * `configOptionTitle`, the inline context from `configOptionDescription`,
+       * and the right-aligned current state from `configOptionFooter`. The
+       * `undefined`s are spread rather than assigned so an absent description or
+       * footer stays absent instead of rendering as the string "undefined".
+       */
+      const toDialogRow = (option: ConfigOption): ConfigRow<ConfigOption> => {
+        const description = configOptionDescription(
           option,
           draft,
           base,
           configIsDirty(base, draft),
           changes()
-        ),
-        value: option,
-        ...(configOptionDisabled(option) ? { disabled: true } : {})
-      })
+        )
+        // No `configIsDirty(base, draft)` here, and that omission is the point:
+        // the footer marks THIS row, and the draft-wide flag would mark every
+        // row in the list when one field was staged. See `configOptionFooter`.
+        const footer = configOptionFooter(option, draft, base)
+        return {
+          title: configOptionTitle(option, configSaveScope),
+          value: option,
+          ...(description === undefined ? {} : { description }),
+          ...(footer === undefined ? {} : { footer }),
+          ...(configOptionDisabled(option) ? { disabled: true } : {})
+        }
+      }
 
       /** Confirm a staged edit, saying plainly that nothing is on disk yet. */
       const noteStaged = (field: ConfigField, value: unknown) => {
@@ -1399,7 +1416,26 @@ export default Plugin.define({
         // `configUp` decides where it lands. There is no second commit path
         // through this function, which is what keeps "typed" and "saved" from
         // racing — the only way a value reaches the draft is `stage`.
-        const chosen = await context.ui.dialog.select({ title, options: options.map(toDialogRow) })
+        // `current` is the HOST's mark for the row that is already in effect, and
+        // the host draws a `●` in its gutter. Only the hub has one — the scope row
+        // — and `configHubCurrent` returns `undefined` on the other two screens,
+        // so the field list's cursor is never moved by it.
+        //
+        // `placeholder` is the search field's own hint text, and it IS settable
+        // per-screen (the plugin type has it), so the host's filter is told what
+        // it matches: the block and setting names it will actually look at.
+        const current = configHubCurrent(options)
+        const chosen = await context.ui.dialog.select({
+          title,
+          options: options.map(toDialogRow),
+          ...(current === undefined ? {} : { current }),
+          // A hint for the host's own filter, and only where there is a list long
+          // enough to want one: the two screens that list rows. The boolean
+          // switch screen has two rows and needs no filter.
+          ...(screen.kind === 'blocks' || screen.kind === 'fields'
+            ? { placeholder: 'Filter by name' }
+            : {})
+        })
 
         if (chosen === undefined) {
           const up = configUp(screen)
@@ -1425,21 +1461,6 @@ export default Plugin.define({
               stage(commitConfigToggle(chosen.field, chosen))
             }
             break
-          case 'ask': {
-            // The hub's search row. The flow named a screen but no query — the
-            // only source of a query is this prompt — so a dismissal or an empty
-            // line leaves the user exactly where they were rather than dropping
-            // them into a search that matched every setting in the config.
-            const typed = await context.ui.dialog.prompt({
-              title: 'Search settings',
-              description: 'Block names and setting names',
-              placeholder: 'e.g. maxTotalCost, or budget'
-            })
-            const query = configSearchQuery(typed)
-            if (query === undefined) break
-            screen = { kind: 'search', query }
-            break
-          }
           case 'to':
             screen =
               outcome.screen.kind === 'editor'
