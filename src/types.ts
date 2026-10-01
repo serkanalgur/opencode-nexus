@@ -42,11 +42,23 @@ export type AgentRole =
   | 'designer'
   | string
 
+/**
+ * `spawning` and `blocked` were members here and nothing in `src/` ever
+ * assigned either one — they were read by `sessionStateOfAgent`
+ * (`orchestrator.ts:749`) and written by nothing at all, so both arms described
+ * a state no agent could be in. The exhaustive switch there has no `default` on
+ * purpose, which is why adding them was a compile error and why they survived:
+ * once the arm existed the compiler was satisfied, and only a check on whether
+ * the arm is ever entered would have caught it. That check is
+ * `test/status-union-coverage.test.ts`, which failed on exactly these two.
+ *
+ * `spawning` also had a second, louder effect: because it mapped to `running`,
+ * a reader of the sessions table had no way to tell it apart from an agent that
+ * was genuinely mid-task.
+ */
 export type AgentStatus = 
-  | 'spawning'
   | 'idle'
   | 'working'
-  | 'blocked'
   | 'completed'
   | 'failed'
   | 'terminated'
@@ -75,13 +87,27 @@ export interface Task {
   assignedAgent?: string
 }
 
+/**
+ * `queued` and `cancelled` were members here and nothing in `src/` ever
+ * assigned either one. `pending` and `running` stay and ARE written, but at
+ * Task CONSTRUCTION rather than by the scheduler: a `Task` arrives from a
+ * caller already carrying its status (`templates.ts:88`, `index.ts:2525`,
+ * `index.ts:2056`). That is worth stating because it is exactly the shape that
+ * makes a "no writer" grep lie — the two live members have no `task.status =`
+ * site at all, and a naive scan would report all four as dead. It would be
+ * wrong about two of them.
+ *
+ * `DAGNode.status` (`src/types.ts:116`) is a SEPARATE inline union that still
+ * carries a `cancelled`, and it is that one the scheduler actually drives. The
+ * overlap between the two unions is what let a dead `TaskStatus` member hide
+ * behind a live `DAGNode` write; `test/status-union-coverage.test.ts` now keeps
+ * the two apart by matching on the receiver.
+ */
 export type TaskStatus = 
   | 'pending'
-  | 'queued'
   | 'running'
   | 'completed'
   | 'failed'
-  | 'cancelled'
 
 export interface TaskResult {
   success: boolean

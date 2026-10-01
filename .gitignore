@@ -14,3 +14,9 @@ RESEARCH.md
 SIDEBAR_INVESTIGATION.md
 .opencode/
 COMPARISON.md
+.temp_files/
+
+.wrongstack/
+!/.wrongstack/
+/.wrongstack/*
+!/.wrongstack/project.json

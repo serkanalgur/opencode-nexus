@@ -107,7 +107,9 @@ opencode-nexus/
 ├── docs/                   # API.md (by class), COMPATIBILITY.md
 ├── examples/               # Runnable example scripts
 ├── skills/                 # Bundled agent skills
-├── assets/                 # banner.svg
+├── assets/
+│   ├── banner.svg
+│   └── agents/             # nexus-*.md agent definitions, written to ~/.config/opencode/agents
 ├── biome.jsonc             # Biome config — lint only, formatter disabled
 ├── package.json
 ├── tsconfig.json           # strict; includes src/ AND test/

@@ -471,13 +471,16 @@ describe('designer: the documentation and the dashboard', () => {
   })
 
   it('the orchestrator prompt lists the designer as a role it can choose', () => {
-    // `NEXUS_AGENT_CONTENT` is the ONLY place a routing rule can live: there is
-    // no router in this codebase, so if the prose here does not say when to
-    // pick the designer, no Designer spawn ever happens.
-    const readme = readRepoFile('src', 'index.ts')
-    expect(readme).toMatch(/\*\*designer\*\* — Decide UI\/UX direction/)
+    // The orchestrator agent definition is the ONLY place a routing rule can
+    // live: there is no router in this codebase, so if the prose here does not
+    // say when to pick the designer, no Designer spawn ever happens. It lives in
+    // `assets/agents/nexus-orchestrator.md`, not in `src/index.ts` — the agent
+    // definitions were extracted out of the entrypoint so they are readable and
+    // diffable as files.
+    const orchestrator = readRepoFile('assets', 'agents', 'nexus-orchestrator.md')
+    expect(orchestrator).toMatch(/\*\*designer\*\* — Decide UI\/UX direction/)
     // And the negative half, which is what stops it being spawned for work the
     // coder should take.
-    expect(readme).toMatch(/Do \*\*not\*\* spawn it when/)
+    expect(orchestrator).toMatch(/Do \*\*not\*\* spawn it when/)
   })
 })

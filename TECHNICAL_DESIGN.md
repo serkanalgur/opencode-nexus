@@ -886,11 +886,9 @@ type AgentRole =
   | 'documenter'
   | string // Custom roles
 
-type AgentStatus = 
-  | 'spawning'
+type AgentStatus =
   | 'idle'
   | 'working'
-  | 'blocked'
   | 'completed'
   | 'failed'
   | 'terminated'

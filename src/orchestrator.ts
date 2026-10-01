@@ -745,14 +745,20 @@ export interface OrchestratorState {
  * no `default` arm on purpose: adding a status to that union then fails to
  * compile HERE, which is the only place that would otherwise silently pick a
  * wrong answer for a status nobody has thought about.
+ *
+ * `spawning` and `blocked` used to be arms here and nothing in `src/` ever
+ * assigned either, so both described a state no agent could be in — and
+ * `spawning` in particular was indistinguishable from a real mid-task agent,
+ * because they both returned `running`. They are gone from the union;
+ * `test/status-union-coverage.test.ts` now fails if a member is ever added back
+ * without a writer. This switch is the half that catches a member nobody
+ * handles; that test is the half that catches a member nobody ever reaches.
  */
 function sessionStateOfAgent(status: AgentStatus): SessionStateView['state'] {
   switch (status) {
-    case 'spawning':
     case 'working':
       return 'running'
     case 'idle':
-    case 'blocked':
       return 'idle'
     case 'completed':
     case 'failed':

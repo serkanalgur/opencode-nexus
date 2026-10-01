@@ -242,7 +242,7 @@ describe("HealthMonitor", () => {
     it("should only check active agents (working or idle)", async () => {
       const mockFn = mock(() => [
         createAgent({ id: "idle-agent", status: "idle" }),
-        createAgent({ id: "spawning-agent", status: "spawning" }),
+        createAgent({ id: "completed-agent", status: "completed" }),
         createAgent({ id: "working-agent", status: "working" })
       ])
 
@@ -258,8 +258,8 @@ describe("HealthMonitor", () => {
       // idle and working agents should be checked
       expect(testMonitor.getHealth("idle-agent")).not.toBeNull()
       expect(testMonitor.getHealth("working-agent")).not.toBeNull()
-      // spawning agent should not be checked
-      expect(testMonitor.getHealth("spawning-agent")).toBeNull()
+      // a settled agent is not active either, and must not be checked
+      expect(testMonitor.getHealth("completed-agent")).toBeNull()
     })
   })
 
