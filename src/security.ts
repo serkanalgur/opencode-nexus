@@ -50,7 +50,7 @@ const DANGEROUS_PATTERNS: Array<{ pattern: RegExp; category: string; message: st
   { pattern: /document\.write\s*\(/g, category: 'xss', message: 'document.write() usage detected', suggestion: 'Use DOM manipulation methods instead' },
   { pattern: /new Function\s*\(/g, category: 'injection', message: 'Function constructor usage detected', suggestion: 'Avoid dynamic code execution' },
   { pattern: /__proto__\s*=/g, category: 'prototype-pollution', message: '__proto__ assignment detected', suggestion: 'Use Object.create() or Object.assign() instead' },
-  { pattern: /process\.env\[?[\"'][^\"']+[\"']\]?(?!\.replace)/g, category: 'data-exposure', message: 'Direct process.env access', suggestion: 'Use a config module with validation' },
+  { pattern: /process\.env\[?["'][^"']+["']\]?(?!\.replace)/g, category: 'data-exposure', message: 'Direct process.env access', suggestion: 'Use a config module with validation' },
 ]
 
 export class SecurityScanner {

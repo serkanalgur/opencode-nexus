@@ -3433,7 +3433,7 @@ export class NexusOrchestrator {
     // Step 1: Retry with exponential backoff
     if (retryCount < policy.maxRetries) {
       this.nodeRetryCounts.set(node.id, retryCount + 1)
-      const delay = policy.retryDelay * Math.pow(2, retryCount) // exponential backoff
+      const delay = policy.retryDelay * 2 ** retryCount // exponential backoff
       await this.sleep(delay)
 
       // Re-spawn and execute the node

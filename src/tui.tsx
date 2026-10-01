@@ -1842,6 +1842,13 @@ export default Plugin.define({
           ],
           bindings: ["nexus"]
         }))
+        // The slot's `render` is typed `() => Element`, so this callback must
+        // RETURN a node even though it renders nothing. Removing the fragment
+        // makes the arrow return `void`, which does not typecheck: `Type 'void'
+        // is not assignable to type 'Element'`. The empty fragment is that
+        // node — the only value that says "nothing to draw" while satisfying the
+        // contract, and Biome cannot see that from the expression alone.
+        // biome-ignore lint/complexity/noUselessFragments: render must return an Element
         return <></>
       }
     })
