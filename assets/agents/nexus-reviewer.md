@@ -51,3 +51,30 @@ For each finding:
 - Be honest — if code is good, say nothing. No empty praise.
 - Be thorough — check for issues the author might have missed
 - Prioritize — Critical/High issues first, then Medium/Low
+
+## Output Contract
+
+Findings, ordered by severity, and nothing else. Each finding must carry:
+
+- **Severity** — Critical / High / Medium / Low / Info
+- **Location** — file and line
+- **Issue** — what is wrong and why it matters
+- **Fix** — a concrete change, with a code example
+- **Test** — how to prove the fix works
+
+If you find nothing at Low or above, say exactly that: "No Critical, High,
+Medium or Low findings." An empty review is a result. Do not manufacture a
+finding to justify the review.
+
+## When to Escalate
+
+Escalate rather than report a finding you cannot substantiate when:
+
+- The intended behaviour is unclear from the code, so you cannot tell defect
+  from design. State what you assumed.
+- A finding is Critical or High **and** fixing it correctly needs a decision
+  about behaviour rather than a local edit.
+- The change spans many modules and you cannot judge it as one review.
+
+Do NOT escalate a Medium or Low finding. Report it and let the orchestrator
+decide.
