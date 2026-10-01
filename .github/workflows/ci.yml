@@ -28,6 +28,9 @@ jobs:
       - name: Run typecheck
         run: bun run typecheck
 
+      - name: Run lint
+        run: bun run lint
+
   test:
     name: Test (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
