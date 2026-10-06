@@ -757,6 +757,32 @@ describe('the agent-markdown convention', () => {
     expect(section).toContain('Never commit, push, or merge on your own initiative')
   })
 
+  it('never emits an attribution-trailer clause with any sub-key off', () => {
+    // The no-Co-Authored-By rule is unconditional for the same reason the
+    // unprompted-commit rule is: models hallucinate trailers such as
+    // "Co-Authored-By: Claude" even when the model is not Claude, and no
+    // gitFlow key is a knob for authorship. Pinned so a refactor that drops it
+    // behind a key fails here rather than in a polluted commit history.
+    //
+    // `gitFlow.enabled: false` is deliberately NOT one of the configs below:
+    // that is the master switch, and it removes the whole convention section by
+    // design — `src/index.ts` gates `buildGitFlowConventionSection` on
+    // `gitFlowResolved.active`. What this pins is that no SUB-key can disable
+    // the clause.
+    for (const config of [
+      ALL_ON,
+      { ...ALL_ON, requireBranch: false },
+      { ...ALL_ON, conventionalCommits: false },
+      { ...ALL_ON, prBeforeMerge: false },
+      { ...ALL_ON, requireBranch: false, conventionalCommits: false, prBeforeMerge: false },
+    ]) {
+      const section = buildGitFlowConventionSection(config, { isRepo: true, repoRoot: '/x', repoId: '/x/.git', branch: 'feat/y', detached: false, hasRemote: true, remote: 'origin', known: true })
+      expect(section).toContain('No attribution trailers')
+      expect(section).toContain('Co-Authored-By')
+      expect(section).toContain('unless the user explicitly asks')
+    }
+  })
+
   it('tells the agent the section can be turned off, and names the check as read-only', () => {
     const section = buildGitFlowConventionSection(ALL_ON, { isRepo: true, repoRoot: '/x', repoId: '/x/.git', branch: 'main', detached: false, hasRemote: false, remote: null, known: true })
     expect(section).toContain('gitFlow.enabled')

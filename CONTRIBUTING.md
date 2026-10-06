@@ -148,6 +148,8 @@ refactor: simplify DAG executor
 test: add unit tests for cost router
 ```
 
+Do not add `Co-Authored-By` or any attribution trailer to commits or PRs unless a maintainer explicitly asks for it. Do not infer authorship from the model you are using.
+
 ### Code Style
 
 - TypeScript strict mode — `tsconfig.json` sets `"strict": true`
