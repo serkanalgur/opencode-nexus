@@ -155,3 +155,43 @@ describe('each role states an output contract and when to escalate', () => {
     }
   )
 })
+
+describe('commit-capable prompts prohibit attribution trailers', () => {
+  // Roles whose frontmatter grants `shell` can run `git commit`; the
+  // orchestrator opens PRs. Models hallucinate trailers such as
+  // "Co-Authored-By: Claude" even when the model is not Claude, so the rule is
+  // pinned per prompt. Only designer denies `shell`; reviewer and explorer
+  // deny only `edit`, and OpenCode's permission resolution falls through to a
+  // catch-all allow for them — they CAN run `git commit`, so they carry the
+  // rule too. Designer's protection is the appended git-convention section
+  // (`buildGitFlowConventionSection`), covered in `test/git-flow.test.ts`.
+  const COMMIT_CAPABLE = ['nexus-coder.md', 'nexus-tester.md', 'nexus-documenter.md', 'nexus-architect.md', 'nexus-reviewer.md', 'nexus-explorer.md', ORCHESTRATOR]
+
+  it.each(COMMIT_CAPABLE)(
+    '%s forbids Co-Authored-By and similar trailers unless the user asks',
+    (name) => {
+      // One anchored regex, not three loose substrings: the substring version
+      // passes for an INVERTED rule ("never add ... unless ... Do not
+      // infer ..."), because each fragment is still present somewhere in the
+      // file. The anchor ties the fragments together in the order the rule
+      // states them, so an inversion fails here.
+      const content = readAgent(name)
+      expect(content).toMatch(
+        /NEVER add `Co-Authored-By`[\s\S]{0,120}unless the user explicitly asks for it in this conversation\. Do not infer authorship from the model in use\./
+      )
+    }
+  )
+
+  it('every agent that can shell carries the attribution rule', () => {
+    // OpenCode's permission resolution falls through to a catch-all allow, so
+    // an agent that never names `shell` can still run `git commit`. Stated
+    // that way round on purpose: unless the frontmatter explicitly denies
+    // `shell`, the prompt must carry the rule. This is the invariant that
+    // would have caught reviewer and explorer missing it.
+    for (const name of [...SPAWNABLE_ROLES.map((r) => `nexus-${r}.md`), ORCHESTRATOR]) {
+      const frontmatter = frontmatterOf(readAgent(name))
+      const shellDenied = /action:\s*shell[\s\S]*?effect:\s*deny/.test(frontmatter)
+      if (!shellDenied) expect(readAgent(name)).toMatch(/Co-Authored-By/)
+    }
+  })
+})

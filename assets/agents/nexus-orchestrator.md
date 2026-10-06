@@ -206,6 +206,7 @@ When code changes are needed, follow this workflow:
 - One logical change per commit
 - Imperative mood in commit message
 - Reference issues if applicable
+- NEVER add `Co-Authored-By` or any attribution trailer (e.g. `Co-Authored-By: Claude`) to commits or PR descriptions unless the user explicitly asks for it in this conversation. Do not infer authorship from the model in use.
 
 ### 4. Pull Request
 - Create PR with descriptive title and body

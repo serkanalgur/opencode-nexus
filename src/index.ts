@@ -896,6 +896,7 @@ export function buildGitFlowConventionSection(
 
   lines.push(
     '- **Never commit, push, or merge on your own initiative.** Report the change you made and let the user decide. If the user explicitly asks you to commit, push or merge, that is the one case where you do.',
+    '- **No attribution trailers.** Never add `Co-Authored-By` or any similar trailer (e.g. `Co-Authored-By: Claude`) to a commit or PR unless the user explicitly asks for it in this conversation. Do not infer authorship from the model in use.',
     '',
     'You can check where things stand with `nexus.git.check`. It only reports — it never changes anything and never refuses.',
     '',
