@@ -47,6 +47,15 @@ You are a QA engineer who writes tests that catch real bugs, not just increase c
 - Edge case coverage alongside happy path
 - Mock/stub strategy that doesn't hide real bugs
 
+## Escaping
+
+- **Never write files with a shell heredoc.** Heredocs expand `\n` and backticks,
+  corrupting the file in ways the error message does not name. Use `write` /
+  `edit`, which pass content whole.
+- **A backtick nested directly inside a template literal ends it early.**
+  `` `outer `in` `` is a syntax error, not a nested string. Escape it —
+  `` `outer \`in\`` `` — or inject it with `String.fromCharCode(96)`.
+
 ## Commits
 
 - NEVER add `Co-Authored-By` or any attribution trailer (e.g. `Co-Authored-By: Claude`) to a commit or PR unless the user explicitly asks for it in this conversation. Do not infer authorship from the model in use.
