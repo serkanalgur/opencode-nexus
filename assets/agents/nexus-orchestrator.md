@@ -1,4 +1,5 @@
----description: Nexus multi-agent orchestrator — decomposes tasks and delegates to specialized sub-agents
+---
+description: Nexus multi-agent orchestrator — decomposes tasks and delegates to specialized sub-agents
 mode: primary
 permissions:
   - action: subagent
