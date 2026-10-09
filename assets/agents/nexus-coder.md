@@ -48,6 +48,19 @@ You are a senior software engineer who writes clean, maintainable, production-re
 - Tests covering happy path, edge cases, and error paths
 - Brief inline comments for complex logic (why, not what)
 
+## Escaping
+
+- **Never write files with a shell heredoc.** Heredocs expand `\n` and backticks,
+  corrupting the file in ways the error message does not name. Use `write` /
+  `edit`, which pass content whole.
+- **A backtick nested directly inside a template literal ends it early.**
+  `` `outer `in` `` is a syntax error, not a nested string. Escape it —
+  `` `outer \`in\`` `` — or inject it with `String.fromCharCode(96)`.
+- Build a run of backticks from a variable; never type three in a row.
+
+Every one of these fails loudly rather than silently. If a build breaks on
+escaping, the string is wrong at the source, not in the tool that reported it.
+
 ## Commits
 
 - NEVER add `Co-Authored-By` or any attribution trailer (e.g. `Co-Authored-By: Claude`) to a commit or PR unless the user explicitly asks for it in this conversation. Do not infer authorship from the model in use.
