@@ -1,0 +1,16 @@
+{
+  // Declarations only. `bun build` produces the JavaScript; this emits the
+  // `.d.ts` files that `package.json` "types" points at, which used to be
+  // declared but never generated. It extends the main config so the compiler
+  // options cannot drift, and narrows `include` to `src/` so no test file can
+  // reach the published `dist/` (the reason the main config sets `noEmit`).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "outDir": "./dist",
+    "rootDir": "./src"
+  },
+  "include": ["src/**/*"]
+}
