@@ -431,8 +431,8 @@ two ways to reach it:
 Ask the agent: "start the nexus dashboard"
 ```
 
-The TUI command submits `/nexus dashboard [port] [host]` to that server process,
-whose prompt hook routes it to the orchestrator; the agent's route calls
+The TUI command sends `/nexus dashboard [port] [host]` to that server process
+over the plugin's RPC, which routes it to the orchestrator; the agent's route calls
 `nexus.dashboard.start(port=4747, host="127.0.0.1")` directly. Both end at the
 same start, and both print the URL it bound. **If the start fails, nothing is
 listening and no browser is opened** — the reason is reported, and no URL is
@@ -952,19 +952,18 @@ one, it dispatches to a subcommand (`config`/`c`, `status`/`s`, `dashboard`/`d`,
 | `/nexus-status` | `/ns` | Show the config summary |
 | `/nexus-reset` | — | Reset all settings to defaults |
 
-A prompt beginning `/nexus …` typed into the composer is a *different* thing: it
-is intercepted by a prompt hook and routed to `orchestrator.handleCommand()`,
-which understands `status`, `agents`, `costs`, `pause`, `resume`, and
-`dashboard [port] [host]` (which starts the server, or says why it did not),
-`dashboard stop`, and `dashboard state` (the state as JSON). Anything else
-answers `Unknown command`. This hook cannot cancel the prompt — the plugin API
-gives it no way to — so it replaces the command text with the command's result
-rather than leaving the model holding a bare `/nexus dashboard` next to an
-answer it has no reason to read. The table above is the TUI palette.
+Outside the TUI (web, desktop, `opencode run`), `/nexus …` is a command the
+server plugin registers with OpenCode. It understands `status`, `agents`,
+`costs`, `pause`, `resume`, and `dashboard [port] [host]` (which starts the
+server, or says why it did not), `dashboard stop`, and `dashboard state` (the
+state as JSON). Anything else answers `Unknown command`. The result is posted to
+the session as a notice **without starting a model turn**. Inside the TUI the
+plugin's own `/nexus` wins, because the TUI resolves its keymap commands before
+server commands. The table above is the TUI palette.
 
 **Those subcommands are reachable from the TUI too, not only from the
-composer.** A subcommand the TUI does not handle itself is submitted to the
-server verbatim and answered there, so `/nexus agents [filter]`, `/nexus costs`,
+composer.** A subcommand the TUI does not handle itself is sent to the
+server verbatim over the plugin's RPC and its answer is shown in a dialog, so `/nexus agents [filter]`, `/nexus costs`,
 `/nexus pause` and `/nexus resume` all work when typed in the TUI. `agents`
 reads an optional filter as the second word, and the whole line is forwarded, so
 `/nexus agents reviewer` filters server-side. `status` and `dashboard` are the

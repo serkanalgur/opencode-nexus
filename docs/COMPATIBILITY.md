@@ -55,9 +55,9 @@ can.** The dashboard server runs in the OpenCode *server* process, beside the
 orchestrator whose state it serves; the TUI plugin runs in the *TUI* process and
 has no orchestrator, no module registry and no way to invoke a tool. It does have
 the OpenCode client, which is an HTTP client to that same server process — so
-`/nexus dashboard` submits `/nexus dashboard [port] [host]` as a prompt, and the
-server's `session.prompt` hook routes it to `orchestrator.handleCommand()`, which
-starts the server there.
+`/nexus dashboard` sends `/nexus dashboard [port] [host]` over the plugin's RPC
+(`src/rpc.ts`), and the server runs it through `orchestrator.handleCommand()`,
+which starts the server there.
 
 The command then asks `http://host:port/api/health` and acts on the answer:
 
@@ -72,22 +72,20 @@ It never opens a browser at an address it has not confirmed is serving a nexus
 dashboard. A failure (port in use, `dashboard.enabled: false`) is reported as
 what it is, with no URL in the message.
 
-**There is a second, unrelated `/nexus` in the prompt.** A prompt beginning
-`/nexus …` is intercepted by a `session.prompt` hook and routed to
-`orchestrator.handleCommand()`, which supports a different and much smaller set:
-`status`, `agents`, `costs`, `pause`, `resume`, `dashboard [port] [host]`,
-`dashboard stop` and `dashboard state`. `dashboard` starts the server and reports
-the address it bound; `dashboard state` returns the orchestrator state as JSON, a
-state dump rather than a dashboard. Anything else, including `/nexus web` typed
-into the composer, answers `Unknown command. Available: status, agents, costs,
-pause, resume, dashboard [port] [host], dashboard stop, dashboard state`.
+**Outside the TUI, `/nexus` is a registered server command.** The server plugin
+registers `nexus` with `ctx.command.transform`, so clients that do not run the
+TUI plugin (web, desktop, `opencode run`) can use it. It supports `status`,
+`agents`, `costs`, `pause`, `resume`, `dashboard [port] [host]`,
+`dashboard stop` and `dashboard state`; anything else answers `Unknown command.
+Available: …`. The result is posted with `session.synthetic({ resume: false })`,
+the call core uses for its own notices, so it is recorded **without waking the
+agent**: no model request is made. Inside the TUI the plugin's keymap `/nexus`
+runs instead, because the TUI resolves keymap slash commands before server
+commands.
 
-That hook cannot cancel the prompt: in `@opencode/plugin` the `prompt` hook
-callback returns `void` and `SessionPrompt` has no `result`/`cancel` field, unlike
-the `compaction` and `title` hooks, which do. So the hook sets
-`event.metadata.nexusResult` and replaces the prompt text with the command's
-result — the model reports what happened instead of being handed a bare
-`/nexus dashboard` and an answer it has no reason to read.
+This replaces a `session.hook("prompt")` that rewrote `/nexus …` prompts into
+their result. That hook could not cancel the turn, so every command used to cost
+a model request.
 
 ### Skills
 Claude Code's skill format is a directory under `~/.claude/skills/<name>/` holding a `SKILL.md` with YAML frontmatter. OpenCode uses the same layout under `~/.config/opencode/skills/<name>/`, and the `name` and `description` frontmatter fields mean the same thing in both: `description` is the only part a model sees before deciding to load the skill.

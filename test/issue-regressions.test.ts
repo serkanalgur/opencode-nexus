@@ -82,6 +82,8 @@ function registeredTools(): string[] {
     return current ?? ''
   }
 
+  // `editor.add` is the TOOL editor's call. The `/nexus` command transform in
+  // the same file names its editor `commands` so it is not counted here.
   for (const m of code.matchAll(/editor\.add\(\{/g)) {
     const name = /name:\s*"([^"]+)"/.exec(raw.slice(m.index))?.[1]
     if (!name) throw new Error(`editor.add at offset ${m.index} in src/index.ts has no name`)

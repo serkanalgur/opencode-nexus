@@ -1,6 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 import { Plugin } from "@opencode/plugin/tui"
 import { NexusConfigManager } from "./config"
+import { NexusRpc, type NexusCommandResult } from "./rpc"
 import {
   commitConfigModel,
   commitConfigText,
@@ -281,11 +282,10 @@ export function mergeSidebarAgents(
 // dashboard on the very port the real one wants.
 //
 // What it CAN do is reach the server: the OpenCode client on the context is an
-// HTTP client to the same server process the orchestrator lives in, and
-// `session.prompt` on it lands in that process's prompt hook — which is
-// `orchestrator.handleCommand`. So `deps.submitCommand()` below submits
-// `/nexus dashboard [port] [host]` as one action, and the server starts the
-// server. The TUI's remaining job is the half only it can do: confirm the
+// HTTP client to the same server process the orchestrator lives in, and the
+// plugin's RPC (`src/rpc.ts`) runs `orchestrator.handleCommand` there. So
+// `deps.submitCommand()` below sends `/nexus dashboard [port] [host]` as one
+// call, and the server starts the server. The TUI's remaining job is the half only it can do: confirm the
 // listen happened before a browser is pointed at it.
 //
 // The previous behaviour was worse than doing nothing: it shelled out to
@@ -559,8 +559,8 @@ export interface WebDashboardDeps {
   showToast(options: { title: string; message: string; variant: "info" | "success" | "warning" | "error"; duration?: number }): void
   openBrowser(url: string): Promise<void> | void
   /**
-   * Hand text to the OpenCode server process, where the plugin's prompt hook
-   * routes a `/nexus …` command to `orchestrator.handleCommand`. This is the
+   * Hand a `/nexus …` command to the OpenCode server process, where the
+   * plugin's RPC handler runs it through `orchestrator.handleCommand`. This is the
    * only channel from the TUI to the orchestrator, and submitting the command
    * is what makes one keystroke start the server instead of describing how to.
    */
@@ -1500,31 +1500,27 @@ export default Plugin.define({
     }
 
 
-    // The session a command submitted from the TUI has to land in: the one the
-    // user is looking at. The route is the authority — it is what the TUI is
-    // showing — with the active tab as the fallback for the home screen, where
-    // there is no session route but there is still a session to submit to.
-    const activeSessionID = (): string | undefined => {
-      const route = context.ui.router.current()
-      if (route.type === "session") return route.sessionID
-      return context.ui.tabs.list().find(tab => tab.active)?.sessionID
+    /**
+     * Run a `/nexus …` command in the OpenCode server, which is the process that
+     * owns the orchestrator, and return what it answered. This is the whole
+     * reason `/nexus dashboard` can start the server: the TUI cannot.
+     *
+     * It goes through the plugin's RPC (`src/rpc.ts`), not through the session.
+     * It used to submit the text as a prompt into the open session, where a
+     * prompt hook rewrote it into the result — which needed a session to be
+     * open, cost a model request per command, and showed the user the model's
+     * paraphrase instead of the result. RPC returns the result itself.
+     *
+     * Throws when the call does not reach the server, so the caller can say
+     * "the command never reached the server" rather than reporting a start that
+     * never happened.
+     */
+    const runServerCommand = async (text: string): Promise<NexusCommandResult> => {
+      return await context.client.rpc(NexusRpc).command({ text }) as NexusCommandResult
     }
 
-    /**
-     * Hand a `/nexus …` command to the OpenCode server, which is the process
-     * that owns the orchestrator. This is the whole reason `/nexus dashboard`
-     * can start the server: the TUI cannot, and the server's prompt hook routes
-     * the text to `orchestrator.handleCommand`.
-     *
-     * Throws on a missing session so the caller can say "the command never
-     * reached the server" rather than reporting a start that never happened.
-     */
-    const submitServerCommand = async (text: string) => {
-      const sessionID = activeSessionID()
-      if (!sessionID) {
-        throw new Error("no session is open to run the command in")
-      }
-      await context.client.session.prompt({ sessionID, text })
+    const submitServerCommand = async (text: string): Promise<void> => {
+      await runServerCommand(text)
     }
 
     // Web dashboard handler - starts the server through the server process, and
@@ -1716,7 +1712,16 @@ export default Plugin.define({
                       // `routeNexusCommand` for why this is a fall-through
                       // rather than four more cases, and for the guarantee that
                       // the local arms above still win.
-                      await submitServerCommand(route.text)
+                      try {
+                        const result = await runServerCommand(route.text)
+                        await context.ui.dialog.alert({ title: "Nexus", message: result.text })
+                      } catch (error: unknown) {
+                        context.ui.toast.show({
+                          title: "Nexus",
+                          message: `\`${route.text}\` did not reach the Nexus server: ${error instanceof Error ? error.message : String(error)}`,
+                          variant: "error",
+                        })
+                      }
                   }
                 } else {
                   void runConfigFlow()

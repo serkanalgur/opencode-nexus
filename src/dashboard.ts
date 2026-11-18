@@ -393,7 +393,7 @@ export type DashboardStartOutcome =
  * Start the dashboard, or report why it did not start. Never throws.
  *
  * A throw is the wrong channel for a refused bind: this runs behind a command
- * handler and a prompt hook, and an unhandled throw out of either is a crash
+ * handler and an RPC handler, and an unhandled throw out of either is a crash
  * of the thing the user was doing instead of a message about the dashboard.
  */
 export function startDashboardServer(
