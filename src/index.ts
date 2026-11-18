@@ -12,7 +12,9 @@ import { TEMPLATES, instantiateTemplate, listTemplates } from "./templates"
 import { GoalManager } from "./goal"
 import { TeamManager } from "./team"
 import { AstGrep } from "./astgrep"
-import { installNexusSkills, nexusSkillsDir, overwriteWarning } from "./skills-install"
+import { keptModifiedWarning, loadNexusSkills, nexusSkillsDir, registerNexusSkills, retireInstalledSkills } from "./skills-install"
+import type { Skill } from "@opencode/plugin"
+import { NexusRpc, runNexusCommand } from "./rpc"
 import { describeDashboardStart, startDashboardServer } from "./dashboard"
 import {
   formatModelPrice,
@@ -28,47 +30,35 @@ import { homedir } from "node:os"
 import { fileURLToPath } from "node:url"
 import type { CostProvenance } from "./types"
 import type { PerformanceScore } from "./performance"
-import type { SkillInstallResult } from "./skills-install"
+import type { SkillRetireResult, UnavailableSkill } from "./skills-install"
 
 /**
- * Report what the skills installer did, one line per outcome worth naming.
+ * Report the skill setup, one line per outcome the user needs to know about.
  *
- * The reporting home for this feature, and the ONLY one. `installNexusSkills`
- * used to print the overwrite warning itself while the `unavailable` case was
- * reported here from the returned results, so one feature had two output
- * sites: the prefix, the tone and the judgement about what is worth saying were
- * each maintained twice, and a test capturing `console.warn` around the
- * installer could not see half the feature. Both are now sibling arms of one
- * loop over one array, so they share the `[nexus] ` prefix and the moment.
+ * Extracted from `plugin.setup` so the message text and the silence on the
+ * quiet outcomes are assertable against real results without booting the
+ * plugin. Never throws: failing to report must not be a second way for skill
+ * setup to fail.
  *
- * EXTRACTED as a function rather than left inline in `plugin.setup` because
- * that is what makes it testable at all. The loop is three lines inside a
- * closure that boots an orchestrator, so an inline version could only be
- * covered by booting the whole plugin; this way the message text, the
- * per-file-not-summary shape and the silence on `created`/`unchanged` are all
- * assertable directly against a real `SkillInstallResult[]`.
+ * Two outcomes are reported:
+ * - a shipped skill that could not be read. That is the feature failing
+ *   silently otherwise, and `docs/COMPATIBILITY.md` claims skills are supported.
+ * - a global copy from an earlier version that was kept because it was edited.
+ *   It now overrides the shipped skill and no longer updates, which the user
+ *   should hear once rather than discover.
  *
- * Returns nothing and never throws: a failure to report a skill must not be a
- * second way for the install to fail. `console.warn` is not worth a guard here
- * — it does not throw — but the shape is the same best-effort one the
- * surrounding load code uses.
+ * `removed` and `absent` are silent: removing an unmodified copy loses nothing,
+ * and `absent` is the steady state after the first load of this version.
  */
-export function reportSkillInstalls(results: readonly SkillInstallResult[]): void {
-  for (const { name, path, action } of results) {
-    // A skill that did not ship is the whole feature failing silently, and this
-    // is the only in-process signal there is. Named and loud, because
-    // `docs/COMPATIBILITY.md` claims skills are supported.
-    if (action === 'unavailable') {
-      console.warn(`[nexus] Skill ${name} is not present in the installed package; skipping ${path}`)
-    } else if (action === 'updated') {
-      // The sibling arm. A user's edit may have just been discarded and they
-      // cannot act on it retroactively, so it is said out loud — but it is a
-      // warning and not an error, because the write is the specified policy and
-      // it succeeded. `created` and `unchanged` fall through silently: a first
-      // install loses nothing, and `unchanged` is the steady state on nearly
-      // every load, so warning there would fire almost every startup.
-      console.warn(overwriteWarning(name, path))
-    }
+export function reportSkillSetup(
+  unavailable: readonly UnavailableSkill[],
+  retired: readonly SkillRetireResult[],
+): void {
+  for (const { name, path, reason } of unavailable) {
+    console.warn(`[nexus] Skill ${name} ${reason}; it was not registered (${path})`)
+  }
+  for (const { name, path, action } of retired) {
+    if (action === 'kept-modified') console.warn(keptModifiedWarning(name, path))
   }
 }
 
@@ -995,21 +985,35 @@ export default Plugin.define({
       // layer that has broken something else to add guidance.
     }
 
-    // Install the `nexus-*` design skills into `~/.config/opencode/skills/`.
+    // The `nexus-*` design skills, registered with OpenCode rather than copied
+    // into `~/.config/opencode/skills`. See `src/skills-install.ts` for why, and
+    // for why a skill the user already has with the same id wins.
     //
-    // Same shape and same moment as the agent files above — on plugin load,
-    // best-effort, never able to break startup — but a different destination and
-    // a different trigger. These are compared by content and only written when
-    // they differ, so a load that changes nothing leaves the files, and their
-    // mtimes, alone. See `src/skills-install.ts` for why there is deliberately
-    // no override mechanism here: OpenCode's own skill precedence already lets a
-    // user's project `.opencode/skills` copy shadow this global one.
+    // Retiring the unmodified copies earlier versions installed comes first, so
+    // those copies are gone before the transform asks whether a skill with the
+    // same id exists. Both halves are best-effort: skills are guidance, and
+    // failing to set them up must never stop the orchestrator starting.
+    let shippedSkills: ReturnType<typeof loadNexusSkills>["skills"] = []
     try {
-      reportSkillInstalls(installNexusSkills(nexusSkillsDir(), homedir()))
-    } catch {
-      // Best-effort, like every other file this plugin writes on load. The
-      // skills are guidance; failing to install guidance must never be the
-      // reason the orchestrator does not start.
+      const retired = retireInstalledSkills(nexusSkillsDir(), homedir())
+      const loaded = loadNexusSkills(nexusSkillsDir())
+      shippedSkills = loaded.skills
+      reportSkillSetup(loaded.unavailable, retired)
+    } catch (error: unknown) {
+      console.warn(`[nexus] could not read the Nexus skills: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    try {
+      await ctx.skill.transform((editor) => {
+        registerNexusSkills(editor, shippedSkills, (skill) => ({
+          id: skill.id,
+          name: skill.name,
+          description: skill.description,
+          path: skill.path,
+          content: skill.content,
+        }) as unknown as Skill.Info)
+      })
+    } catch (error: unknown) {
+      console.warn(`[nexus] could not register the Nexus skills: ${error instanceof Error ? error.message : String(error)}`)
     }
 
     // Initialize orchestrator with OpenCode context for real session API access
@@ -2576,53 +2580,72 @@ export default Plugin.define({
       })
     })
 
-    // Register session hook for /nexus commands
+    // `/nexus …`, reachable two ways and answered by one function.
     //
-    // CAN THIS HOOK SUPPRESS THE PROMPT? No. Checked against
-    // `@opencode/plugin` 2.0.12: `Hooks<Spec>` types the callback as
-    // `(input) => Promise<void> | void`, so there is no return channel, and
-    // `SessionPrompt` — the spec entry for `"prompt"` — carries only
-    // `sessionID`, `messageID`, `prompt`, `metadata?` and `delivery`. The two
-    // hooks that CAN skip a model request, `compaction` and `title`, are the
-    // two that have a `result?` field documented as "skip the model request";
-    // `prompt` has no equivalent. So a `/nexus …` prompt still reaches the
-    // model no matter what this hook does.
+    // This used to be a `session.hook("prompt")` that caught any prompt starting
+    // with `/nexus` and rewrote its text into the command's result. That hook
+    // cannot cancel the turn, so every `/nexus costs` started a model request
+    // whose only job was to read the answer back. V2 has a proper channel for
+    // each caller, and both go through `runNexusCommand`:
     //
-    // Given that, the least confusing thing available is to REPLACE the text
-    // with the command's actual result. The alternative leaves the model
-    // holding a bare `/nexus dashboard 4747` with the answer in metadata it
-    // has no reason to read, and the obvious thing to do with that is to try
-    // to start a dashboard — which, for a command whose job is starting one,
-    // means asking the agent to do the thing that just happened.
-    await ctx.session.hook("prompt", (event) => {
-      if (!event.prompt.text.startsWith("/nexus")) return
+    //  - RPC, for the TUI plugin. It gets the full result back as data and shows
+    //    it itself; nothing enters the session. See `src/rpc.ts`.
+    //  - A registered `nexus` command, for every client that does not run the
+    //    TUI plugin (web, desktop, `opencode run`). Inside the TUI the plugin's
+    //    own `/nexus` keymap command wins, because the TUI resolves keymap slash
+    //    commands before server commands.
+    //
+    // Each registration is guarded on its own. If the host refuses either one,
+    // that is no reason for the orchestrator, its tools or the other entry
+    // point to go missing. The failure is reported, never swallowed: a
+    // `/nexus` that silently does nothing is the failure this replaces.
+    try {
+      await ctx.rpc.register(NexusRpc, {
+        command: async (input) => runNexusCommand(
+          (text) => orchestrator.handleCommand(text),
+          (input as { text: string }).text,
+        ),
+      })
+    } catch (error: unknown) {
+      console.warn(`[nexus] could not register the Nexus RPC; TUI commands that reach the server will fail: ${error instanceof Error ? error.message : String(error)}`)
+    }
 
-      let result: string
-      try {
-        result = orchestrator.handleCommand(event.prompt.text)
-      } catch (error: unknown) {
-        // A hook that throws takes the prompt down with it. `/nexus dashboard`
-        // starts a server, and a bind failure is an ordinary outcome it
-        // reports rather than throws — but nothing above it is a promise, so
-        // the failure is turned into text here instead of being allowed to
-        // escape into the session.
-        const detail = error instanceof Error ? error.message : String(error)
-        result = `The \`${event.prompt.text.trim()}\` command failed: ${detail}\nNothing was changed.`
-      }
-
-      // The result goes to the session as tool output context…
-      event.metadata = { ...event.metadata, nexusResult: result }
-      // …and as the prompt text, because that is the only part of this hook's
-      // input the model actually reads. The original command is kept verbatim
-      // in the metadata, so nothing about what was asked is lost.
-      event.prompt.text = [
-        `The user ran \`${event.prompt.text.trim()}\`. The Nexus plugin already handled it and the `,
-        `result is below. Do not run the command again and do not try to start, stop or open `,
-        `anything yourself — report the result above in one or two sentences.`,
-        "",
-        result,
-      ].join("\n")
-    })
+    try {
+      // `commands`, not `editor`: the tool-registry tests read every
+      // `editor.add({` in this file as a tool registration.
+      await ctx.command.transform((commands) => {
+        commands.add({
+          name: "nexus",
+          description: "Nexus: status, agents, costs, pause, resume, dashboard [port] [host], dashboard stop, dashboard state",
+          execute: async ({ sessionID, prompt }) => {
+            const result = runNexusCommand(
+              (text) => orchestrator.handleCommand(text),
+              `/nexus ${prompt.text ?? ""}`,
+            )
+            // A synthetic message with `resume: false` is how core posts a
+            // notice (the fork notice, the plan-mode reminder): it is recorded
+            // in the session WITHOUT waking the agent, so no model request is
+            // made. The TUI renders a synthetic message by its `description`, so
+            // the result goes there; `text` is what the model reads on its next
+            // turn, framed so it does not try to repeat the command.
+            await ctx.session.synthetic({
+              sessionID,
+              description: result.text,
+              text: [
+                `The user ran \`/nexus ${(prompt.text ?? "").trim()}\` and the Nexus plugin already handled it. `,
+                `Do not run it again. Its output was:`,
+                "",
+                result.text,
+              ].join("\n"),
+              metadata: { source: "nexus", ok: result.ok },
+              resume: false,
+            })
+          },
+        })
+      })
+    } catch (error: unknown) {
+      console.warn(`[nexus] could not register the /nexus server command: ${error instanceof Error ? error.message : String(error)}`)
+    }
 
     // Watch the two config files the config manager reads and reload on change.
     // Started here, immediately before the return, so the disposer returned

@@ -86,6 +86,7 @@ On every plugin load, Nexus:
 - Writes `nexus-orchestrator` to `~/.config/opencode/agents/nexus-orchestrator.md`
 - Writes the seven subagent files: `nexus-coder`, `nexus-explorer`, `nexus-reviewer`, `nexus-tester`, `nexus-architect`, `nexus-documenter`, `nexus-designer`
 - Reads role→model mappings from `.opencode/nexus.jsonc` (and the global config) and resolves them per spawn; the generated agent files carry no model pin
+- Registers the three `nexus-*` design skills with OpenCode (see [Skills](#skills)); nothing is written for them
 - Does not edit your `opencode.jsonc`
 
 **The agent files are rewritten on every load, not created once.** Any hand-edit
@@ -431,8 +432,8 @@ two ways to reach it:
 Ask the agent: "start the nexus dashboard"
 ```
 
-The TUI command submits `/nexus dashboard [port] [host]` to that server process,
-whose prompt hook routes it to the orchestrator; the agent's route calls
+The TUI command sends `/nexus dashboard [port] [host]` to that server process
+over the plugin's RPC, which routes it to the orchestrator; the agent's route calls
 `nexus.dashboard.start(port=4747, host="127.0.0.1")` directly. Both end at the
 same start, and both print the URL it bound. **If the start fails, nothing is
 listening and no browser is opened** — the reason is reported, and no URL is
@@ -838,8 +839,9 @@ nexus.clarify(question="Should I use JWT or OAuth?", options="JWT, OAuth", assum
 
 ### Skills
 
-Three design skills are installed to `~/.config/opencode/skills/` on plugin
-load, alongside the generated agent files:
+Three design skills are registered with OpenCode on plugin load, through
+`ctx.skill.transform`. Nothing is written to your home directory: each skill is
+read from the `skills/` directory inside the installed package.
 
 | Skill | What it is for |
 |-------|----------------|
@@ -847,34 +849,30 @@ load, alongside the generated agent files:
 | `nexus-interface-a11y` | WCAG 2.2 AA thresholds to write into a design direction: contrast, target size, focus, colour, motion, reflow. Every figure cites its success criterion and level |
 | `nexus-design-review` | Auditing an existing interface, severity-ordered, reporting in the same six fields a design brief uses. Reports; does not edit |
 
-**The installed files are plugin-managed.** A file is written when it is missing
-or when the content this version ships differs from what is on disk, so an
-ordinary plugin load never rewrites an unchanged file and never churns its
-mtime. A release that changes a skill's text does update the installed copy, and
-**that update will overwrite a hand-edited global copy** — the file is treated as
-owned by the plugin.
-
-**To customise a skill, do not edit the global copy.** Put your version in your
-project's `.opencode/skills/` instead:
+**To customise a skill, put your own copy in your project:**
 
 ```
 .opencode/skills/nexus-design-taste/SKILL.md
 ```
 
-OpenCode registers skill sources in precedence order — built-in, then
-`.claude/skills` and `.agents/skills`, then `~/.config/opencode/skills`, then
-**project `.opencode/skills`**, then explicit `skills` config entries — and later
-sources win. A project copy therefore shadows the installed one, per project,
-with no configuration and no nexus setting involved. This is the intended
-extension point; there is deliberately no in-plugin override flag, because
-OpenCode's own precedence already resolves it and a second mechanism would be a
-second source of truth that could disagree with the first.
+A skill's id is its directory name, so your copy has the same id as the shipped
+skill. Nexus registers a skill only when no skill with that id exists, so your
+copy is the one OpenCode uses, per project, with no nexus setting involved. A
+copy in `~/.config/opencode/skills/nexus-design-taste/` works the same way for
+every project.
+
+**Upgrading from a version that installed the skills.** Versions before this one
+copied the skills into `~/.config/opencode/skills/`. On load, Nexus removes a
+copy there that still matches the shipped text byte for byte, because that is a
+copy it wrote and nobody changed. A copy you edited is kept, and Nexus warns once
+per load that it overrides the built-in skill; delete it to go back to the
+shipped version.
 
 The `nexus-` prefix is what makes that work: a user copy *shadows* the installed
 skill rather than appearing beside it as two unrelated skills.
 
 The repository also contains `skills/ask-if-clarify/SKILL.md`. It is not in
-`NEXUS_SKILL_NAMES` in `src/skills-install.ts`, so nothing installs it — it is
+`NEXUS_SKILL_NAMES` in `src/skills-install.ts`, so nothing registers it — it is
 a repo document, not a shipped feature.
 
 ---
@@ -952,19 +950,18 @@ one, it dispatches to a subcommand (`config`/`c`, `status`/`s`, `dashboard`/`d`,
 | `/nexus-status` | `/ns` | Show the config summary |
 | `/nexus-reset` | — | Reset all settings to defaults |
 
-A prompt beginning `/nexus …` typed into the composer is a *different* thing: it
-is intercepted by a prompt hook and routed to `orchestrator.handleCommand()`,
-which understands `status`, `agents`, `costs`, `pause`, `resume`, and
-`dashboard [port] [host]` (which starts the server, or says why it did not),
-`dashboard stop`, and `dashboard state` (the state as JSON). Anything else
-answers `Unknown command`. This hook cannot cancel the prompt — the plugin API
-gives it no way to — so it replaces the command text with the command's result
-rather than leaving the model holding a bare `/nexus dashboard` next to an
-answer it has no reason to read. The table above is the TUI palette.
+Outside the TUI (web, desktop, `opencode run`), `/nexus …` is a command the
+server plugin registers with OpenCode. It understands `status`, `agents`,
+`costs`, `pause`, `resume`, and `dashboard [port] [host]` (which starts the
+server, or says why it did not), `dashboard stop`, and `dashboard state` (the
+state as JSON). Anything else answers `Unknown command`. The result is posted to
+the session as a notice **without starting a model turn**. Inside the TUI the
+plugin's own `/nexus` wins, because the TUI resolves its keymap commands before
+server commands. The table above is the TUI palette.
 
 **Those subcommands are reachable from the TUI too, not only from the
-composer.** A subcommand the TUI does not handle itself is submitted to the
-server verbatim and answered there, so `/nexus agents [filter]`, `/nexus costs`,
+composer.** A subcommand the TUI does not handle itself is sent to the
+server verbatim over the plugin's RPC and its answer is shown in a dialog, so `/nexus agents [filter]`, `/nexus costs`,
 `/nexus pause` and `/nexus resume` all work when typed in the TUI. `agents`
 reads an optional filter as the second word, and the whole line is forwarded, so
 `/nexus agents reviewer` filters server-side. `status` and `dashboard` are the

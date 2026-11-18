@@ -188,7 +188,7 @@ describe('dashboard entry points', () => {
 
   describe('handleCommand("/nexus dashboard") — the server-side start', () => {
     // This is the surface the TUI's `/nexus-dashboard` reaches: it submits this
-    // text to the server process, and the server's prompt hook calls
+    // text to the server process over the plugin RPC, and the server calls
     // `handleCommand`. So "does this start anything" is a public-ish behaviour,
     // not an internal detail of a tool.
     it('starts a server and prints the address it bound', async () => {
@@ -334,8 +334,8 @@ describe('dashboard entry points', () => {
       orchestrator.shutdown()
     })
 
-    it('never throws, for a command the prompt hook runs on any prompt', async () => {
-      // The prompt hook wraps this call, but the contract is worth having here:
+    it('never throws, for a command run from RPC or the registered command', async () => {
+      // `runNexusCommand` wraps this call, but the contract is worth having here:
       // every outcome is text, including the ones with no address to report.
       const dir = projectWithDashboard({ enabled: true, port: 14981, host: '127.0.0.1' })
       cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
@@ -517,7 +517,7 @@ describe('dashboard entry points', () => {
 
       await handleWebDashboard(undefined, h.deps)
 
-      // ONE action, and it is the command the server's prompt hook routes to
+      // ONE action, and it is the command the server's RPC handler routes to
       // `handleCommand` — not a description of how the user might start it.
       expect(h.submitted).toEqual(['/nexus dashboard 14992 127.0.0.1'])
       expect(h.opened).toEqual(['http://127.0.0.1:14992'])

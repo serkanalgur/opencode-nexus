@@ -12,7 +12,7 @@ Nexus is designed as an OpenCode plugin and does not directly run inside Claude 
 |---------|--------|-------|
 | Hooks | ✅ Supported | OpenCode plugin hooks work the same way |
 | Commands (slash) | ✅ Supported | Nexus registers `/nexus` commands in OpenCode TUI |
-| Skills | ✅ Supported | Nexus installs three design skills (`nexus-design-taste`, `nexus-interface-a11y`, `nexus-design-review`) to `~/.config/opencode/skills/` on plugin load — see Skills below |
+| Skills | ✅ Supported | Nexus registers three design skills (`nexus-design-taste`, `nexus-interface-a11y`, `nexus-design-review`) with `ctx.skill.transform` on plugin load — see Skills below |
 | MCP Servers | ✅ Supported | OpenCode supports MCP; Nexus tools register via plugin API |
 | Sub-agents | ⚠️ Partial | `nexus.spawn()` creates real OpenCode sessions, but only the `subagent`-tool path links them to a parent via `parentID` — see Sub-agents below |
 | Agent names | ⚠️ Partial | Nexus uses OpenCode agent types, not Claude Code agent names |
@@ -55,9 +55,9 @@ can.** The dashboard server runs in the OpenCode *server* process, beside the
 orchestrator whose state it serves; the TUI plugin runs in the *TUI* process and
 has no orchestrator, no module registry and no way to invoke a tool. It does have
 the OpenCode client, which is an HTTP client to that same server process — so
-`/nexus dashboard` submits `/nexus dashboard [port] [host]` as a prompt, and the
-server's `session.prompt` hook routes it to `orchestrator.handleCommand()`, which
-starts the server there.
+`/nexus dashboard` sends `/nexus dashboard [port] [host]` over the plugin's RPC
+(`src/rpc.ts`), and the server runs it through `orchestrator.handleCommand()`,
+which starts the server there.
 
 The command then asks `http://host:port/api/health` and acts on the answer:
 
@@ -72,27 +72,25 @@ It never opens a browser at an address it has not confirmed is serving a nexus
 dashboard. A failure (port in use, `dashboard.enabled: false`) is reported as
 what it is, with no URL in the message.
 
-**There is a second, unrelated `/nexus` in the prompt.** A prompt beginning
-`/nexus …` is intercepted by a `session.prompt` hook and routed to
-`orchestrator.handleCommand()`, which supports a different and much smaller set:
-`status`, `agents`, `costs`, `pause`, `resume`, `dashboard [port] [host]`,
-`dashboard stop` and `dashboard state`. `dashboard` starts the server and reports
-the address it bound; `dashboard state` returns the orchestrator state as JSON, a
-state dump rather than a dashboard. Anything else, including `/nexus web` typed
-into the composer, answers `Unknown command. Available: status, agents, costs,
-pause, resume, dashboard [port] [host], dashboard stop, dashboard state`.
+**Outside the TUI, `/nexus` is a registered server command.** The server plugin
+registers `nexus` with `ctx.command.transform`, so clients that do not run the
+TUI plugin (web, desktop, `opencode run`) can use it. It supports `status`,
+`agents`, `costs`, `pause`, `resume`, `dashboard [port] [host]`,
+`dashboard stop` and `dashboard state`; anything else answers `Unknown command.
+Available: …`. The result is posted with `session.synthetic({ resume: false })`,
+the call core uses for its own notices, so it is recorded **without waking the
+agent**: no model request is made. Inside the TUI the plugin's keymap `/nexus`
+runs instead, because the TUI resolves keymap slash commands before server
+commands.
 
-That hook cannot cancel the prompt: in `@opencode/plugin` the `prompt` hook
-callback returns `void` and `SessionPrompt` has no `result`/`cancel` field, unlike
-the `compaction` and `title` hooks, which do. So the hook sets
-`event.metadata.nexusResult` and replaces the prompt text with the command's
-result — the model reports what happened instead of being handed a bare
-`/nexus dashboard` and an answer it has no reason to read.
+This replaces a `session.hook("prompt")` that rewrote `/nexus …` prompts into
+their result. That hook could not cancel the turn, so every command used to cost
+a model request.
 
 ### Skills
 Claude Code's skill format is a directory under `~/.claude/skills/<name>/` holding a `SKILL.md` with YAML frontmatter. OpenCode uses the same layout under `~/.config/opencode/skills/<name>/`, and the `name` and `description` frontmatter fields mean the same thing in both: `description` is the only part a model sees before deciding to load the skill.
 
-Nexus installs three skills of its own on every plugin load:
+Nexus registers three skills of its own on every plugin load:
 
 | Skill | Purpose |
 |-------|---------|
@@ -100,9 +98,9 @@ Nexus installs three skills of its own on every plugin load:
 | `nexus-interface-a11y` | WCAG 2.2 AA thresholds, cited by success criterion and level |
 | `nexus-design-review` | Auditing an existing interface; reports, does not edit |
 
-They are written by `installNexusSkills()` in `src/skills-install.ts`, called from the plugin's `setup()`. A file is written only when missing or when the shipped content differs from the on-disk content, so an unchanged load leaves mtimes alone; a skill whose `SKILL.md` is absent from the installed package is reported on stderr rather than failing silently. See the README for the `nexus-` prefix, the overwrite policy, and how to override.
+They are read from the package's own `skills/` directory by `loadNexusSkills()` in `src/skills-install.ts` and registered from the plugin's `setup()` with `ctx.skill.transform`; nothing is written to the home directory. A skill is added only when no skill with the same id exists, so a user's own copy wins. A skill whose `SKILL.md` is missing or has no description is reported on stderr rather than failing silently. See the README for the `nexus-` prefix, how to override, and how copies installed by earlier versions are cleaned up.
 
-**These are Nexus-authored skills, not Claude Code ones.** The wording this row previously carried — "Nexus agent prompts work as OpenCode skills" — was inaccurate on both sides. The generated `nexus-*.md` files under `~/.config/opencode/agents/` are *agents*, which carry a role, a model and a permission block, and OpenCode does not read them as skills; and the three skills above are new prose written for this package, containing no Claude Code material. What the row now claims is narrower and true: Nexus ships real `SKILL.md` files in the directory layout OpenCode reads.
+**These are Nexus-authored skills, not Claude Code ones.** The wording this row previously carried — "Nexus agent prompts work as OpenCode skills" — was inaccurate on both sides. The generated `nexus-*.md` files under `~/.config/opencode/agents/` are *agents*, which carry a role, a model and a permission block, and OpenCode does not read them as skills; and the three skills above are new prose written for this package, containing no Claude Code material. What the row now claims is narrower and true: Nexus ships real `SKILL.md` files and registers them with OpenCode.
 
 ### MCP Servers
 Nexus registers its tools via `ctx.tool.transform()` which is OpenCode's equivalent of MCP tool registration. The tools (`nexus.status`, `nexus.spawn`, `nexus.costs`, etc.) are available to any agent session.
