@@ -15,6 +15,7 @@ import { AstGrep } from "./astgrep"
 import { keptModifiedWarning, loadNexusSkills, nexusSkillsDir, registerNexusSkills, retireInstalledSkills } from "./skills-install"
 import type { Skill } from "@opencode/plugin"
 import { NexusRpc, runNexusCommand } from "./rpc"
+import { applyBudgetGate } from "./permission-gate"
 import { describeDashboardStart, startDashboardServer } from "./dashboard"
 import {
   formatModelPrice,
@@ -2645,6 +2646,18 @@ export default Plugin.define({
       })
     } catch (error: unknown) {
       console.warn(`[nexus] could not register the /nexus server command: ${error instanceof Error ? error.message : String(error)}`)
+    }
+
+    // The budget gate on OpenCode's permission check. See `src/permission-gate.ts`:
+    // it closes the path where an agent starts a Nexus agent through the
+    // built-in `subagent` tool after the hard limit has tripped. Guarded like the
+    // registrations above: a host that refuses the hook still loads the plugin.
+    try {
+      await ctx.permission.hook("evaluate", (event) => {
+        applyBudgetGate(event, { exceeded: orchestrator.isBudgetExceeded(), spent: orchestrator.totalSpent })
+      })
+    } catch (error: unknown) {
+      console.warn(`[nexus] could not register the budget permission gate; only spawns through Nexus will respect the hard budget limit: ${error instanceof Error ? error.message : String(error)}`)
     }
 
     // Watch the two config files the config manager reads and reload on change.

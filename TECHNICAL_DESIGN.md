@@ -599,6 +599,8 @@ by the class that implements them.
 | Model groups & refs | `src/model-groups.ts`, `src/model-ref.ts` | Stateless helpers |
 | Config loading & hot-reload | `NexusConfigManager` (`src/config.ts`), `reloadConfigFromDisk()` | Reloaded on file change |
 | Skills | `loadNexusSkills()` / `registerNexusSkills()` / `retireInstalledSkills()` (`src/skills-install.ts`) | Registered once per plugin load via `ctx.skill.transform` |
+| `/nexus` commands | `NexusRpc` / `runNexusCommand()` (`src/rpc.ts`) | Plugin RPC for the TUI, plus a `nexus` command via `ctx.command.transform` |
+| Budget permission gate | `applyBudgetGate()` (`src/permission-gate.ts`) | `ctx.permission.hook("evaluate")`, registered once per load |
 | TUI commands | `src/tui.tsx` — `LOCAL_COMMANDS` routing | Separate TUI process; forwards unknown subcommands to the server |
 
 `ModuleRegistry` exists as the extension point for third-party modules, but no
