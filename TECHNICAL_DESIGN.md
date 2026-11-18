@@ -521,7 +521,7 @@ configManager.listPresets(): string[]
 ```
 
 The `PRESETS` table defines `minimal`, `balanced` and `enterprise`. Separately,
-the `preset` **tool** (registered in `src/index.ts`) applies a session-scoped
+the `preset` **tool** (registered in `src/tools/config.ts`) applies a session-scoped
 preset that shadows `nexus.jsonc` until cleared — a different mechanism from
 `applyPreset`, which writes the merged config.
 
@@ -591,10 +591,10 @@ by the class that implements them.
 | Execution history | `ExecutionHistory` (`src/history.ts`) | Constructed in the constructor |
 | Custom roles | `CustomRoleManager` (`src/custom-roles.ts`) | Constructed in the constructor |
 | Templates | `instantiateTemplate()` / `listTemplates()` (`src/templates.ts`) | Stateless helpers |
-| Teams | `TeamManager` (`src/team.ts`) | Created per tool invocation in `src/index.ts` |
+| Teams | `TeamManager` (`src/team.ts`) | Created once per plugin load in `registerTeamTools` (`src/tools/team.ts`) |
 | Goals | `GoalManager` (`src/goal.ts`) | Created per session in `src/index.ts` |
 | Todos | `TodoEnforcer` (`src/todo.ts`) | An orchestrator field, `new TodoEnforcer()` |
-| ast-grep | `AstGrep` (`src/astgrep.ts`) | Created per tool invocation in `src/index.ts` |
+| ast-grep | `AstGrep` (`src/astgrep.ts`) | Created once per plugin load in `registerAstgrepTools` (`src/tools/astgrep.ts`) |
 | git-flow | `detectGitState()` / `resolveGitFlow()` / `checkGitFlow()` (`src/git-flow.ts`) | Stateless helpers |
 | Model groups & refs | `src/model-groups.ts`, `src/model-ref.ts` | Stateless helpers |
 | Config loading & hot-reload | `NexusConfigManager` (`src/config.ts`), `reloadConfigFromDisk()` | Reloaded on file change |
@@ -803,14 +803,14 @@ Config keys are `selfHealing.maxRetries`, `selfHealing.retryDelay` and
 
 There is no `SharedMemoryModule` and no `storage: 'sqlite' | 'memory'` choice —
 the store is always the persistent SQLite-backed one. The agent-facing surface
-is three tools registered in `src/index.ts` as `memory.set`, `memory.search` and
+is three tools registered in `src/tools/memory.ts` as `memory.set`, `memory.search` and
 `memory.list` (not `memory_get` / `memory_set` / `memory_search`).
 
 ```typescript
 // src/memory-store.ts — constructed with the orchestrator, configured by MessageStoreConfig-style opts
 class PersistentMemoryStore { /* see §4.6 */ }
 
-// src/index.ts — the tools agents actually call
+// src/tools/memory.ts — the tools agents actually call
 memory.set      { key, value, scope?, author, confidence?, tags?, ttl? }
 memory.search   { query, includeSession? }
 memory.list     { scope?, limit? }
@@ -1036,7 +1036,7 @@ Nexus registers 48 tools. They are registered **without a `nexus_` prefix** —
 the plugin lives in the `nexus` namespace, so a tool named `status` is
 addressed as `nexus_status` by *clients* that require a namespace prefix, but the
 registered name is `status`. The names below are the literal `name` values passed
-to `editor.add()` in `src/index.ts`.
+to `editor.add()` in the `src/tools/` modules.
 
 There is no `tasks` tool, no `send`/`broadcast` tool and no `request_review`
 tool.

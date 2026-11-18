@@ -50,7 +50,9 @@ const TYPES_SOURCE = join(SRC_DIR, 'types.ts')
 
 /** Every `src/*.ts` module — the surface both unions are declared over. */
 function sourceFiles(): string[] {
-  return readdirSync(SRC_DIR)
+  // Recursive, so the tool modules in `src/tools/` are scanned too. A flat
+  // listing would silently stop looking at code that moved into a directory.
+  return (readdirSync(SRC_DIR, { recursive: true }) as string[])
     .filter((f) => f.endsWith('.ts'))
     .sort()
     .map((f) => join(SRC_DIR, f))
@@ -105,11 +107,12 @@ function scanAgentStatusWrites(source: string): string[] {
  * `AgentStatus` because two members — `pending` and `running` — are only ever
  * written at CONSTRUCTION: a `Task` arrives from a caller already carrying its
  * status, and the orchestrator's own `task.status` writes are both terminal.
- * Scoped to the two files that construct `Task` values; `orchestrator.ts`'s
+ * Scoped to the files that construct `Task` values (the `spawn` and `forecast`
+ * tools, in `src/tools/agents.ts` and `src/tools/insight.ts`, and the templates); `orchestrator.ts`'s
  * `status: 'pending'` is a `DAGNode` literal, which is why that file is not in
  * this list.
  */
-const TASK_LITERAL_FILES = new Set(['index.ts', 'templates.ts'])
+const TASK_LITERAL_FILES = new Set(['agents.ts', 'insight.ts', 'templates.ts'])
 
 function scanTaskStatusWrites(source: string, file: string): string[] {
   const found: string[] = []

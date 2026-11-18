@@ -4,6 +4,7 @@ import { mkdtempSync, existsSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { blankNonCode, readDashboardHtml, readSourceFile, interfaceFieldNames } from './helpers/dashboard-page'
+import { readToolSources, toolBlock } from './helpers/tool-sources'
 
 // `initialize()` loads the global config from `homedir()`, so it is sandboxed
 // here for the same reason `test/task-cost.test.ts` sandboxes it: a suite that
@@ -934,8 +935,7 @@ describe('team.addMember no longer takes a model it never used', () => {
     // And the tool's input schema, which used to REQUIRE `model` from the model
     // writing the call. Read out of the source because the tool is registered
     // through OpenCode's plugin API, which is not reachable from a unit test.
-    const source = stripComments(readFileSync(join(import.meta.dir, '..', 'src', 'index.ts'), 'utf-8'))
-    const block = source.slice(source.indexOf('name: "team.addMember"'))
+    const block = stripComments(toolBlock(readToolSources(), 'team.addMember'))
     const schema = block.slice(0, block.indexOf('execute:'))
     expect(schema).not.toContain('"model"')
     expect(schema).toContain('required: ["teamId", "role"]')

@@ -1733,10 +1733,22 @@ const CONTAINER_KEYS = new Set([
   'state.config.selfHealing',
 ])
 
+/**
+ * The orchestrator class and the types it publishes. `OrchestratorState` and
+ * `SessionStateView` live in `src/orchestrator-types.ts`, and the
+ * `this.emit(...)` sites in the class in `src/orchestrator.ts`; reading only one
+ * of the two would make the checks below find nothing and pass for the wrong
+ * reason.
+ */
+async function readOrchestratorSources(): Promise<string> {
+  const [orchestrator, types] = await Promise.all([readSourceFile('orchestrator'), readSourceFile('orchestrator-types')])
+  return `${orchestrator}\n${types}`
+}
+
 /** Every field name the server declares or emits, as `<prefix>.<field>` keys. */
 async function serverFieldKeys(): Promise<string[]> {
   const [orchestrator, types, config] = await Promise.all([
-    readSourceFile('orchestrator'),
+    readOrchestratorSources(),
     readSourceFile('types'),
     readSourceFile('config'),
   ])
@@ -1836,7 +1848,7 @@ describe('the enumeration of unread fields is itself checked', () => {
     // type, and an object literal written with SHORTHAND properties — which is
     // how `budget:alert` is emitted, and which a colon-requiring scanner reads
     // as an empty payload.
-    const orchestrator = await readSourceFile('orchestrator')
+    const orchestrator = await readOrchestratorSources()
     const types = await readSourceFile('types')
 
     expect(interfaceFieldNames(orchestrator, 'SessionStateView')).toEqual([
