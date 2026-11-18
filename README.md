@@ -621,6 +621,13 @@ nexus.goal.status()
 nexus.goal.complete()
 ```
 
+**The goal and open todos survive context compaction.** When OpenCode compacts a
+long session whose agent is a Nexus agent (`nexus-*`), Nexus asks the summariser
+to carry the active goal and the open todos (in progress and pending, up to 20)
+into the summary under a "Nexus state" heading. Sessions run by other agents are
+left alone, because the goal and todos are plugin-wide and would otherwise leak
+into unrelated conversations.
+
 ### LSP Integration
 
 None. Nexus does not touch OpenCode's LSP settings. Earlier versions inserted

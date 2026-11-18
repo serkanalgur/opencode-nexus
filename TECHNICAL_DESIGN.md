@@ -601,6 +601,7 @@ by the class that implements them.
 | Skills | `loadNexusSkills()` / `registerNexusSkills()` / `retireInstalledSkills()` (`src/skills-install.ts`) | Registered once per plugin load via `ctx.skill.transform` |
 | `/nexus` commands | `NexusRpc` / `runNexusCommand()` (`src/rpc.ts`) | Plugin RPC for the TUI, plus a `nexus` command via `ctx.command.transform` |
 | Budget permission gate | `applyBudgetGate()` (`src/permission-gate.ts`) | `ctx.permission.hook("evaluate")`, registered once per load |
+| Compaction note | `buildCompactionNote()` / `applyCompactionNote()` (`src/compaction-note.ts`) | `ctx.session.hook("compaction")`, Nexus sessions only |
 | TUI commands | `src/tui.tsx` — `LOCAL_COMMANDS` routing | Separate TUI process; forwards unknown subcommands to the server |
 
 `ModuleRegistry` exists as the extension point for third-party modules, but no

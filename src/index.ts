@@ -16,6 +16,7 @@ import { keptModifiedWarning, loadNexusSkills, nexusSkillsDir, registerNexusSkil
 import type { Skill } from "@opencode/plugin"
 import { NexusRpc, runNexusCommand } from "./rpc"
 import { applyBudgetGate } from "./permission-gate"
+import { applyCompactionNote, buildCompactionNote } from "./compaction-note"
 import { describeDashboardStart, startDashboardServer } from "./dashboard"
 import {
   formatModelPrice,
@@ -2658,6 +2659,20 @@ export default Plugin.define({
       })
     } catch (error: unknown) {
       console.warn(`[nexus] could not register the budget permission gate; only spawns through Nexus will respect the hard budget limit: ${error instanceof Error ? error.message : String(error)}`)
+    }
+
+    // Carry the active goal and open todos through context compaction, for
+    // Nexus sessions only. See `src/compaction-note.ts`.
+    try {
+      await ctx.session.hook("compaction", (event) => {
+        const note = buildCompactionNote({
+          activeGoal: goalManager.getActive(),
+          openTodos: [...orchestrator.todoEnforcer.getInProgress(), ...orchestrator.todoEnforcer.getPending()],
+        })
+        applyCompactionNote(event as unknown as Parameters<typeof applyCompactionNote>[0], note)
+      })
+    } catch (error: unknown) {
+      console.warn(`[nexus] could not register the compaction hook; a compacted session may lose the Nexus goal and todos: ${error instanceof Error ? error.message : String(error)}`)
     }
 
     // Watch the two config files the config manager reads and reload on change.
