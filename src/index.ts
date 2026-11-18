@@ -16,6 +16,7 @@ import { keptModifiedWarning, loadNexusSkills, nexusSkillsDir, registerNexusSkil
 import type { Skill } from "@opencode/plugin"
 import { NexusRpc, runNexusCommand } from "./rpc"
 import { applyBudgetGate } from "./permission-gate"
+import { createCoalescingWriter, toStorageJson } from "./state-persister"
 import { applyCompactionNote, buildCompactionNote } from "./compaction-note"
 import { describeDashboardStart, startDashboardServer } from "./dashboard"
 import {
@@ -1018,30 +1019,19 @@ export default Plugin.define({
       console.warn(`[nexus] could not register the Nexus skills: ${error instanceof Error ? error.message : String(error)}`)
     }
 
-    // Initialize orchestrator with OpenCode context for real session API access
-    await orchestrator.initialize(ctx, () => {
-      // State change callback - persist to storage for TUI consumption
-      const state = orchestrator.getState()
-      ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(state))).catch(() => {}
-      )
-      // Also persist sidebar-specific state for the TUI plugin
-      const sidebarState = {
-        agents: state.agents,
-        totalCost: state.totalSpent,
-        budgetRemaining: state.budgetRemaining
-      }
-      ctx.storage.set("nexus-sidebar-state", JSON.parse(JSON.stringify(sidebarState))).catch(() => {})
-    })
+    // The one writer of the persisted orchestrator snapshot. See
+    // `src/state-persister.ts` for why every write goes through it, and why the
+    // `nexus-sidebar-state` key this used to write as well is gone.
+    const persistState = createCoalescingWriter(
+      () => ctx.storage.set("orchestrator-state", toStorageJson(orchestrator.getState()) as any),
+      (error) => console.warn(`[nexus] could not persist orchestrator state: ${error instanceof Error ? error.message : String(error)}`),
+    )
 
-    // Persist initial state
-    await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(orchestrator.getState())))
-    // Persist initial sidebar state for TUI plugin
-    const initialState = orchestrator.getState()
-    await ctx.storage.set("nexus-sidebar-state", JSON.parse(JSON.stringify({
-      agents: initialState.agents,
-      totalCost: initialState.totalSpent,
-      budgetRemaining: initialState.budgetRemaining
-    })))
+    // Initialize orchestrator with OpenCode context for real session API access.
+    // The state-change callback is already debounced by the orchestrator.
+    await orchestrator.initialize(ctx, () => { void persistState() })
+
+    await persistState()
 
     /**
      * Create a child session and make sure the task reaches it exactly once.
@@ -1109,8 +1099,6 @@ export default Plugin.define({
         execute: async (input: unknown) => {
           const { detailed } = input as { detailed?: boolean }
           const status = orchestrator.getStatus(detailed)
-          // Persist after reading
-          await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(orchestrator.getState())))
           return { content: status }
         }
       })
@@ -1171,7 +1159,6 @@ export default Plugin.define({
         options: { codemode: true },
         execute: async () => {
           const state = orchestrator.getState()
-          await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(state)))
           return { content: JSON.stringify(state, null, 2) }
         }
       })
@@ -1483,7 +1470,7 @@ export default Plugin.define({
                   const partialText = lastAssistantText(messages)
                   if (partialText) {
                     if (pollDied) orchestrator.settleAgent(agent.id, 'completed')
-                    await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(orchestrator.getState())))
+                    await persistState()
                     const taskPreview = task.length > 80 ? task.substring(0, 77) + '...' : task
                     return {
                       content: [
@@ -1518,7 +1505,7 @@ export default Plugin.define({
                 const result = lastAssistantText(messages) || 'Task completed (no output captured)'
 
                 orchestrator.settleAgent(agent.id, 'completed')
-                await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(orchestrator.getState())))
+                await persistState()
 
                 const taskPreview = task.length > 80 ? task.substring(0, 77) + '...' : task
                 return {
@@ -1534,7 +1521,7 @@ export default Plugin.define({
               } catch {
                 // Context read failed after successful wait
                 orchestrator.settleAgent(agent.id, 'completed')
-                await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(orchestrator.getState())))
+                await persistState()
                 return {
                   content: [
                     `${agent.name}`,
@@ -1569,7 +1556,7 @@ export default Plugin.define({
 
             const modelSelection = orchestrator.selectModel(role, complexity)
 
-            await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(orchestrator.getState())))
+            await persistState()
             const taskPreview = task.length > 80 ? task.substring(0, 77) + '...' : task
             const output = [
               `${agent.name}`,
@@ -1641,7 +1628,7 @@ export default Plugin.define({
               if (outcome === 'completed') orchestrator.settleAgent(agent.id, 'completed')
               else agent.status = 'working'
               orchestrator.notifyStateChange()
-              await ctx.storage.set("orchestrator-state", JSON.parse(JSON.stringify(orchestrator.getState())))
+              await persistState()
 
               const statusIcon = outcome === 'timeout' ? '⏱️' : '✅'
               return {

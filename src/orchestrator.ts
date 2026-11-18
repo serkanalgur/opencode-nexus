@@ -3813,7 +3813,7 @@ export class NexusOrchestrator {
       // this — SessionUpdateInput is exactly { sessionID, title?, permissions? },
       // so `metadata` would be silently dropped. The equivalent data (role,
       // model, sessionID) lives on the Agent record, which is persisted to
-      // ctx.storage as `orchestrator-state` / `nexus-sidebar-state`.
+      // ctx.storage as `orchestrator-state`.
       // `model` is the STRUCTURED form, and it must carry the variant. The
       // host's `SessionCreateInput.model` is `{ id, providerID, variant? }`, so
       // omitting it meant a `p/m#high` reference arrived as the id `"m#high"` —

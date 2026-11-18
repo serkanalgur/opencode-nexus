@@ -489,13 +489,13 @@ describe('a spawn tool that gives up (issue #100)', () => {
   it('settles when the spawn tool fails AFTER the spawn, not only on a dead poll', async () => {
     // The other half of the same leak, on a different exit. A rejected `wait`
     // is caught by the tool's own partial-result branch; a throw from anything
-    // after that — a failing `storage.set` here, a throw from a read — reaches
-    // the tool's OUTER `catch`, which used to return "Failed to spawn agent"
-    // with the row still at `working`. Two distinct exits, one invariant, so
-    // both are driven.
+    // outside it reaches the tool's OUTER `catch`, which used to return "Failed
+    // to spawn agent" with the row still at `working`. Two distinct exits, one
+    // invariant, so both are driven. (This used a failing `storage.set` as the
+    // throw; storage failures no longer throw, see the next test, so a
+    // synchronous throw from `session.wait` stands in for it.)
     const { ctx, tools } = await bootPlugin({ withSubagentTool: true })
-    const healthySet = ctx.storage.set
-    ctx.storage.set = mock(() => Promise.reject(new Error('storage is down')))
+    ctx.session.wait = mock(() => { throw new Error('wait is down') })
 
     const result = await tools.get('spawn').execute(
       { role: 'explorer', task: 'Find the leak', model: 'opencode/test-model', wait: true, timeout: 5000 },
@@ -503,13 +503,34 @@ describe('a spawn tool that gives up (issue #100)', () => {
     )
 
     expect(result.content).toContain('Failed to spawn agent')
-    // Restored before reading: the `dashboard` tool persists the state it
-    // returns through the same `storage.set`, and a read that fails is not a
-    // measurement.
-    ctx.storage.set = healthySet
     const s = await state(tools)
     expect(s.agents[0].status).not.toBe('working')
     expect(s.sessions[0].state).not.toBe('running')
+  })
+
+  it('does not fail a spawn because storage is down, and says storage failed', async () => {
+    // Persisting the snapshot is bookkeeping. The spawn already happened, so a
+    // storage failure must not turn it into "Failed to spawn agent", and it
+    // must not vanish either: it is reported on stderr.
+    const { ctx, tools } = await bootPlugin({ withSubagentTool: true })
+    ctx.storage.set = mock(() => Promise.reject(new Error('storage is down')))
+    const original = console.warn
+    const warnings: string[] = []
+    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')) }
+    let result: any
+    try {
+      result = await tools.get('spawn').execute(
+        { role: 'explorer', task: 'Find the leak', model: 'opencode/test-model', wait: true, timeout: 5000 },
+        { sessionID: 'ses_parent', agent: 'nexus-orchestrator', messageID: 'msg_1', id: 'call_1' },
+      )
+    } finally {
+      console.warn = original
+    }
+
+    expect(result.content).not.toContain('Failed to spawn agent')
+    expect(warnings.some((w) => w.includes('could not persist orchestrator state: storage is down'))).toBe(true)
+    const s = await state(tools)
+    expect(s.agents[0].status).not.toBe('working')
   })
 
   it('settles a dead poll as completed when the session did produce output', async () => {
