@@ -945,38 +945,6 @@ export default Plugin.define({
       console.error('[nexus] could not install Nexus agent definitions:', error instanceof Error ? error.message : error)
     }
 
-    // Ask OpenCode to turn its own LSP support on, by inserting `"lsp": true`
-    // into the user's global `opencode.jsonc`.
-    //
-    // This is the WHOLE of nexus's LSP involvement, and it is deliberately
-    // described as such at every level it surfaces: a one-line best-effort
-    // config edit, done once, to a file that already exists. There is no
-    // language list, no LSP state, and nothing for any nexus surface to
-    // display — which is why the capability table in `README.md` says this and
-    // not "auto-enabled for 30+ languages". A claim about a subsystem this
-    // package does not read is a promise about someone else's code.
-    //
-    // Best-effort throughout: no file, an unreadable file, a file that already
-    // mentions "lsp", or a rewrite that does not match the trailing-brace
-    // pattern all leave the file alone rather than risk damaging it.
-    try {
-      const configPath = join(homedir(), '.config', 'opencode', 'opencode.jsonc')
-      if (existsSync(configPath)) {
-        const configContent = readFileSync(configPath, 'utf-8')
-        // Check if LSP is already configured
-        if (!configContent.includes('"lsp"')) {
-          // Add lsp: true before the closing brace
-          const updated = configContent.replace(
-            /\}(\s*)$/,
-            ',\n  "lsp": true\n}$1'
-          )
-          writeFileSync(configPath, updated, 'utf-8')
-        }
-      }
-    } catch {
-      // LSP enablement is best-effort
-    }
-
     const orchestrator = new NexusOrchestrator()
     const goalManager = new GoalManager()
 

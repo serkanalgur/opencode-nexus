@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterAll, mock } from 'bun:test'
-import { mkdtempSync, existsSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import * as realOs from 'node:os'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 // The plugin writes its generated agent files into homedir()/.config/opencode
 // and the config manager reads homedir()/.config/opencode/nexus.jsonc. Under
@@ -348,6 +348,20 @@ describe('nexus.spawn executor — single task delivery', () => {
 
     // The plugin must have written into the sandbox, never the real home
     expect(SANDBOX_HOME).not.toBe(REAL_HOME)
+  })
+
+  it('leaves the user\'s opencode.jsonc untouched on load', async () => {
+    // Setup used to insert `"lsp": true` with a regex anchored on the last `}`.
+    // A JSONC file whose last property has a trailing comma (legal JSONC) came
+    // out as `,\n,` and the user's main config no longer parsed.
+    const configPath = join(SANDBOX_HOME, '.config', 'opencode', 'opencode.jsonc')
+    mkdirSync(dirname(configPath), { recursive: true })
+    const original = '{\n  // user config\n  "theme": "dark",\n}\n'
+    writeFileSync(configPath, original, 'utf-8')
+
+    await bootPlugin({ withSubagentTool: true })
+
+    expect(readFileSync(configPath, 'utf-8')).toBe(original)
   })
 
   it('nexus.delegate does NOT re-prompt on the subagent tool path', async () => {

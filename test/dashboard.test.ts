@@ -149,17 +149,19 @@ describe('DashboardModule', () => {
       dashboard.start(14752, '127.0.0.1')
     })
 
-    it('should handle CORS preflight requests', async () => {
+    // The dashboard used to send `Access-Control-Allow-Origin: *`, which let
+    // any website read it. The full policy is in dashboard-origin.test.ts.
+    it('answers a same-origin preflight without granting CORS', async () => {
       const res = await fetch('http://127.0.0.1:14752/api/state', {
         method: 'OPTIONS'
       })
-      expect(res.status).toBe(200)
-      expect(res.headers.get('Access-Control-Allow-Origin')).toBe('*')
+      expect(res.status).toBe(204)
+      expect(res.headers.get('Access-Control-Allow-Origin')).toBeNull()
     })
 
-    it('should include CORS headers on responses', async () => {
+    it('sends no CORS headers on responses', async () => {
       const res = await fetch('http://127.0.0.1:14752/api/state')
-      expect(res.headers.get('Access-Control-Allow-Origin')).toBe('*')
+      expect(res.headers.get('Access-Control-Allow-Origin')).toBeNull()
     })
   })
 })

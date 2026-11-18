@@ -226,8 +226,8 @@ describe('the config panel is honestly read-only', () => {
     // The Apply button posted `{type:'config:update'}` and printed "Config
     // update sent to server". The socket handles only `ping` and `getState`,
     // so the button reported a success that could not happen. There is no auth
-    // story for writes and the socket is localhost with `CORS: *`, so no write
-    // path was added either — the control is gone, not re-pointed.
+    // story for writes (the server refuses other origins but authenticates no
+    // one), so no write path was added either — the control is gone, not re-pointed.
     const c = executableSource(script)
     expect(/config:update/.test(c)).toBe(false)
     expect(/config-apply/.test(html)).toBe(false)

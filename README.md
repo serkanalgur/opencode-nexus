@@ -41,7 +41,6 @@ OpenCode Nexus is an agent orchestration plugin for [OpenCode V2](https://openco
 | **Persistent Memory** | SQLite store, three tools, and automatic retrieval of notes keyed to a task's files. **Nothing is ever written automatically** — a miss injects silence, never a guess |
 | **Learning Module** | Pattern recognition from failures, confidence scoring |
 | **JSONC Config** | Read/write project and global config files with comments |
-| **OpenCode LSP opt-in** | On startup, inserts `"lsp": true` into your global `opencode.jsonc` if it isn't already there. That is the whole of it — Nexus does not read LSP state, manage servers, or report anything about them |
 | **AST-Grep** | Pattern-aware code search |
 | **Security Scanning** | Regex detection of hardcoded secrets and known-dangerous constructs |
 | **Slash Commands** | `/nexus`, `/nexus-dashboard`, `/nexus-web`, `/nexus-overview`, `/nexus-config`, `/nexus-model`, `/nexus-status`, `/nexus-reset` |
@@ -74,7 +73,7 @@ On every plugin load, Nexus:
 - Writes `nexus-orchestrator` to `~/.config/opencode/agents/nexus-orchestrator.md`
 - Writes the seven subagent files: `nexus-coder`, `nexus-explorer`, `nexus-reviewer`, `nexus-tester`, `nexus-architect`, `nexus-documenter`, `nexus-designer`
 - Reads role→model mappings from `.opencode/nexus.jsonc` (and the global config) and resolves them per spawn; the generated agent files carry no model pin
-- Best-effort: if `~/.config/opencode/opencode.jsonc` already exists and does not already mention `"lsp"`, inserts `"lsp": true`; silently does nothing if the file is absent
+- Does not edit your `opencode.jsonc`
 
 **The agent files are rewritten on every load, not created once.** Any hand-edit
 to them is lost the next time OpenCode starts. Edit `nexus.jsonc` for models and
@@ -495,8 +494,8 @@ shows how old the last snapshot is, and labels it stale past 15 seconds.
   as in force, plus a `read-only` JSON viewer. The write path was deliberately
   removed rather than left broken: it used to post a `config:update` message
   that the server does not handle, so the Apply button reported success and
-  nothing happened. There is no auth story for writes and the socket is a
-  localhost server answering with `CORS: *`, so no write path was added to
+  nothing happened. There is no auth story for writes (the server only refuses other
+  origins; it does not authenticate), so no write path was added to
   replace it — edit `nexus.jsonc` instead. **Models per Role** is grouped by
   provider with the roles nested beneath, every role still shown exactly once;
   the role→model rows are the panel's own key/value grid, so a provider is a
@@ -602,11 +601,11 @@ nexus.goal.complete()
 
 ### LSP Integration
 
-None, beyond one line. On plugin load Nexus inserts `"lsp": true` into
-`~/.config/opencode/opencode.jsonc` — but only if that file already exists and
-does not already contain the string `"lsp"`. The edit is best-effort and its
-failure is silent. Nexus has no language list, no LSP state, and no surface that
-reports anything about LSP.
+None. Nexus does not touch OpenCode's LSP settings. Earlier versions inserted
+`"lsp": true` into `~/.config/opencode/opencode.jsonc` on every load; that edit
+was removed because it changed your configuration without asking and could
+corrupt a JSONC file whose last property had a trailing comma. Enable LSP in
+your own `opencode.jsonc` if you want it.
 
 ### AST-Grep
 
@@ -1366,7 +1365,7 @@ nexus.template(name="documentation") — Documentation update
 │  ┌────────────────────────────────────────────────────┐     │
 │  │              SERVER PLUGIN (index.ts)                │     │
 │  │  • 40+ tool registrations                            │     │
-│  │  • Auto-creates agent files; opts OpenCode into LSP  │     │
+│  │  • Auto-creates agent files                          │     │
 │  │  • Config file loading and creation                 │     │
 │  └────────────────────────────────────────────────────┘     │
 │                                                              │

@@ -296,8 +296,14 @@ itself.
 
 #### HTTP routes
 
-All responses carry `Access-Control-Allow-Origin: *`. `OPTIONS` on any path
-returns the CORS preflight response with no body.
+No response carries CORS headers: the dashboard page is same-origin and needs
+none. A request whose `Origin` is not the dashboard's own (`http://<Host>`) is
+refused with `403`, on HTTP and on the `/ws/events` upgrade alike. A request with
+no `Origin` (curl, the TUI's health probe) is allowed. When the server is bound
+to a specific host, the `Host` header must also be a loopback name
+(`127.0.0.1`, `localhost`, `[::1]`) or the bound name, which blocks DNS
+rebinding; on a wildcard bind (`0.0.0.0`, `::`) only the `Origin` rule applies.
+`OPTIONS` returns `204` with no body and grants nothing.
 
 | Route | Method | Response |
 |-------|--------|----------|
@@ -407,8 +413,8 @@ else is ignored:
 
 **There is no write path.** In particular there is no `config:update`: the
 dashboard's config panel once posted one, the button reported success, and
-nothing happened. There is no authentication and the server answers with
-`CORS: *`, so no write path was added to replace it. Change `nexus.jsonc` and
+nothing happened. There is no authentication (the server refuses other origins but does
+not authenticate callers), so no write path was added to replace it. Change `nexus.jsonc` and
 let the config watcher reload it.
 
 ---
