@@ -84,6 +84,12 @@ jobs:
       - name: Build
         run: bun run build
 
+      - name: Check published entry points exist
+        run: |
+          for f in dist/index.js dist/index.d.ts dist/tui.js dist/tui.d.ts; do
+            test -f "$f" || { echo "missing $f"; exit 1; }
+          done
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:

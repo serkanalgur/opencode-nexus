@@ -24,8 +24,14 @@
   "author": "Serkan Algur",
   "type": "module",
   "exports": {
-    ".": "./dist/index.js",
-    "./tui": "./dist/tui.js"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./tui": {
+      "types": "./dist/tui.d.ts",
+      "import": "./dist/tui.js"
+    }
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -40,9 +46,10 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "bun run build:server && bun run build:tui",
+    "build": "bun run build:server && bun run build:tui && bun run build:types",
     "build:server": "bun build ./src/index.ts --outdir ./dist --target node",
     "build:tui": "bun build ./src/tui.tsx --outdir ./dist --target bun --external @opentui/solid --external solid-js --external @opentui/core",
+    "build:types": "tsc -p tsconfig.build.json",
     "dev": "bun run --watch src/index.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
