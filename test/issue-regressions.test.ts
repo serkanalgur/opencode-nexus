@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { blankNonCode, matchBrace } from './helpers/dashboard-page'
+import { readToolSources } from './helpers/tool-sources'
 
 /**
  * Regressions for three fixes, locked in one file.
@@ -53,14 +54,15 @@ function rel(file: string): string {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Every tool `src/index.ts` registers, as the names OpenCode will see.
+ * Every tool the plugin registers (`src/index.ts` and `src/tools/`), as the
+ * names OpenCode will see.
  *
  * The namespace comes from the `editor.namespace({ … })` call rather than being
  * assumed, so a second namespace added later is picked up instead of being
  * silently merged into `nexus` and compared against the wrong README rows.
  */
 function registeredTools(): string[] {
-  const raw = readFileSync(join(SRC, 'index.ts'), 'utf-8')
+  const raw = readToolSources()
   const code = blankNonCode(raw, true)
   const full: string[] = []
 

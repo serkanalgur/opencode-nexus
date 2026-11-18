@@ -13,6 +13,7 @@ import {
   isAutoInjectableKey,
 } from '../src/memory-recall'
 import type { MemoryEntry, MemoryScope } from '../src/types'
+import { readToolSources, toolBlock } from './helpers/tool-sources'
 
 /**
  * What the three memory tools SAY, because that is the part a user reads.
@@ -305,19 +306,15 @@ describe('the scopes an agent may write, and the ones it may not', () => {
 
   it('the tool enum offers project and temp only', () => {
     // Pinned against the schema as the tool declares it, not a copy of it: read
-    // out of `src/index.ts` so a widened enum fails here.
-    const { readFileSync } = require('node:fs') as typeof import('node:fs')
-    const source = readFileSync(join(import.meta.dir, '..', 'src', 'index.ts'), 'utf8')
-    const setBlock = source.slice(source.indexOf('name: "memory.set"'), source.indexOf('name: "memory.search"'))
+    // out of the tool sources so a widened enum fails here.
+    const setBlock = toolBlock(readToolSources(), 'memory.set')
     expect(setBlock).toContain('enum: ["project", "temp"]')
     expect(setBlock).not.toContain('"session"')
     expect(setBlock).not.toContain('"learning"')
   })
 
   it('the list enum offers session, because READING internal context is allowed', () => {
-    const { readFileSync } = require('node:fs') as typeof import('node:fs')
-    const source = readFileSync(join(import.meta.dir, '..', 'src', 'index.ts'), 'utf8')
-    const listBlock = source.slice(source.indexOf('name: "memory.list"'), source.indexOf('name: "roles.list"'))
+    const listBlock = toolBlock(readToolSources(), 'memory.list')
     expect(listBlock).toContain('enum: ["project", "session", "temp"]')
     // `learning` is absent even for reading: it is not a note store at all.
     expect(listBlock).not.toContain('"learning"')
