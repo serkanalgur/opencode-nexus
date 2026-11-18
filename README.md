@@ -409,6 +409,14 @@ set `hardLimit: true` in `nexus.jsonc`, that advice was wrong** — the key ther
 is read by nothing, and Nexus now says so on load rather than ignoring it in
 silence.
 
+**Once the hard limit trips, it also holds outside Nexus's own spawn path.** The
+orchestrator agent is allowed to start `nexus-*` agents with OpenCode's built-in
+`subagent` tool, which never asks Nexus about the budget. Nexus therefore also
+hooks OpenCode's permission check: after the limit has tripped, any request to
+start a `nexus-*` agent is denied with a message saying why. Other agents and
+other actions are unaffected, and your own deny rules are checked by OpenCode
+before this hook runs, so it can only make a request stricter.
+
 There is no per-agent ceiling. A `maxCostPerAgent` key used to sit here, in all
 four presets and in the dashboard, where the page scaled every agent's cost bar
 by it and captioned the result "of $N per-agent ceiling · OVER CEILING" — with
@@ -612,6 +620,13 @@ nexus.goal.set(description="Build complete auth system")
 nexus.goal.status()
 nexus.goal.complete()
 ```
+
+**The goal and open todos survive context compaction.** When OpenCode compacts a
+long session whose agent is a Nexus agent (`nexus-*`), Nexus asks the summariser
+to carry the active goal and the open todos (in progress and pending, up to 20)
+into the summary under a "Nexus state" heading. Sessions run by other agents are
+left alone, because the goal and todos are plugin-wide and would otherwise leak
+into unrelated conversations.
 
 ### LSP Integration
 
