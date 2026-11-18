@@ -12,7 +12,8 @@ import { TEMPLATES, instantiateTemplate, listTemplates } from "./templates"
 import { GoalManager } from "./goal"
 import { TeamManager } from "./team"
 import { AstGrep } from "./astgrep"
-import { installNexusSkills, nexusSkillsDir, overwriteWarning } from "./skills-install"
+import { keptModifiedWarning, loadNexusSkills, nexusSkillsDir, registerNexusSkills, retireInstalledSkills } from "./skills-install"
+import type { Skill } from "@opencode/plugin"
 import { NexusRpc, runNexusCommand } from "./rpc"
 import { describeDashboardStart, startDashboardServer } from "./dashboard"
 import {
@@ -29,47 +30,35 @@ import { homedir } from "node:os"
 import { fileURLToPath } from "node:url"
 import type { CostProvenance } from "./types"
 import type { PerformanceScore } from "./performance"
-import type { SkillInstallResult } from "./skills-install"
+import type { SkillRetireResult, UnavailableSkill } from "./skills-install"
 
 /**
- * Report what the skills installer did, one line per outcome worth naming.
+ * Report the skill setup, one line per outcome the user needs to know about.
  *
- * The reporting home for this feature, and the ONLY one. `installNexusSkills`
- * used to print the overwrite warning itself while the `unavailable` case was
- * reported here from the returned results, so one feature had two output
- * sites: the prefix, the tone and the judgement about what is worth saying were
- * each maintained twice, and a test capturing `console.warn` around the
- * installer could not see half the feature. Both are now sibling arms of one
- * loop over one array, so they share the `[nexus] ` prefix and the moment.
+ * Extracted from `plugin.setup` so the message text and the silence on the
+ * quiet outcomes are assertable against real results without booting the
+ * plugin. Never throws: failing to report must not be a second way for skill
+ * setup to fail.
  *
- * EXTRACTED as a function rather than left inline in `plugin.setup` because
- * that is what makes it testable at all. The loop is three lines inside a
- * closure that boots an orchestrator, so an inline version could only be
- * covered by booting the whole plugin; this way the message text, the
- * per-file-not-summary shape and the silence on `created`/`unchanged` are all
- * assertable directly against a real `SkillInstallResult[]`.
+ * Two outcomes are reported:
+ * - a shipped skill that could not be read. That is the feature failing
+ *   silently otherwise, and `docs/COMPATIBILITY.md` claims skills are supported.
+ * - a global copy from an earlier version that was kept because it was edited.
+ *   It now overrides the shipped skill and no longer updates, which the user
+ *   should hear once rather than discover.
  *
- * Returns nothing and never throws: a failure to report a skill must not be a
- * second way for the install to fail. `console.warn` is not worth a guard here
- * — it does not throw — but the shape is the same best-effort one the
- * surrounding load code uses.
+ * `removed` and `absent` are silent: removing an unmodified copy loses nothing,
+ * and `absent` is the steady state after the first load of this version.
  */
-export function reportSkillInstalls(results: readonly SkillInstallResult[]): void {
-  for (const { name, path, action } of results) {
-    // A skill that did not ship is the whole feature failing silently, and this
-    // is the only in-process signal there is. Named and loud, because
-    // `docs/COMPATIBILITY.md` claims skills are supported.
-    if (action === 'unavailable') {
-      console.warn(`[nexus] Skill ${name} is not present in the installed package; skipping ${path}`)
-    } else if (action === 'updated') {
-      // The sibling arm. A user's edit may have just been discarded and they
-      // cannot act on it retroactively, so it is said out loud — but it is a
-      // warning and not an error, because the write is the specified policy and
-      // it succeeded. `created` and `unchanged` fall through silently: a first
-      // install loses nothing, and `unchanged` is the steady state on nearly
-      // every load, so warning there would fire almost every startup.
-      console.warn(overwriteWarning(name, path))
-    }
+export function reportSkillSetup(
+  unavailable: readonly UnavailableSkill[],
+  retired: readonly SkillRetireResult[],
+): void {
+  for (const { name, path, reason } of unavailable) {
+    console.warn(`[nexus] Skill ${name} ${reason}; it was not registered (${path})`)
+  }
+  for (const { name, path, action } of retired) {
+    if (action === 'kept-modified') console.warn(keptModifiedWarning(name, path))
   }
 }
 
@@ -996,21 +985,35 @@ export default Plugin.define({
       // layer that has broken something else to add guidance.
     }
 
-    // Install the `nexus-*` design skills into `~/.config/opencode/skills/`.
+    // The `nexus-*` design skills, registered with OpenCode rather than copied
+    // into `~/.config/opencode/skills`. See `src/skills-install.ts` for why, and
+    // for why a skill the user already has with the same id wins.
     //
-    // Same shape and same moment as the agent files above — on plugin load,
-    // best-effort, never able to break startup — but a different destination and
-    // a different trigger. These are compared by content and only written when
-    // they differ, so a load that changes nothing leaves the files, and their
-    // mtimes, alone. See `src/skills-install.ts` for why there is deliberately
-    // no override mechanism here: OpenCode's own skill precedence already lets a
-    // user's project `.opencode/skills` copy shadow this global one.
+    // Retiring the unmodified copies earlier versions installed comes first, so
+    // those copies are gone before the transform asks whether a skill with the
+    // same id exists. Both halves are best-effort: skills are guidance, and
+    // failing to set them up must never stop the orchestrator starting.
+    let shippedSkills: ReturnType<typeof loadNexusSkills>["skills"] = []
     try {
-      reportSkillInstalls(installNexusSkills(nexusSkillsDir(), homedir()))
-    } catch {
-      // Best-effort, like every other file this plugin writes on load. The
-      // skills are guidance; failing to install guidance must never be the
-      // reason the orchestrator does not start.
+      const retired = retireInstalledSkills(nexusSkillsDir(), homedir())
+      const loaded = loadNexusSkills(nexusSkillsDir())
+      shippedSkills = loaded.skills
+      reportSkillSetup(loaded.unavailable, retired)
+    } catch (error: unknown) {
+      console.warn(`[nexus] could not read the Nexus skills: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    try {
+      await ctx.skill.transform((editor) => {
+        registerNexusSkills(editor, shippedSkills, (skill) => ({
+          id: skill.id,
+          name: skill.name,
+          description: skill.description,
+          path: skill.path,
+          content: skill.content,
+        }) as unknown as Skill.Info)
+      })
+    } catch (error: unknown) {
+      console.warn(`[nexus] could not register the Nexus skills: ${error instanceof Error ? error.message : String(error)}`)
     }
 
     // Initialize orchestrator with OpenCode context for real session API access

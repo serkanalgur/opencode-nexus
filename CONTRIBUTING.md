@@ -82,7 +82,7 @@ opencode-nexus/
 │   │
 │   ├── model-ref.ts        # The single model-reference grammar (provider/model#variant)
 │   ├── model-groups.ts     # Provider grouping + price formatting for model lists
-│   ├── skills-install.ts   # Writes the bundled skills to ~/.config/opencode/skills
+│   ├── skills-install.ts   # Registers the bundled skills via ctx.skill.transform
 │   │
 │   ├── custom-roles.ts     # CustomRoleManager
 │   ├── todo.ts             # TodoEnforcer
@@ -94,7 +94,7 @@ opencode-nexus/
 │   ├── git-flow.ts         # Branch/commit convention detection
 │   └── astgrep.ts          # AstGrep wrapper
 │
-├── skills/                 # SKILL.md files written to ~/.config/opencode/skills.
+├── skills/                 # SKILL.md files registered with OpenCode on load.
 │   │                       # Must be listed in package.json "files" or it does not ship.
 │   ├── nexus-design-taste/ #     Convergence catalogue the designer draws on
 │   ├── nexus-interface-a11y/ #   WCAG figures with their SC and level

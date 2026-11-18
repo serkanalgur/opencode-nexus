@@ -12,7 +12,7 @@ Nexus is designed as an OpenCode plugin and does not directly run inside Claude 
 |---------|--------|-------|
 | Hooks | ✅ Supported | OpenCode plugin hooks work the same way |
 | Commands (slash) | ✅ Supported | Nexus registers `/nexus` commands in OpenCode TUI |
-| Skills | ✅ Supported | Nexus installs three design skills (`nexus-design-taste`, `nexus-interface-a11y`, `nexus-design-review`) to `~/.config/opencode/skills/` on plugin load — see Skills below |
+| Skills | ✅ Supported | Nexus registers three design skills (`nexus-design-taste`, `nexus-interface-a11y`, `nexus-design-review`) with `ctx.skill.transform` on plugin load — see Skills below |
 | MCP Servers | ✅ Supported | OpenCode supports MCP; Nexus tools register via plugin API |
 | Sub-agents | ⚠️ Partial | `nexus.spawn()` creates real OpenCode sessions, but only the `subagent`-tool path links them to a parent via `parentID` — see Sub-agents below |
 | Agent names | ⚠️ Partial | Nexus uses OpenCode agent types, not Claude Code agent names |
@@ -90,7 +90,7 @@ a model request.
 ### Skills
 Claude Code's skill format is a directory under `~/.claude/skills/<name>/` holding a `SKILL.md` with YAML frontmatter. OpenCode uses the same layout under `~/.config/opencode/skills/<name>/`, and the `name` and `description` frontmatter fields mean the same thing in both: `description` is the only part a model sees before deciding to load the skill.
 
-Nexus installs three skills of its own on every plugin load:
+Nexus registers three skills of its own on every plugin load:
 
 | Skill | Purpose |
 |-------|---------|
@@ -98,9 +98,9 @@ Nexus installs three skills of its own on every plugin load:
 | `nexus-interface-a11y` | WCAG 2.2 AA thresholds, cited by success criterion and level |
 | `nexus-design-review` | Auditing an existing interface; reports, does not edit |
 
-They are written by `installNexusSkills()` in `src/skills-install.ts`, called from the plugin's `setup()`. A file is written only when missing or when the shipped content differs from the on-disk content, so an unchanged load leaves mtimes alone; a skill whose `SKILL.md` is absent from the installed package is reported on stderr rather than failing silently. See the README for the `nexus-` prefix, the overwrite policy, and how to override.
+They are read from the package's own `skills/` directory by `loadNexusSkills()` in `src/skills-install.ts` and registered from the plugin's `setup()` with `ctx.skill.transform`; nothing is written to the home directory. A skill is added only when no skill with the same id exists, so a user's own copy wins. A skill whose `SKILL.md` is missing or has no description is reported on stderr rather than failing silently. See the README for the `nexus-` prefix, how to override, and how copies installed by earlier versions are cleaned up.
 
-**These are Nexus-authored skills, not Claude Code ones.** The wording this row previously carried — "Nexus agent prompts work as OpenCode skills" — was inaccurate on both sides. The generated `nexus-*.md` files under `~/.config/opencode/agents/` are *agents*, which carry a role, a model and a permission block, and OpenCode does not read them as skills; and the three skills above are new prose written for this package, containing no Claude Code material. What the row now claims is narrower and true: Nexus ships real `SKILL.md` files in the directory layout OpenCode reads.
+**These are Nexus-authored skills, not Claude Code ones.** The wording this row previously carried — "Nexus agent prompts work as OpenCode skills" — was inaccurate on both sides. The generated `nexus-*.md` files under `~/.config/opencode/agents/` are *agents*, which carry a role, a model and a permission block, and OpenCode does not read them as skills; and the three skills above are new prose written for this package, containing no Claude Code material. What the row now claims is narrower and true: Nexus ships real `SKILL.md` files and registers them with OpenCode.
 
 ### MCP Servers
 Nexus registers its tools via `ctx.tool.transform()` which is OpenCode's equivalent of MCP tool registration. The tools (`nexus.status`, `nexus.spawn`, `nexus.costs`, etc.) are available to any agent session.

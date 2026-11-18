@@ -598,7 +598,7 @@ by the class that implements them.
 | git-flow | `detectGitState()` / `resolveGitFlow()` / `checkGitFlow()` (`src/git-flow.ts`) | Stateless helpers |
 | Model groups & refs | `src/model-groups.ts`, `src/model-ref.ts` | Stateless helpers |
 | Config loading & hot-reload | `NexusConfigManager` (`src/config.ts`), `reloadConfigFromDisk()` | Reloaded on file change |
-| Skills install | `installNexusSkills()` (`src/skills-install.ts`) | On-demand |
+| Skills | `loadNexusSkills()` / `registerNexusSkills()` / `retireInstalledSkills()` (`src/skills-install.ts`) | Registered once per plugin load via `ctx.skill.transform` |
 | TUI commands | `src/tui.tsx` — `LOCAL_COMMANDS` routing | Separate TUI process; forwards unknown subcommands to the server |
 
 `ModuleRegistry` exists as the extension point for third-party modules, but no

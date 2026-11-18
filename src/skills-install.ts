@@ -1,48 +1,50 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs"
+import { readFileSync, existsSync, rmSync, readdirSync, rmdirSync } from "node:fs"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
 
 /**
- * Installs the `nexus-*` design skills into the user's global skills directory
- * on plugin load.
+ * The `nexus-*` design skills: read from the package's own `skills/` directory
+ * and registered with OpenCode through `ctx.skill.transform`.
  *
- * This is the skills counterpart to the agent files `src/index.ts` writes to
- * `~/.config/opencode/agents/`, and it deliberately is not a second copy of
- * that mechanism: it is a different destination, a different trigger (content
- * equality rather than a version number), and a testable pure-ish core.
+ * ## Why registered, not installed
  *
- * ## Why content equality and not a version marker
+ * Earlier versions copied each SKILL.md into the user's global
+ * `~/.config/opencode/skills/<name>/` on every load. That wrote into the user's
+ * home directory, left files behind after an uninstall, and needed a
+ * content-equality check and an overwrite warning to avoid churning mtimes and
+ * silently discarding edits. V2 lets a plugin contribute skills directly
+ * (`SkillEditor.add`), the same way core registers the skills it finds on disk,
+ * so nothing is written any more. `path` points at the SKILL.md inside the
+ * installed package, which is where it already lives.
  *
- * `src/index.ts` rewrites the agent files unconditionally on every load, which
- * is right for prose the plugin fully owns. Rewriting the same three skill
- * files on every single load would churn their mtimes forever, and an mtime is
- * something tools watch — an editor reloading a file the user never touched, a
- * file watcher firing, a `git status` on a home directory. So: write when the
- * file is missing, or when the bytes on disk differ from the bytes this
- * version ships. A release that edits a SKILL.md updates the installed copy;
- * a release that does not touch it leaves the file, and its mtime, alone.
+ * ## Precedence: a user's copy still wins
  *
- * ## Why there is no override mechanism here
+ * The README promises that a user's own `.opencode/skills/nexus-design-taste`
+ * overrides the shipped one. In core, `editor.add` is a plain map set, so
+ * whichever transform runs last wins, and the order between plugins is not
+ * something this package controls. So a Nexus skill is added only when no
+ * skill with that id exists yet (`registerNexusSkills`). A file skill's id is
+ * its directory name, which is why the `nexus-` prefix is load-bearing: a user
+ * copy with the same directory name shadows this one instead of appearing as a
+ * second, competing skill.
  *
- * OpenCode registers skill sources in precedence order — built-in, then
- * `.claude/skills` / `.agents/skills`, then `~/.config/opencode/skills`, then
- * project `.opencode/skills`, then explicit `skills` config entries — with
- * later sources winning. These files are written to the *global* tier, so a
- * user's own copy in project `.opencode/skills/nexus-design-taste/SKILL.md`
- * already shadows this one for that project. Adding config here to detect and
- * spare a modified global file would create a second source of truth for
- * precedence that OpenCode already owns, and the two would eventually
- * disagree. The escape hatch is documented in the README instead.
+ * ## Retiring the copies earlier versions installed
+ *
+ * The global copies those versions wrote would now count as "a user's copy" and
+ * shadow the registered skill forever. `retireInstalledSkills` removes them,
+ * but only when the bytes still match what this version ships. Every earlier
+ * load re-synced those files to the shipped text, so an exact match is a copy
+ * this plugin wrote and nobody has changed. A copy that differs was edited by
+ * the user; it is kept, and the caller says that it now overrides the shipped
+ * skill.
  */
 
 /**
- * The skills this package installs, as `~/.config/opencode/skills/<name>/SKILL.md`.
+ * The skills this package registers.
  *
  * The `nexus-` prefix is load-bearing rather than cosmetic: it is what makes a
- * user-supplied copy *shadow* this one (same identifier, higher-precedence
- * tier) instead of *colliding* with it as two unrelated skills that both
- * advertise themselves to the model. A user should be able to drop in their own
- * `nexus-design-taste` and have it take over cleanly.
+ * user-supplied copy *shadow* this one (same identifier) instead of *colliding*
+ * with it as two unrelated skills that both advertise themselves to the model.
  */
 export const NEXUS_SKILL_NAMES = [
   'nexus-design-taste',
@@ -53,20 +55,23 @@ export const NEXUS_SKILL_NAMES = [
 export type NexusSkillName = (typeof NEXUS_SKILL_NAMES)[number]
 
 /**
- * - `created` — nothing was there; the file is new.
- * - `updated` — the file existed with different bytes; this version's text won.
- * - `unchanged` — the file already matched byte for byte; nothing was written.
- * - `unavailable` — the shipped `SKILL.md` could not be read, so there was
- *   nothing to install. Surfaced rather than swallowed: a skill that fails to
- *   ship is the whole feature failing silently, and the only in-process signal
- *   available is this one.
+ * A shipped skill in the shape `SkillEditor.add` takes. Plain strings here; the
+ * caller brands them for the SDK, so this module has no runtime SDK import.
  */
-export type SkillInstallAction = 'created' | 'updated' | 'unchanged' | 'unavailable'
+export interface ShippedSkill {
+  readonly id: NexusSkillName
+  readonly name: string
+  readonly description: string
+  /** Absolute path of the SKILL.md inside the installed package. */
+  readonly path: string
+  /** The markdown body with the frontmatter removed, as core's own parser stores it. */
+  readonly content: string
+}
 
-export interface SkillInstallResult {
+export interface UnavailableSkill {
   readonly name: NexusSkillName
   readonly path: string
-  readonly action: SkillInstallAction
+  readonly reason: string
 }
 
 /**
@@ -83,108 +88,165 @@ export function nexusSkillsDir(): string {
 }
 
 /**
- * Where the skills land inside a home directory. Takes the home directory
- * rather than calling `homedir()` itself so that the whole installer is
- * testable against a temp directory with no environment mocking and no risk of
- * a test run writing to a real `~/.config/opencode/skills`.
+ * Where earlier versions installed the skills inside a home directory. Only
+ * `retireInstalledSkills` reads it now. Takes the home directory rather than
+ * calling `homedir()` so tests can point it at a temp directory.
  */
 export function nexusSkillsTargetDir(homeDir: string): string {
   return join(homeDir, '.config', 'opencode', 'skills')
 }
 
 /**
- * The warning for the one destructive thing this installer does.
+ * Split a SKILL.md into its frontmatter fields and body.
  *
- * REPORTED BY THE CALLER, not printed here. This file had two `console.warn`
- * call sites' worth of reporting in one and none in the other: the `unavailable`
- * case is reported by `src/index.ts` from the returned results, and the
- * overwrite was reported here. Two homes for one feature's output means the
- * prefix, the tone and the decision of what is worth saying are all maintained
- * twice, and a test that captures `console.warn` around the installer cannot
- * see the half that moved. Both are now sibling arms of the same loop over the
- * same `SkillInstallResult[]`, so `unavailable` and `updated` are reported by
- * the same code, with the same `[nexus] ` prefix, from the same place.
- *
- * The installer's own return value is unchanged, and the DECISION is unchanged
- * — `updated` was already a first-class result, which is all the caller needs.
- * What moved is only the printing.
- *
- * Fires only on `updated` — a file that existed and whose bytes differed from
- * what this version ships. Two neighbouring outcomes are deliberately silent:
- *
- * - `created` — nothing was lost. A missing file is the expected first run, and
- *   warning about a first install is noise that teaches the user to ignore
- *   warnings from this installer.
- * - `unchanged` — no write happened at all, so there is nothing to report. This
- *   is also the steady state on almost every load by design, so a warning here
- *   would fire on nearly every startup, which is exactly how a warning stops
- *   being read.
- *
- * ## Per-file, not one summary after the loop
- *
- * Each warning carries a different path, and a path is what the user has to act
- * on. A summary would still have to name all three files, so it saves only the
- * repeated sentence while making the output harder to scan — and a user who
- * only ever edits one of the three has to read past the other two either way.
- * Repetition here is bounded by real work: a load only warns for the skills
- * this release actually changed, which is typically one, and is three only on a
- * release that legitimately rewrote all three. The varying part (the path) is
- * placed immediately after the prefix so the three are distinguishable at a
- * glance rather than reading as one warning pasted three times.
+ * Handles the subset the shipped files use: a leading `---` block of
+ * `key: value` lines. Returns `null` when there is no frontmatter block, which
+ * the caller reports rather than registering a skill with no description (the
+ * description is the only part of a skill the model sees before loading it).
  */
-export function overwriteWarning(name: NexusSkillName, path: string): string {
-  return (
-    `[nexus] Overwrote ${path}: it is managed by this plugin and will be replaced ` +
-    `again on upgrade, so local edits made there will not survive. To customise this ` +
-    `skill, put your own copy at .opencode/skills/${name}/SKILL.md in your project ` +
-    `instead, which OpenCode's source precedence already prefers over the global one.`
-  )
+export function parseSkillMarkdown(text: string): { fields: Record<string, string>; body: string } | null {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text)
+  if (!match) return null
+  const fields: Record<string, string> = {}
+  for (const line of (match[1] ?? '').split(/\r?\n/)) {
+    const kv = /^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$/.exec(line)
+    if (kv?.[1]) fields[kv[1]] = (kv[2] ?? '').trim()
+  }
+  return { fields, body: text.slice(match[0].length) }
 }
 
 /**
- * Install every shipped skill under `homeDir`, overwriting any copy whose
- * content differs from this version's.
- *
- * Failures are per-skill, not per-run: a missing or unreadable SKILL.md is
- * reported as `unavailable` and the remaining skills still install. Aborting
- * all three because one file is absent would make a packaging mistake take down
- * two features that were fine.
+ * Read every shipped skill. Failures are per skill: a missing or malformed
+ * SKILL.md is reported as unavailable and the others still load, because a
+ * packaging mistake in one file should not take down the two that are fine.
  */
-export function installNexusSkills(
-  sourceDir: string,
-  homeDir: string,
-): SkillInstallResult[] {
-  const skillsRoot = nexusSkillsTargetDir(homeDir)
-  const results: SkillInstallResult[] = []
+export function loadNexusSkills(sourceDir: string): { skills: ShippedSkill[]; unavailable: UnavailableSkill[] } {
+  const skills: ShippedSkill[] = []
+  const unavailable: UnavailableSkill[] = []
 
   for (const name of NEXUS_SKILL_NAMES) {
-    const dir = join(skillsRoot, name)
-    const target = join(dir, 'SKILL.md')
-    let shipped: string
+    const path = join(sourceDir, name, 'SKILL.md')
+    let text: string
+    try {
+      text = readFileSync(path, 'utf-8')
+    } catch {
+      unavailable.push({ name, path, reason: 'is not present in the installed package' })
+      continue
+    }
+    const parsed = parseSkillMarkdown(text)
+    if (!parsed || !parsed.fields.description) {
+      unavailable.push({ name, path, reason: 'has no frontmatter description' })
+      continue
+    }
+    skills.push({
+      id: name,
+      name: parsed.fields.name || name,
+      description: parsed.fields.description,
+      path,
+      content: parsed.body,
+    })
+  }
 
+  return { skills, unavailable }
+}
+
+/** The two methods of OpenCode's `SkillEditor` this module uses. */
+export interface SkillRegistry<S> {
+  get(id: string): unknown
+  add(skill: S): void
+}
+
+/**
+ * - `registered` — no skill with this id existed, so the shipped one was added.
+ * - `shadowed` — a skill with this id already exists (a user's own copy), so
+ *   the shipped one was not added and the user's copy stays in force.
+ */
+export type SkillRegisterAction = 'registered' | 'shadowed'
+
+/**
+ * Add each shipped skill unless a skill with the same id is already registered.
+ * See the module comment for why an existing skill wins.
+ */
+export function registerNexusSkills<S>(
+  registry: SkillRegistry<S>,
+  skills: readonly ShippedSkill[],
+  toSkill: (skill: ShippedSkill) => S,
+): { name: NexusSkillName; action: SkillRegisterAction }[] {
+  return skills.map((skill) => {
+    if (registry.get(skill.id) !== undefined) return { name: skill.id, action: 'shadowed' as const }
+    registry.add(toSkill(skill))
+    return { name: skill.id, action: 'registered' as const }
+  })
+}
+
+/**
+ * - `removed` — an unmodified copy from an earlier version was deleted.
+ * - `kept-modified` — a copy exists with different bytes; it was left alone
+ *   because it was edited, and it now overrides the shipped skill.
+ * - `absent` — nothing was installed there.
+ */
+export type SkillRetireAction = 'removed' | 'kept-modified' | 'absent'
+
+export interface SkillRetireResult {
+  readonly name: NexusSkillName
+  readonly path: string
+  readonly action: SkillRetireAction
+}
+
+/**
+ * Remove the global copies earlier versions installed, when they are unchanged.
+ *
+ * Only `SKILL.md` is deleted, and its directory only when that leaves it empty,
+ * so anything else a user put in that directory survives. A skill this version
+ * cannot read is not touched: with nothing to compare against, the copy on disk
+ * cannot be shown to be ours.
+ */
+export function retireInstalledSkills(sourceDir: string, homeDir: string): SkillRetireResult[] {
+  const root = nexusSkillsTargetDir(homeDir)
+  const results: SkillRetireResult[] = []
+
+  for (const name of NEXUS_SKILL_NAMES) {
+    const dir = join(root, name)
+    const path = join(dir, 'SKILL.md')
+    if (!existsSync(path)) {
+      results.push({ name, path, action: 'absent' })
+      continue
+    }
+
+    let shipped: string
+    let installed: string
     try {
       shipped = readFileSync(join(sourceDir, name, 'SKILL.md'), 'utf-8')
+      installed = readFileSync(path, 'utf-8')
     } catch {
-      results.push({ name, path: target, action: 'unavailable' })
+      results.push({ name, path, action: 'kept-modified' })
       continue
     }
 
-    const alreadyMatches = existsSync(target) && readFileSync(target, 'utf-8') === shipped
-
-    if (alreadyMatches) {
-      results.push({ name, path: target, action: 'unchanged' })
+    if (installed !== shipped) {
+      results.push({ name, path, action: 'kept-modified' })
       continue
     }
 
-    const isNew = !existsSync(target)
-    mkdirSync(dir, { recursive: true })
-    writeFileSync(target, shipped, 'utf-8')
-    results.push({ name, path: target, action: isNew ? 'created' : 'updated' })
-    // Reported by the caller, from `action: 'updated'` — see `overwriteWarning`.
-    // The write above is still the specified policy and it still succeeded; the
-    // difference is only who says so, which is now the same code that reports a
-    // skill that did not ship.
+    rmSync(path)
+    if (readdirSync(dir).length === 0) rmdirSync(dir)
+    results.push({ name, path, action: 'removed' })
   }
 
   return results
+}
+
+/**
+ * The warning for a global copy that was kept because it was edited. It is not
+ * an error: the user's file is now the skill OpenCode uses, which may be what
+ * they want, but it no longer updates with the plugin, so they are told how to
+ * go back to the shipped version.
+ */
+export function keptModifiedWarning(name: NexusSkillName, path: string): string {
+  return (
+    `[nexus] Kept ${path}: it differs from the ${name} skill this version ships, so it ` +
+    `was left in place and overrides the built-in skill. Nexus no longer installs skills ` +
+    `into ~/.config/opencode/skills; delete this file to use the shipped version, or keep ` +
+    `it as your own copy (a project .opencode/skills/${name}/SKILL.md works the same way).`
+  )
 }
