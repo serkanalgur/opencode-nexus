@@ -67,6 +67,19 @@ Or manually add to `~/.config/opencode/opencode.jsonc`:
 }
 ```
 
+### Compatibility
+
+| | Supported | Built and tested against |
+|---|---|---|
+| OpenCode (`@opencode/plugin`) | V2, `>=2.0.18 <3` | 2.3.2 |
+| OpenTUI (`@opentui/core`, `@opentui/solid`), TUI plugin only | `>=0.8.4` | 0.8.4 |
+
+Nexus uses no API added after `@opencode/plugin` 2.0.18; the code typechecks
+against both 2.0.18 and 2.3.2. OpenCode supplies the plugin runtime itself, so
+`@opencode/plugin` is an *optional* peer dependency: it is declared for the
+version range and for the published type declarations, and it is not
+installed for you. OpenCode V1 is not supported.
+
 ### Auto-Setup
 
 On every plugin load, Nexus:
