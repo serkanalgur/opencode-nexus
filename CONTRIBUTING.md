@@ -62,7 +62,10 @@ opencode-nexus/
 │   │                       # (status, agents, memory, git, …). See "Adding a New Tool".
 │   ├── config-watch.ts     # Reload on nexus.jsonc changes
 │   ├── agent-files.ts      # Bundled agent definitions, written on load
-│   ├── orchestrator.ts     # Core: spawn/cost/escalation/lifecycle. ~4,200 lines.
+│   ├── orchestrator.ts     # Core: spawn/cost/escalation/lifecycle. ~4,800 lines.
+│   ├── orchestrator-types.ts   # Types the orchestrator publishes (OrchestratorState, …)
+│   ├── orchestrator-support.ts # Its constants and small helpers
+│   ├── session-text.ts     # Reading assistant text from session messages
 │   ├── types.ts            # Shared type definitions
 │   ├── tui.tsx             # TUI plugin (sidebar)
 │   │
