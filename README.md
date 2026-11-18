@@ -495,8 +495,8 @@ shows how old the last snapshot is, and labels it stale past 15 seconds.
   as in force, plus a `read-only` JSON viewer. The write path was deliberately
   removed rather than left broken: it used to post a `config:update` message
   that the server does not handle, so the Apply button reported success and
-  nothing happened. There is no auth story for writes and the socket is a
-  localhost server answering with `CORS: *`, so no write path was added to
+  nothing happened. There is no auth story for writes (the server only refuses other
+  origins; it does not authenticate), so no write path was added to
   replace it — edit `nexus.jsonc` instead. **Models per Role** is grouped by
   provider with the roles nested beneath, every role still shown exactly once;
   the role→model rows are the panel's own key/value grid, so a provider is a

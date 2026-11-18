@@ -132,9 +132,9 @@ describe('dashboard server/client contract', () => {
       expect(typeof report.budgetRemaining).toBe('number')
     })
 
-    it('keeps CORS headers on API responses', async () => {
+    it('sends no CORS headers on API responses (same-origin only)', async () => {
       const res = await fetch(`${BASE}/api/health`)
-      expect(res.headers.get('Access-Control-Allow-Origin')).toBe('*')
+      expect(res.headers.get('Access-Control-Allow-Origin')).toBeNull()
     })
   })
 

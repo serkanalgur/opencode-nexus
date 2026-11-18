@@ -10,29 +10,80 @@ import type { NexusOrchestrator } from "./orchestrator"
 // place that reconciles the two.
 import spaHtmlImport from "../dashboard/index.html" with { type: "text" }
 
-const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
+/**
+ * Host names that always mean "this machine". A request whose Host is one of
+ * these (or the name the server was bound to) can only come from a client that
+ * meant to reach the local dashboard.
+ */
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"])
+
+/** Binds that accept every interface, where the set of valid Host names is unknowable. */
+const WILDCARD_BINDS = new Set(["0.0.0.0", "::", "[::]", ""])
+
+function hostName(hostHeader: string): string {
+  // `[::1]:4747` → `[::1]`, `127.0.0.1:4747` → `127.0.0.1`, `localhost` → `localhost`.
+  if (hostHeader.startsWith("[")) {
+    const end = hostHeader.indexOf("]")
+    return end === -1 ? hostHeader : hostHeader.slice(0, end + 1)
+  }
+  const colon = hostHeader.lastIndexOf(":")
+  return colon === -1 ? hostHeader : hostHeader.slice(0, colon)
+}
+
+/**
+ * Whether a request may read the dashboard.
+ *
+ * The dashboard serves task text, session ids, config and spend, with no
+ * authentication. It used to answer every origin with
+ * `Access-Control-Allow-Origin: *` and upgrade any WebSocket, so any website
+ * open in the user's browser could read `/api/state` or subscribe to
+ * `/ws/events` on localhost. The SPA is same-origin and the TUI's health probe
+ * is not a browser, so neither needs CORS; it is gone, and this check is what
+ * replaces it.
+ *
+ * Two rules:
+ *   1. A request carrying `Origin` must come from the page this server served,
+ *      i.e. `Origin === http://<Host>`. Browsers always send `Origin` on a
+ *      cross-origin fetch and on every WebSocket handshake, so this is what
+ *      stops a foreign page. A request with no `Origin` (curl, the TUI probe)
+ *      is not a browser acting for another site and is allowed.
+ *   2. On a specific bind, `Host` must be a loopback name or the bound name.
+ *      Rule 1 alone does not stop DNS rebinding: there the attacker's domain
+ *      resolves to 127.0.0.1, and its Origin and Host agree with each other.
+ *      On a wildcard bind (`0.0.0.0`, `::`) the user asked to be reachable
+ *      under names this process cannot enumerate, so only rule 1 applies.
+ */
+export function isAllowedRequest(req: Request, boundHost: string): boolean {
+  const hostHeader = req.headers.get("host") ?? ""
+  const origin = req.headers.get("origin")
+
+  if (!WILDCARD_BINDS.has(boundHost)) {
+    const name = hostName(hostHeader).toLowerCase()
+    if (!LOOPBACK_HOSTS.has(name) && name !== boundHost.toLowerCase()) return false
+  }
+
+  if (origin === null) return true
+  return origin === `http://${hostHeader}`
+}
+
+function forbiddenResponse(): Response {
+  return new Response(
+    JSON.stringify({ error: "Forbidden: cross-origin access to the Nexus dashboard is not allowed" }),
+    { status: 403, headers: { "Content-Type": "application/json" } },
+  )
 }
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
-    headers: {
-      "Content-Type": "application/json",
-      ...CORS_HEADERS,
-    },
+    headers: { "Content-Type": "application/json" },
   })
 }
 
 function htmlResponse(html: string): Response {
   return new Response(html, {
     status: 200,
-    headers: {
-      "Content-Type": "text/html; charset=utf-8",
-      ...CORS_HEADERS,
-    },
+    headers: { "Content-Type": "text/html; charset=utf-8" },
   })
 }
 
@@ -123,9 +174,13 @@ export class DashboardModule {
         fetch(req, server) {
           const url = new URL(req.url)
 
-          // CORS preflight
+          // Before anything is served or upgraded. See `isAllowedRequest`.
+          if (!isAllowedRequest(req, host)) return forbiddenResponse()
+
+          // No CORS: a same-origin page never preflights, and a cross-origin
+          // one was refused above. Answer OPTIONS without granting anything.
           if (req.method === "OPTIONS") {
-            return new Response(null, { headers: CORS_HEADERS })
+            return new Response(null, { status: 204 })
           }
 
           // WebSocket upgrade
